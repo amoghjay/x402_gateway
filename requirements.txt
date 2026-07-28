@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+groq
+web3
+eth-account
+requests
+python-dotenv
