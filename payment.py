@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import secrets
 import time
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -48,47 +50,9 @@ GATEWAY_OPERATOR_ADDRESS = Account.from_key(GATEWAY_OPERATOR_KEY).address
 
 _w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
-ESCROW_ABI = [
-    {
-        "type": "function",
-        "name": "settle",
-        "stateMutability": "nonpayable",
-        "inputs": [
-            {
-                "name": "auth",
-                "type": "tuple",
-                "components": [
-                    {"name": "amount", "type": "uint256"},
-                    {"name": "nonce", "type": "uint256"},
-                    {"name": "deadline", "type": "uint256"},
-                ],
-            },
-            {"name": "signature", "type": "bytes"},
-        ],
-        "outputs": [],
-    },
-    {
-        "type": "function",
-        "name": "nextNonce",
-        "stateMutability": "view",
-        "inputs": [{"name": "", "type": "address"}],
-        "outputs": [{"type": "uint256"}],
-    },
-    {
-        "type": "function",
-        "name": "balances",
-        "stateMutability": "view",
-        "inputs": [{"name": "", "type": "address"}],
-        "outputs": [{"type": "uint256"}],
-    },
-    {
-        "type": "function",
-        "name": "deposit",
-        "stateMutability": "nonpayable",
-        "inputs": [{"name": "amount", "type": "uint256"}],
-        "outputs": [],
-    },
-]
+# Load the ABI from Foundry's artifact so it can't drift from the deployed contract.
+_ESCROW_ARTIFACT = Path(__file__).parent / "contracts" / "out" / "InferenceEscrow.sol" / "InferenceEscrow.json"
+ESCROW_ABI = json.loads(_ESCROW_ARTIFACT.read_text())["abi"]
 _escrow = _w3.eth.contract(address=Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), abi=ESCROW_ABI)
 
 _ERC20_ABI = [
@@ -223,11 +187,8 @@ def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str,
     signable = encode_typed_data(domain_data=domain, message_types=types, message_data=message)
     signed = account.sign_message(signable)
 
-    sig = bytes(signed.signature)
-    if sig[64] < 27:
-        sig = sig[:64] + bytes([sig[64] + 27])
-
-    signature_hex = "0x" + sig.hex()
+    # hexbytes .hex() is not 0x-prefixed on this version.
+    signature_hex = "0x" + signed.signature.hex()
     authorization = {
         "permitted": {"token": SBC_CONTRACT_ADDRESS, "amount": str(amount)},
         "from": account.address,
@@ -239,9 +200,11 @@ def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str,
     return signature_hex, authorization
 
 
-def _build_facilitator_request(signature: str, authorization: dict, amount: str) -> dict:
-    """Shared body shape for both /verify and /settle."""
-    requirements = build_payment_requirements(amount)
+def _build_facilitator_request(signature: str, authorization: dict) -> dict:
+    """Shared body shape for both /verify and /settle. `paymentRequirements` takes
+    no caller-supplied amount by design — it must come from our own config, never
+    be echoed back from the client's payload. See REPORT.md §10."""
+    requirements = build_payment_requirements()
     payment_payload = {
         "x402Version": 2,
         "resource": {
@@ -262,21 +225,21 @@ def _build_facilitator_request(signature: str, authorization: dict, amount: str)
     }
 
 
-def verify_payment(signature: str, authorization: dict, amount: str) -> dict:
+def verify_payment(signature: str, authorization: dict) -> dict:
     """POST to the facilitator's /verify. Validity is signaled by `isValid` in
     the response BODY, not by HTTP status — a bad signature still returns 200."""
-    body = _build_facilitator_request(signature, authorization, amount)
+    body = _build_facilitator_request(signature, authorization)
     resp = requests.post(f"{FACILITATOR_URL}/verify", json=body, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
 
-def settle_payment(signature: str, authorization: dict, amount: str) -> dict:
+def settle_payment(signature: str, authorization: dict) -> dict:
     """POST to the facilitator's /settle. On success, `transaction` is the
     on-chain settlement tx hash. A replayed payload returns the SAME cached
     tx hash rather than settling again — the facilitator is idempotent, so
     the gateway's own replay guard (not this call) is what must catch reuse."""
-    body = _build_facilitator_request(signature, authorization, amount)
+    body = _build_facilitator_request(signature, authorization)
     resp = requests.post(f"{FACILITATOR_URL}/settle", json=body, timeout=10)
     resp.raise_for_status()
     return resp.json()
@@ -331,11 +294,7 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
     signable = encode_typed_data(domain_data=domain, message_types=types, message_data=message)
     signed = account.sign_message(signable)
 
-    sig = bytes(signed.signature)
-    if sig[64] < 27:
-        sig = sig[:64] + bytes([sig[64] + 27])
-
-    signature_hex = "0x" + sig.hex()
+    signature_hex = "0x" + signed.signature.hex()
     authorization = {
         "amount": str(amount),
         "nonce": str(nonce),
@@ -363,16 +322,5 @@ def settle_escrow_payment(signature: str, authorization: dict) -> dict:
     except ContractLogicError as exc:
         return {"success": False, "error": _decode_revert_reason(exc)}
 
-    tx = fn.build_transaction(
-        {
-            "from": account.address,
-            "chainId": CHAIN_ID,
-            "nonce": _w3.eth.get_transaction_count(account.address, "pending"),
-            "gas": 300_000,
-            "gasPrice": _w3.eth.gas_price,
-        }
-    )
-    signed_tx = account.sign_transaction(tx)
-    tx_hash = _w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    receipt = _w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-    return {"success": receipt.status == 1, "transaction": Web3.to_hex(tx_hash)}
+    receipt = _send(account, fn)
+    return {"success": receipt.status == 1, "transaction": Web3.to_hex(receipt.transactionHash)}

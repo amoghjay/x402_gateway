@@ -226,7 +226,96 @@ Every tx hash above resolves at `https://testnet.radiustech.xyz/tx/<hash>`.
   requests), so the gateway's own bookkeeping is what's actually observable. Path
   B's contract enforces it itself, on-chain, because nothing else does.
 
-## 10. Limitations / honest scope notes
+## 10. A real vulnerability we found in our own gateway, and fixed
+
+Everything in §9 is about defending the *payer*. Auditing the code from the
+*server's* side turned up a live underpayment hole that both paths shared, which
+we exploited on-chain before fixing. It is the most instructive finding in the
+project, so it is documented rather than quietly patched.
+
+### The bug
+
+The gateway advertised a price of `PRICE_BASE_UNITS` (1000) in its 402 response
+and then never checked that the payment matched it. Grepping the pre-fix code,
+`PRICE_BASE_UNITS` appeared in exactly three places, all of them *advertisement*
+— it was never once on either side of a comparison.
+
+Nothing downstream could catch this for us:
+
+- **The signature can't.** It covers `amount`, so the amount cannot be tampered
+  with in transit — but that only proves *the payer really did agree to this
+  number*. Authenticity is not correctness. A customer can genuinely sign a
+  cheque for $0.01; catching that is the cashier's job, not the signature's.
+- **The contract can't.** `require(balances[payer] >= auth.amount)` is an *upper*
+  bound (don't overdraw), never a lower one. `InferenceEscrow` has no `price`
+  field at all — price is an HTTP-layer concept the contract has no knowledge of.
+- **The facilitator can't, the way we called it.** This is the subtle half.
+  `_build_facilitator_request` built `paymentRequirements` by calling
+  `build_payment_requirements(amount)` where `amount` had been read out of the
+  *client's own authorization*. So the facilitator was asked "does this payload
+  match these requirements?" where both sides derived from the attacker's number.
+  Self-consistent, therefore valid. **The validation was circular.**
+
+### Exploitation (live, on Radius testnet)
+
+A single request carrying `accepted.amount = "1000"` (the gateway's own
+advertised price, untouched) alongside `payload.amount = "1"` — a 1000×
+underpayment, with the contradiction sitting inside one envelope:
+
+| Path | Result | Settlement tx |
+| --- | --- | --- |
+| Permit2 + facilitator | `HTTP 200` + real completion, provider received **+1** | [`0x314a6bce…`](https://testnet.radiustech.xyz/tx/0x314a6bceb6b610037bf5ca0dcfd81e76a19f3066c13499f47f0546235dabc4af) |
+| InferenceEscrow | `HTTP 200` + real completion, tab 12000 → **11999**, nonce consumed | [`0x11f155c1…`](https://testnet.radiustech.xyz/tx/0x11f155c153a1c19d926aa2142b105ce1a275eb9b34ce7c38c418d455e2bd4e0b) |
+
+A control probe established that the Radius facilitator's own amount check was
+**never broken**. Handed the same 1-unit signature with requirements stating the
+honest 1000, it returned:
+
+```json
+{ "isValid": false, "invalidReason": "Payment amount 1 is less than required 1000" }
+```
+
+So this was not a missing facilitator feature. Our resource server *disarmed a
+working defense* by feeding it requirements reconstructed from the attacker's
+payload. Delegated validation launders untrusted input into a trusted-looking
+verdict unless the requirements come from the delegator.
+
+### The fix — two layers
+
+1. **An explicit check in the gateway**, at the top of both handlers, before any
+   verify or settle: `if int(signed_amount) < int(PRICE_BASE_UNITS)` → `402`.
+   Path-independent, and the only thing protecting Path B, which has no
+   facilitator. Rejecting *before* settlement means no gas is spent, no nonce is
+   burned, and the payer's authorization remains spendable.
+   Both operands are `int()`-cast deliberately: these arrive as strings, and
+   `"9" >= "1000"` is `True` under string comparison, so a 9-unit payment would
+   have passed a naive check.
+2. **The `amount` parameter was deleted** from `_build_facilitator_request`,
+   `verify_payment`, and `settle_payment` — not merely passed correctly. Passing
+   `PRICE_BASE_UNITS` at the call site would fix today's bug while leaving the
+   hole reachable by any future caller. Removing the parameter makes validating
+   against caller-supplied requirements *structurally impossible*, and restores
+   the facilitator's own check as an independent second layer.
+
+`<` rather than `<=`: overpayment is permitted, since x402 treats the requirement
+as a floor and the surplus goes to the provider.
+
+### Related hardening
+
+Malformed `X-PAYMENT` input (bad base64, bad JSON, missing keys, non-numeric
+amounts) previously escaped as unhandled exceptions and surfaced as `500`s —
+reporting "we broke" for what is really "you sent garbage." Since every byte of
+that header is attacker-controlled, malformed envelopes are expected input, and
+now return `400` with the specific parse failure.
+
+### Verified after the fix
+
+Both exploit probes return `402 underpayment` with **zero on-chain movement**
+(provider delta 0, escrow nonce unchanged). The full honest demo still settles
+exactly 3 × 1000 on each path, both replay guards still fire with `409`, escrow
+nonces still advance 10 → 11 → 12, and all 5 Foundry tests still pass.
+
+## 11. Limitations / honest scope notes
 
 - `InferenceEscrow.settle()` is still called once per prompt (not batched) — the
   deposit model's advantage here is avoiding a facilitator round-trip and
@@ -239,7 +328,7 @@ Every tx hash above resolves at `https://testnet.radiustech.xyz/tx/<hash>`.
 - Single LLM provider (Groq, `llama-3.3-70b-versatile`), single model, no
   multi-provider routing.
 
-## 11. What this demonstrates, in one paragraph
+## 12. What this demonstrates, in one paragraph
 
 Path A shows correct integration with production x402 infrastructure: understanding
 the wire protocol, the EIP-712 signing mechanics, and the specific operational
