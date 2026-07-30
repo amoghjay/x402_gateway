@@ -52,6 +52,12 @@ def fmt_sbc(base_units: int) -> str:
     return f"{base_units / 1e6:.6f} SBC ({base_units} base units)"
 
 
+def fmt_nonce(nonce: str) -> str:
+    """Escrow nonces are random 32-byte values (unordered, so concurrent prompts
+    can't collide), which are far too long to print in full."""
+    return f"0x{int(nonce):064x}"[:12] + "…"
+
+
 def demo_permit2_series(prompts: list[str]) -> dict:
     print(f"=== Demo 1: Permit2 + Radius facilitator — {len(prompts)} sequential prompts ===")
 
@@ -102,7 +108,7 @@ def demo_permit2_series(prompts: list[str]) -> dict:
         "calls": calls,
         "provider_delta": provider_after - provider_before,
         "gas_payer": "facilitator (sponsored)",
-        "replay_mechanism": "app-level SEEN_SETTLEMENTS set (facilitator is idempotent, returns cached success)",
+        "replay_mechanism": "app-level state (facilitator is idempotent, returns cached success): SEEN_SIGNATURES pre-settle, SEEN_SETTLEMENTS as backstop",
     }
 
 
@@ -141,7 +147,7 @@ def demo_escrow_series(prompts: list[str]) -> dict:
         tx_hash = resp.headers.get("X-PAYMENT-RESPONSE")
         completion = resp.json()["completion"]
 
-        print(f"[{i}/{len(prompts)}] \"{prompt}\"  (nonce {authorization['nonce']})")
+        print(f"[{i}/{len(prompts)}] \"{prompt}\"  (nonce {fmt_nonce(authorization['nonce'])})")
         print(f"    -> {completion}")
         print(f"    settlement tx: {tx_hash}  ({explorer_link(tx_hash)})")
 
@@ -153,10 +159,10 @@ def demo_escrow_series(prompts: list[str]) -> dict:
     print(f"AFTER  — provider: {fmt_sbc(provider_after)}, operator: {fmt_sbc(operator_after)}")
     print(f"delta  — provider: {provider_after - provider_before} (exactly {len(prompts)} x {price} = {len(prompts) * price})")
     print(f"delta  — operator: {operator_after - operator_before} (its OWN SBC spent on gas for {len(prompts)} settle() txs — unrelated to the charges above)")
-    print(f"nonces used, in order: {[c['nonce'] for c in calls]}")
+    print(f"nonces used (random + unordered, all distinct): {[fmt_nonce(c['nonce']) for c in calls]}")
 
     resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment})
-    print(f"[replay] reusing call #{len(prompts)}'s payment (nonce {last_nonce} again) -> {resp.status_code}")
+    print(f"[replay] reusing call #{len(prompts)}'s payment (nonce {fmt_nonce(last_nonce)} again) -> {resp.status_code}")
     assert resp.status_code == 409
     print(f"    body: {resp.json()}")
 
@@ -165,7 +171,7 @@ def demo_escrow_series(prompts: list[str]) -> dict:
         "calls": calls,
         "provider_delta": provider_after - provider_before,
         "gas_payer": "gateway operator wallet",
-        "replay_mechanism": 'on-chain revert in settle() itself ("invalid nonce") — no app-level set needed',
+        "replay_mechanism": 'on-chain revert in settle() itself ("nonce already used") — no app-level set needed',
     }
 
 
@@ -177,7 +183,7 @@ def print_summary(r1: dict, r2: dict):
         print(f"\n{r['scheme']}")
         print(f"  prompts served    : {len(r['calls'])}")
         for c in r["calls"]:
-            nonce_note = f" (nonce {c['nonce']})" if "nonce" in c else ""
+            nonce_note = f" (nonce {fmt_nonce(c['nonce'])})" if "nonce" in c else ""
             print(f"    - {c['tx'][:14]}...{nonce_note}  {explorer_link(c['tx'])}")
         print(f"  provider received : {r['provider_delta']} base units total")
         print(f"  who paid gas      : {r['gas_payer']}")

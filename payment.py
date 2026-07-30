@@ -268,12 +268,17 @@ def build_escrow_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
 
 
 def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple[str, dict]:
-    """Sign an InferenceEscrow Authorization{amount, nonce, deadline}. Requires
-    the caller has already deposit()-ed enough balance into the contract —
+    """Sign an InferenceEscrow Authorization{settler, amount, nonce, deadline}.
+    Requires the caller has already deposit()-ed enough balance into the contract —
     this only authorizes a draw-down against that existing deposit, it does
-    not move any funds itself."""
+    not move any funds itself.
+
+    `settler` names the only address allowed to submit this authorization, so a
+    third party who obtains the signature cannot redeem it. Nonces are random and
+    unordered (like the Permit2 path), so concurrent prompts can't collide — and
+    no on-chain read is needed before signing."""
     account = Account.from_key(WALLET_KEY)
-    nonce = _escrow.functions.nextNonce(account.address).call()
+    nonce = int.from_bytes(secrets.token_bytes(32), "big")
     deadline = int(time.time()) + deadline_seconds
 
     domain = {
@@ -284,18 +289,25 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
     }
     types = {
         "Authorization": [
+            {"name": "settler", "type": "address"},
             {"name": "amount", "type": "uint256"},
             {"name": "nonce", "type": "uint256"},
             {"name": "deadline", "type": "uint256"},
         ],
     }
-    message = {"amount": amount, "nonce": nonce, "deadline": deadline}
+    message = {
+        "settler": GATEWAY_OPERATOR_ADDRESS,
+        "amount": amount,
+        "nonce": nonce,
+        "deadline": deadline,
+    }
 
     signable = encode_typed_data(domain_data=domain, message_types=types, message_data=message)
     signed = account.sign_message(signable)
 
     signature_hex = "0x" + signed.signature.hex()
     authorization = {
+        "settler": GATEWAY_OPERATOR_ADDRESS,
         "amount": str(amount),
         "nonce": str(nonce),
         "deadline": str(deadline),
@@ -303,24 +315,43 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
     return signature_hex, authorization
 
 
-def settle_escrow_payment(signature: str, authorization: dict) -> dict:
-    """Submit InferenceEscrow.settle() directly on-chain — the gateway IS the
-    facilitator for this path. Pre-flight simulates via `.call()` first (like
-    the facilitator's /verify — check before you pay gas to execute); a
-    revert there (invalid nonce / expired / insufficient balance) is caught
-    and returned as a structured error instead of spending gas on a doomed tx.
+def _escrow_settle_fn(signature: str, authorization: dict):
+    auth_tuple = (
+        Web3.to_checksum_address(authorization["settler"]),
+        int(authorization["amount"]),
+        int(authorization["nonce"]),
+        int(authorization["deadline"]),
+    )
+    return _escrow.functions.settle(auth_tuple, bytes.fromhex(signature[2:]))
 
-    Uses GATEWAY_OPERATOR_KEY, a separate wallet from the payer's WALLET_KEY —
-    msg.sender here is genuinely not the payer, not just conceptually."""
+
+def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
+    """Free pre-flight — this path's equivalent of the facilitator's /verify.
+    Asks the EVM whether settle() *would* succeed without spending any gas, so a
+    bad nonce / expired deadline / insufficient balance is a structured error
+    instead of a doomed transaction. Also lets the gateway confirm the payment is
+    good BEFORE doing the work it's charging for (REPORT.md §10.3)."""
     account = Account.from_key(GATEWAY_OPERATOR_KEY)
-    auth_tuple = (int(authorization["amount"]), int(authorization["nonce"]), int(authorization["deadline"]))
-    sig_bytes = bytes.fromhex(signature[2:])
-    fn = _escrow.functions.settle(auth_tuple, sig_bytes)
-
     try:
-        fn.call({"from": account.address})
+        _escrow_settle_fn(signature, authorization).call({"from": account.address})
     except ContractLogicError as exc:
-        return {"success": False, "error": _decode_revert_reason(exc)}
+        return {"ok": False, "error": _decode_revert_reason(exc)}
+    return {"ok": True}
 
-    receipt = _send(account, fn)
+
+def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
+    """Actually settle on-chain — the gateway IS the facilitator for this path.
+    Uses GATEWAY_OPERATOR_KEY, a separate wallet from the payer's WALLET_KEY, so
+    msg.sender here is genuinely not the payer (and must equal auth.settler)."""
+    account = Account.from_key(GATEWAY_OPERATOR_KEY)
+    receipt = _send(account, _escrow_settle_fn(signature, authorization))
     return {"success": receipt.status == 1, "transaction": Web3.to_hex(receipt.transactionHash)}
+
+
+def settle_escrow_payment(signature: str, authorization: dict) -> dict:
+    """Simulate-then-submit convenience wrapper for scripts. The gateway itself
+    drives the two phases separately so it can serve the inference in between."""
+    simulated = simulate_escrow_settlement(signature, authorization)
+    if not simulated["ok"]:
+        return {"success": False, "error": simulated["error"]}
+    return submit_escrow_settlement(signature, authorization)
