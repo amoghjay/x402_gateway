@@ -122,12 +122,8 @@ def probe_malformed_envelopes() -> None:
 
 # ---------------------------------------------------------------- probe 4
 def probe_provider_outage() -> None:
-    """Spawn a gateway whose LLM credentials are broken, then pay it properly.
-
-    The payment is entirely valid — the *provider* is what's down. Settling before
-    serving meant this took the payer's money and returned 200 with a canned
-    placeholder. Now inference happens first, so a failure means no charge at all.
-    """
+    """Spawn a gateway with broken LLM credentials, then pay it properly. The
+    payment is valid; the provider is what's down, so nothing may be charged."""
     print("\n--- Provider outage (valid payment, broken LLM) ---")
     port = 8001
     env = {**os.environ, "GROQ_API_KEY": "gsk_deliberately_invalid_key_for_probe"}

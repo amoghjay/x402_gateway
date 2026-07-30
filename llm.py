@@ -11,13 +11,7 @@ MODEL = "llama-3.3-70b-versatile"
 
 
 class InferenceError(RuntimeError):
-    """The upstream model call failed, so the caller must not be charged.
-
-    This used to be a caught-and-swallowed exception that returned a canned
-    string, which meant a provider outage still produced HTTP 200 and still took
-    the payer's money. Failing loudly is what lets the gateway settle only after
-    a real completion exists. See REPORT.md §10.3.
-    """
+    """Provider call failed — the gateway must not settle. See REPORT.md §10.3."""
 
 
 def call_llm(prompt: str) -> str:

@@ -23,8 +23,7 @@ def _json(status: int, **body) -> Response:
 
 
 def _underpaid(signed_amount: str) -> Response | None:
-    """Reject an authorization for less than our advertised price. See REPORT.md §10.
-    int() both sides — these are strings, and "9" >= "1000" is True."""
+    """int() both sides: these arrive as strings, and "9" >= "1000" is True."""
     if int(signed_amount) < int(PRICE_BASE_UNITS):
         return _json(
             402,
@@ -33,13 +32,10 @@ def _underpaid(signed_amount: str) -> Response | None:
         )
     return None
 
-# In-memory replay guards for the Permit2/facilitator path ONLY. The facilitator is
-# idempotent on a replayed payload (returns the same cached tx hash rather than
-# re-settling), so these sets are what turn that into an observable 409 rather than
-# silently serving the request twice. SEEN_SIGNATURES catches it before we spend an
-# inference call; SEEN_SETTLEMENTS is the backstop, since only the cached tx hash
-# reveals a re-signed duplicate. The InferenceEscrow path needs neither — its own
-# on-chain nonce check makes a replay revert in the free simulation.
+# Path A only: the facilitator is idempotent, so a replay returns a cached success
+# rather than an error and we must track it ourselves. Signatures catch it before we
+# spend an inference; tx hashes catch a re-signed duplicate nonce. Path B needs
+# neither — its own on-chain nonce check reverts in the free simulation.
 SEEN_SETTLEMENTS: set[str] = set()
 SEEN_SIGNATURES: set[str] = set()
 
@@ -62,9 +58,6 @@ def _prepare_permit2(payload: dict):
     if (underpaid := _underpaid(authorization["permitted"]["amount"])) is not None:
         return underpaid, None
 
-    # Cheap pre-settle replay guard, so a replayed payload can't cost us an
-    # inference call. The post-settle tx-hash check below is still the backstop:
-    # only the facilitator's cached hash reveals a re-signed duplicate nonce.
     if signature in SEEN_SIGNATURES:
         return _json(409, error="replay detected", reason="payment signature already used"), None
 
@@ -88,11 +81,8 @@ def _prepare_permit2(payload: dict):
 
 
 def _prepare_escrow(payload: dict):
-    """Validate without taking any money. Returns (error_response, settle_fn).
-
-    The free `.call()` simulation catches everything the real transaction would
-    catch — replay, expiry, insufficient balance, wrong settler — so this path
-    needs no app-level replay state at all."""
+    """Validate for free, take nothing. Returns (error_response, settle_fn).
+    The simulation catches everything the real tx would, so no app-level state."""
     signature = payload["payload"]["signature"]
     authorization = payload["payload"]["escrowAuthorization"]
 
@@ -102,7 +92,6 @@ def _prepare_escrow(payload: dict):
     simulated = simulate_escrow_settlement(signature, authorization)
     if not simulated["ok"]:
         error = simulated["error"]
-        # The contract's own revert reasons ARE the replay/expiry signal here.
         if "nonce already used" in error:
             return _json(409, error="replay detected", reason=error), None
         return _json(402, error="settlement failed", reason=error), None
@@ -139,9 +128,8 @@ async def infer(request: Request):
     else:
         return _json(402, error=f"unsupported assetTransferMethod: {method}")
 
-    # Phase 1 — validate the payment for FREE. Nothing is charged yet.
-    # Same malformed-input reasoning one level down: the preparers index into
-    # client dicts and int() client strings, both of which raise on garbage.
+    # Phase 1: validate for free. Preparers index client dicts / int() client
+    # strings, so garbage raises here too.
     try:
         error, settle = prepare(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -149,16 +137,14 @@ async def infer(request: Request):
     if error is not None:
         return error
 
-    # Phase 2 — produce the goods BEFORE taking the money. If inference fails the
-    # payer is never charged: settling first meant a provider outage still took
-    # payment and returned 200 with a placeholder (REPORT.md §10.3).
+    # Phase 2: produce the goods BEFORE charging, so a provider outage costs the
+    # payer nothing. See REPORT.md §10.3.
     try:
         completion = call_llm(prompt)
     except InferenceError as exc:
         return _json(502, error="inference failed", reason=str(exc), charged=False)
 
-    # Phase 3 — settle. If this fails we absorb the cost of one inference rather
-    # than serve it unpaid; the payer is still not charged.
+    # Phase 3: settle. On failure we absorb one inference rather than serve unpaid.
     error, tx_hash = settle()
     if error is not None:
         return error

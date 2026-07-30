@@ -19,9 +19,8 @@ _ERROR_STRING_SELECTOR = bytes.fromhex("08c379a0")
 
 
 def _decode_revert_reason(exc: ContractLogicError) -> str:
-    """web3.py doesn't always auto-decode Solidity's Error(string) revert data
-    on this RPC — it comes back as a raw hex blob inside the exception's repr.
-    Pull out the hex, strip the Error(string) selector, ABI-decode the rest."""
+    """This RPC returns Error(string) revert data as a raw hex blob in the
+    exception repr rather than decoding it, so unwrap it by hand."""
     match = re.search(r"0x[0-9a-fA-F]+", str(exc))
     if match:
         data = bytes.fromhex(match.group(0)[2:])
@@ -105,10 +104,8 @@ def _send(account, fn):
 
 
 def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
-    """Check the caller's InferenceEscrow balance; approve + deposit a top-up
-    if it's below `min_amount`. Returns the resulting balance. This is the
-    one on-chain, gas-paying step the caller does — everything after is just
-    signing, same trade-off as Permit2's one-time approve(Permit2, MAX)."""
+    """Top up the caller's tab if below `min_amount`; returns the new balance.
+    The only gas-paying step the payer makes — everything after is just signing."""
     account = Account.from_key(WALLET_KEY)
     current = _escrow.functions.balances(account.address).call()
     if current >= min_amount:
@@ -123,8 +120,7 @@ def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
 
 
 def build_payment_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
-    """The single `accepts[]` entry — same object used in the 402 response and
-    as `paymentRequirements` in the /verify and /settle calls to the facilitator."""
+    """One `accepts[]` entry, reused as `paymentRequirements` for the facilitator."""
     return {
         "scheme": "exact",
         "network": f"eip155:{CHAIN_ID}",
@@ -141,12 +137,8 @@ def build_payment_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
 
 
 def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str, dict]:
-    """Sign a Permit2 PermitWitnessTransferFrom authorizing `amount` of SBC to PAY_TO_ADDRESS.
-
-    Returns (signature_hex, authorization_dict), where authorization_dict is the
-    `permit2Authorization` shape the facilitator's /verify and /settle expect
-    inside paymentPayload.payload.
-    """
+    """Sign a Permit2 PermitWitnessTransferFrom for `amount` of SBC to PAY_TO_ADDRESS.
+    Returns (signature_hex, the `permit2Authorization` dict the facilitator expects)."""
     account = Account.from_key(WALLET_KEY)
 
     domain = {
@@ -201,9 +193,8 @@ def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str,
 
 
 def _build_facilitator_request(signature: str, authorization: dict) -> dict:
-    """Shared body shape for both /verify and /settle. `paymentRequirements` takes
-    no caller-supplied amount by design — it must come from our own config, never
-    be echoed back from the client's payload. See REPORT.md §10."""
+    """Body for /verify and /settle. Takes no caller-supplied amount BY DESIGN:
+    requirements must come from our config, never the client. See REPORT.md §10.1."""
     requirements = build_payment_requirements()
     payment_payload = {
         "x402Version": 2,
@@ -235,10 +226,8 @@ def verify_payment(signature: str, authorization: dict) -> dict:
 
 
 def settle_payment(signature: str, authorization: dict) -> dict:
-    """POST to the facilitator's /settle. On success, `transaction` is the
-    on-chain settlement tx hash. A replayed payload returns the SAME cached
-    tx hash rather than settling again — the facilitator is idempotent, so
-    the gateway's own replay guard (not this call) is what must catch reuse."""
+    """POST /settle. A replayed payload returns the SAME cached tx hash rather than
+    erroring — the facilitator is idempotent, so the gateway must catch reuse."""
     body = _build_facilitator_request(signature, authorization)
     resp = requests.post(f"{FACILITATOR_URL}/settle", json=body, timeout=10)
     resp.raise_for_status()
@@ -249,10 +238,8 @@ def settle_payment(signature: str, authorization: dict) -> dict:
 
 
 def build_escrow_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
-    """The second `accepts[]` entry — same product, settled via the gateway's
-    own contract instead of the Radius facilitator. Note there's no `payTo`
-    beyond the contract address itself: InferenceEscrow's `provider` is
-    immutable, set once at deploy, not chosen per-request."""
+    """Second `accepts[]` entry. `payTo` is just the contract: `provider` is
+    immutable, set at deploy, not chosen per request."""
     return {
         "scheme": "exact",
         "network": f"eip155:{CHAIN_ID}",
@@ -268,15 +255,9 @@ def build_escrow_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
 
 
 def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple[str, dict]:
-    """Sign an InferenceEscrow Authorization{settler, amount, nonce, deadline}.
-    Requires the caller has already deposit()-ed enough balance into the contract —
-    this only authorizes a draw-down against that existing deposit, it does
-    not move any funds itself.
-
-    `settler` names the only address allowed to submit this authorization, so a
-    third party who obtains the signature cannot redeem it. Nonces are random and
-    unordered (like the Permit2 path), so concurrent prompts can't collide — and
-    no on-chain read is needed before signing."""
+    """Authorize a draw-down against an existing deposit; moves no funds itself.
+    `settler` is the only address that may submit it, so an eavesdropper can't
+    redeem it. Nonces are random/unordered, so concurrent prompts can't collide."""
     account = Account.from_key(WALLET_KEY)
     nonce = int.from_bytes(secrets.token_bytes(32), "big")
     deadline = int(time.time()) + deadline_seconds
@@ -326,11 +307,8 @@ def _escrow_settle_fn(signature: str, authorization: dict):
 
 
 def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
-    """Free pre-flight — this path's equivalent of the facilitator's /verify.
-    Asks the EVM whether settle() *would* succeed without spending any gas, so a
-    bad nonce / expired deadline / insufficient balance is a structured error
-    instead of a doomed transaction. Also lets the gateway confirm the payment is
-    good BEFORE doing the work it's charging for (REPORT.md §10.3)."""
+    """Free pre-flight — this path's /verify. Asks the EVM whether settle() would
+    succeed, costing no gas, so the gateway can validate before serving."""
     account = Account.from_key(GATEWAY_OPERATOR_KEY)
     try:
         _escrow_settle_fn(signature, authorization).call({"from": account.address})
@@ -340,17 +318,16 @@ def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
 
 
 def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
-    """Actually settle on-chain — the gateway IS the facilitator for this path.
-    Uses GATEWAY_OPERATOR_KEY, a separate wallet from the payer's WALLET_KEY, so
-    msg.sender here is genuinely not the payer (and must equal auth.settler)."""
+    """Settle on-chain from GATEWAY_OPERATOR_KEY — a different wallet from the
+    payer, so msg.sender genuinely isn't the payer (and must equal auth.settler)."""
     account = Account.from_key(GATEWAY_OPERATOR_KEY)
     receipt = _send(account, _escrow_settle_fn(signature, authorization))
     return {"success": receipt.status == 1, "transaction": Web3.to_hex(receipt.transactionHash)}
 
 
 def settle_escrow_payment(signature: str, authorization: dict) -> dict:
-    """Simulate-then-submit convenience wrapper for scripts. The gateway itself
-    drives the two phases separately so it can serve the inference in between."""
+    """Wrapper for scripts. The gateway drives the two phases separately so it can
+    serve the inference in between."""
     simulated = simulate_escrow_settlement(signature, authorization)
     if not simulated["ok"]:
         return {"success": False, "error": simulated["error"]}
