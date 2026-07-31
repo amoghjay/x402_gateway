@@ -290,20 +290,21 @@ Every tx hash above resolves at `https://testnet.radiustech.xyz/tx/<hash>`.
   requests), so the gateway's own bookkeeping is what's actually observable. Path
   B's contract enforces it itself, on-chain, because nothing else does.
 
-## 10. Three real vulnerabilities we found in our own code, and fixed
+## 10. Four findings from auditing our own code — three fixed, one open
 
 ### 10.1 — Underpayment: the gateway never checked the amount it advertised
 
-Everything in §9 is about defences that were designed in. This section covers three
-that were *missing*, found by auditing our own code after it was already working
-and demoable. Each was reproduced against live infrastructure before being fixed,
-and each is documented here rather than quietly patched — the omissions are more
-instructive than the final code.
+Everything in §9 is about defences that were designed in. This section covers what was
+*missing*, found by auditing our own code after it was already working and demoable.
+§10.1–§10.3 were each reproduced against live infrastructure and fixed; §10.4 was found
+by auditing the fix in §10.3 and is deliberately left open. All four are documented
+rather than quietly patched — the omissions are more instructive than the final code.
 
-They sit at three different layers, and that's the point. §10.1 is an
-application-layer bug — the gateway trusted client input. §10.2 is a contract-layer
-bug — an omitted field in the signed struct. §10.3 is a *protocol-ordering* bug —
-the right checks in the wrong sequence. §10.1 and §10.2 are one instance each of the
+They sit at different layers, and that's the point. §10.1 is an application-layer bug
+— the gateway trusted client input. §10.2 is a contract-layer bug — an omitted field in
+the signed struct. §10.3 is a *protocol-ordering* bug — the right checks in the wrong
+sequence. §10.4 is a *time-of-check* bug, and the only one that came from auditing a
+fix rather than the original code. §10.1 and §10.2 are one instance each of the
 two failure modes described in §11: Path A's *dependency* and Path B's
 *responsibility*.
 
@@ -487,13 +488,14 @@ validation step, which is what makes the reordering possible at no cost:
 gateway returns `502 {"error": "inference failed", "charged": false}` without ever
 reaching phase 3.
 
-**The residual risk, stated honestly.** If settlement fails *after* a successful
-inference (the payer withdrew between phases 1 and 3, say), the gateway has spent one
-LLM call it cannot bill for. We accept that and return an error rather than serving
-the completion unpaid. The exposure is bounded at one inference, it requires
-deliberate effort to trigger, and phase 1 already confirmed the payment was good
-moments earlier. The alternative — charging first — is exactly the bug being fixed.
-**Never charge without delivering; occasionally deliver without charging.**
+**The residual risk.** If settlement fails *after* a successful inference, the gateway
+has spent an LLM call it cannot bill for. We accept that and return an error rather
+than serving the completion unpaid: **never charge without delivering; occasionally
+deliver without charging.** The alternative — charging first — is exactly the bug
+being fixed.
+
+That exposure is bounded at one inference *per request*, but **not in aggregate**, and
+it does not require a race to trigger. Auditing this fix is what surfaced §10.4.
 
 **A second benefit.** Phase 1 now catches replays *before* any inference is spent.
 Path B got this for free (the simulation reverts on a spent nonce). Path A needed a
@@ -519,6 +521,68 @@ invalid LLM credentials and pays it correctly:
 That last assertion is the important one: the nonce being unspent proves `settle()`
 was never reached, so the payer's authorization is still usable once the provider
 recovers.
+
+### 10.4 — Concurrent requests amplify inference cost (found, **not** fixed)
+
+This one was found by auditing §10.3's *own fix*, and it is documented rather than
+patched. It is the most interesting finding in the section precisely because it is the
+consequence of a correct fix, not of a careless one.
+
+**The mechanism.** Phase 1 asks the chain "does this payer have enough balance?" —
+a **read of mutable state**. Nothing holds that balance. So N concurrent requests from
+one payer all pass phase 1, because none of them has settled yet. All N reach phase 2
+and consume an inference call. Then one settles; the rest revert `insufficient balance`
+and return `402`. A classic time-of-check-to-time-of-use gap: phase 1's answer is only
+true at the instant it is asked.
+
+It needs no race to exploit — simply send N requests at once. Timing a `withdraw()`
+between phases achieves the same thing with a single request.
+
+**Severity, precisely** — this matters, because the obvious framing overstates it:
+
+| Claim | True? |
+|---|---|
+| The payer's deposit can be over-drawn | **No.** `require(balances[payer] >= auth.amount)` is absolute; balances cannot go negative |
+| The attacker gets free inference | **No.** The completion is withheld whenever settlement fails |
+| Funds are at risk | **No.** No accounting invariant is violated |
+| **Our provider API spend is amplified** | **Yes.** One payment of `price` can induce N inference calls |
+
+So this is a **cost-amplification / resource-exhaustion** issue against the gateway
+operator, not a theft or accounting bug. The contract behaves correctly throughout;
+the gateway's *use* of it is what assumes a stable balance.
+
+**Path A has the same exposure.** Between `/verify` and `/settle` the payer can move
+their SBC elsewhere, so the facilitator's verdict is equally time-of-check. This is a
+property of validate-then-act, not of `InferenceEscrow`.
+
+**The right fix: reserve/capture.** Stop reading a balance and start *holding* one —
+the same pattern as a card authorization hold:
+
+```solidity
+reserve(auth, signature)  // validate, consume the nonce, move `amount` from
+                          // balances[payer] into a reserved bucket keyed by nonce
+capture(nonce)            // pay `provider` from the reserved amount
+release(nonce)            // after deadline, return it to the payer — callable by anyone
+```
+
+Phase 1 becomes `reserve` and phase 3 becomes `capture`. Concurrent requests then
+contend on *real* state: N simultaneous prompts require `N × price` actually deposited,
+and the TOCTOU gap closes because the funds are no longer readable-but-unclaimed.
+
+Worth stating the cost honestly: that is **two on-chain transactions per prompt instead
+of one**, which directly weakens Path B's amortisation advantage in §11. It is a real
+trade-off, not a free improvement.
+
+**A cheap interim** (also not implemented): track in-flight requests per payer and
+require `balance >= price × (in_flight + 1)`. Application-layer, no redeploy — but
+per-process, so it breaks across multiple gateway instances for the same reason
+`SEEN_SETTLEMENTS` does.
+
+**Why it is not fixed.** Reserve/capture is a struct change, a redeploy, a signing
+change, and a documentation pass, eight days before the presentation, against a demo
+that currently works end to end. Given the true severity — our own API cost, no funds
+at risk — shipping it in a hurry would be the wrong call. It is recorded here with the
+remedy identified, which is the honest position.
 
 ## 11. Path A vs Path B — trade-offs, and why both exist
 
@@ -622,6 +686,11 @@ Offering both under a single `accepts[]` is what makes that trade-off demonstrab
 rather than theoretical.
 
 ## 12. Limitations / honest scope notes
+
+- **Concurrent requests from one payer amplify inference cost** (§10.4) — phase 1 reads
+  a balance rather than holding it, so N simultaneous requests each consume an LLM call
+  while only one settles. No funds at risk and no free inference; the cost falls on the
+  gateway operator. Remedy identified (reserve/capture), not implemented.
 
 - `InferenceEscrow.settle()` is still called once per prompt (not batched) — the
   deposit model's advantage here is avoiding a facilitator round-trip and

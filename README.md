@@ -28,9 +28,9 @@ Two things this repo deliberately does beyond "it works":
   succeed against this code, asserting against live on-chain state.
 
 Full analysis lives in **[REPORT.md](REPORT.md)** — §11 for the path comparison and
-trade-offs, §10 for the three vulnerabilities found by auditing this code (two where
-a caller could take more than they paid for, one where *we* could take payment and
-deliver nothing).
+trade-offs, §10 for the four findings from auditing this code: two where a caller could
+take more than they paid for, one where *we* could take payment and deliver nothing,
+and one found by auditing that last fix, left open on purpose.
 
 ## Setup
 
@@ -152,6 +152,11 @@ Facilitator | `https://facilitator.testnet.radiustech.xyz` |
 
 ## Known limitations
 
+- **Concurrent requests from one payer amplify inference cost** (REPORT.md §10.4) —
+  validation *reads* a balance rather than holding it, so N simultaneous requests each
+  consume an LLM call while only one settles. No funds at risk and no free inference:
+  the cost falls on the gateway operator. The fix is a reserve/capture split; found by
+  auditing the §10.3 fix, documented rather than rushed.
 - `SEEN_SIGNATURES`/`SEEN_SETTLEMENTS` grow unbounded and are lost on restart (Path A
   only — Path B keeps no state).
 - The operator wallet is a single unmonitored hot wallet with no nonce-collision
