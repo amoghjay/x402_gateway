@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Status-update demo (2026-07-31): Path A end to end, then a live demonstration of
 # the gap that motivates Path B. Manages its own gateway on port 8000.
-# Talking points for each step are in DEMO_NOTES.md.
+# Superseded by demo_final.sh, which covers both paths; kept as a fallback.
 #
 #   bash demo_path_a.sh          # pause between steps (for presenting)
 #   bash demo_path_a.sh --auto   # run straight through (for rehearsing)

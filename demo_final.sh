@@ -6,7 +6,7 @@
 #       -> that gap is why I wrote InferenceEscrow
 #         -> and here is the same attack failing against the contract
 #
-# Talking points per step are in DEMO_NOTES.md. Manages its own gateway on :8000.
+# Manages its own gateway on :8000. Step-by-step rationale is in REPORT.md §7.
 #
 #   bash demo_final.sh              # pause between steps (presenting)
 #   bash demo_final.sh --auto       # straight through (rehearsing)

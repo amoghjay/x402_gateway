@@ -28,9 +28,10 @@ Two things this repo deliberately does beyond "it works":
   succeed against this code, asserting against live on-chain state.
 
 Full analysis lives in **[REPORT.md](REPORT.md)** — §11 for the path comparison and
-trade-offs, §10 for the four findings from auditing this code: two where a caller could
-take more than they paid for, one where *we* could take payment and deliver nothing,
-and one found by auditing that last fix, left open on purpose.
+trade-offs, §10 for the five findings from auditing this code: two where a caller could
+take more than they paid for, one where *we* could take payment and deliver nothing, one
+found by auditing that last fix, and one where **Path A hands out free inference after a
+restart** — left open on purpose, because it is the reason Path B exists (§10.5).
 
 ## Setup
 
@@ -137,7 +138,6 @@ Facilitator | `https://facilitator.testnet.radiustech.xyz` |
 `gateway.py` | the `402`/`200` endpoint, scheme routing, price enforcement |
 `payment.py` | EIP-712 signing for both schemes, facilitator calls, on-chain settle |
 `demo_final.sh` | **the presentation demo** — 12 steps, both paths, the restart-replay gap |
-`DEMO_NOTES.md` | per-step talking points + prepared answers for likely questions |
 `demo_path_a.sh` | last week's Path A status demo, kept as a fallback |
 `client.py` | the happy-path demo |
 `security_probes.py` | the adversarial demo |
@@ -153,9 +153,12 @@ Facilitator | `https://facilitator.testnet.radiustech.xyz` |
 - **The server validates against requirements it holds itself**, never values echoed
   back from the client. `verify_payment`/`settle_payment` take no `amount` parameter
   *by design* — see REPORT.md §10.1 for the bug that taught us this.
-- **The operator's SBC balance often shows a `0` delta.** Radius converts SBC → RUSD
-  in one-time top-ups, not per transaction, so gas paid from an earlier conversion
-  doesn't appear in an SBC balance check. A blind spot in the measurement, not a bug.
+- **The operator's SBC balance shows a `0` delta, and that is the correct result.**
+  Two separate reasons, measured directly: gas is paid in the chain's **native**
+  currency (one `settle()` moved the operator's native balance by ~1.46e14 wei and its
+  SBC not at all), and the operator **never takes custody** of the payment — `settle()`
+  moves funds from the payer's escrow balance straight to `provider`. So the operator
+  needs native currency for gas and no SBC whatsoever.
 - **The escrow ABI is read from Foundry's build artifact**, so it cannot drift from
   the deployed contract.
 - **Requests validate for free, serve, and only then charge.** Both schemes have a

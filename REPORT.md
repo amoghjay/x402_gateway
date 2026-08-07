@@ -193,7 +193,7 @@ bash demo_final.sh --list     # the 12 steps
 bash demo_final.sh --only 1,2,5,8,10,12   # short version
 ```
 
-Per-step talking points are in `DEMO_NOTES.md`. The arc is deliberate:
+The arc is deliberate:
 
 > Path A works and settles real money → here are bugs I found and fixed in it → here is
 > a gap I **cannot** close at the application layer → that gap is why I wrote a contract
