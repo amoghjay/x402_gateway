@@ -103,7 +103,9 @@ before serving meant a provider outage still took the payer's money and returned
   *before* any inference is spent, and `SEEN_SETTLEMENTS` catches a re-signed
   duplicate nonce afterwards, since only the cached tx hash reveals that case. Both
   are in-memory stands-in for what a real deployment would express as a
-  `settlement_tx_hash UNIQUE` database constraint.
+  `settlement_tx_hash UNIQUE` database constraint — and because they are only in
+  memory, **a restart hands out free inference**. That is not a hypothetical: it is
+  reproduced live in §10.5, and it is the reason Path B exists.
 
 ## 5. Path B — InferenceEscrow
 
@@ -180,60 +182,47 @@ a facilitator normally hides.
 
 ## 7. Live demo script
 
+One script drives the whole presentation. It manages its own gateway, and every step is
+independently runnable so it can be cut to fit the time available:
+
 ```bash
 cd gateway
-uvicorn gateway:app --port 8000 &
-python client.py
+bash demo_final.sh            # pause between steps (presenting)
+bash demo_final.sh --auto     # straight through (rehearsing)
+bash demo_final.sh --list     # the 12 steps
+bash demo_final.sh --only 1,2,5,8,10,12   # short version
 ```
 
-Walk through, live:
+Per-step talking points are in `DEMO_NOTES.md`. The arc is deliberate:
 
-1. **Show the `402` has two options**:
-   ```bash
-   curl -i -X POST localhost:8000/infer -H 'content-type: application/json' -d '{"prompt":"hello"}'
-   ```
-   Point out `accepts[]` has two entries — `extra.assetTransferMethod` is `"permit2"`
-   in one, `"inference-escrow"` in the other. This is x402's extensibility mechanism
-   working as designed: one endpoint, multiple accepted payment methods, client picks.
+> Path A works and settles real money → here are bugs I found and fixed in it → here is
+> a gap I **cannot** close at the application layer → that gap is why I wrote a contract
+> → and here is the identical attack failing against it.
 
-2. **Run `client.py`** and narrate as it goes:
-   - Demo 1 fires 3 different prompts through Permit2 + facilitator. Point out each
-     gets its own real settlement tx — click one open on the explorer.
-   - Demo 1 replays the last payment — `409`, and explain *why*: the facilitator
-     already returned success for that exact payload once; a second `/settle` call
-     returns the same cached hash rather than erroring, so the gateway's own
-     `SEEN_SETTLEMENTS` set is what actually produces the `409`.
-   - Demo 2 fires 3 different prompts through `InferenceEscrow`, from **one deposit**.
-     Point out the three unrelated random nonces printed — real, distinct requests,
-     not just "0 works once."
-   - Demo 2 replays the last payment — `409` again, but for a structurally different
-     reason: the contract's own `require(!nonceUsed[payer][nonce])` reverts on-chain.
-   - Point out the balance deltas: provider's balance goes up by exactly `3 × price`
-     in both demos; the operator wallet's balance is a completely separate number
-     from the charge, because gas and the actual payment are two unrelated flows.
+| Steps | What they establish |
+|---|---|
+| 1 | The `402` advertises **both** schemes; `extra.assetTransferMethod` distinguishes them. One endpoint, client picks — x402's extensibility working as designed. |
+| 2–3 | Path A settles for real. Balance deltas of exactly ±`price`, then `cast receipt` proves it independently: `to` is the x402 proxy and `from` is neither of our wallets, so the facilitator submitted it and paid the gas. |
+| 4 | Replay → `409` — but state *where that came from*: the facilitator is idempotent and reports success both times, so this is a Python `set`, not the chain. |
+| **5** | **The pivot (§10.5).** Restart the gateway, replay the same spent payment → `200`, a fresh completion, provider delta `0`. One payment, two products. |
+| 6 | `settle()` on screen: four `require()`s, and `ECDSA.recover` deriving the payer rather than trusting a field. `forge test` → 9/9. |
+| 7 | One real `deposit()` tx, receipt shown — the payer's *only* transaction. Tab read from contract storage. |
+| 8 | Three prompts, three random 256-bit nonces, three settlements. Operator SBC delta is **zero** — it never takes custody; gas is native currency. |
+| 9 | `cast receipt` on an escrow settlement: `to` is our contract, `from` is the operator. `msg.sender != payer` demonstrated, not asserted. |
+| **10** | **The payoff.** Step 5's attack, repeated against Path B: restart, replay → `409`, then `cast call nonceUsed(...)` → `true` and the decoded revert `"nonce already used"`. The rejection is on-chain, so restarts and extra instances change nothing. |
+| 11 | `security_probes.py` — 22 assertions across four attacks that each used to succeed. Asserted against live on-chain state and exits non-zero on any success, so it is a regression test rather than a narration. |
+| 12 | The honest comparison, including where Path B is *worse*. |
 
-3. **Open two explorer links side by side** — one settlement from each path — to
-   show both are real, verifiable, independent transactions, not printed strings.
+Two things to say out loud that the terminal does not show:
 
-4. **Run `security_probes.py`** — the adversarial half, and the strongest part of the
-   demo. Four attacks that all used to succeed against this code:
-   - Underpayment on **both** paths: sign 1 base unit for a 1000-unit product. Point
-     out that the envelope carries our own advertised `1000` in `accepted` *and* a
-     signed `1` in the payload — the contradiction sits inside a single request.
-     Now `402`, and the provider's balance does not move.
-   - Unauthorized settler: submit an escrow authorization from the **payer's own
-     wallet**. Reverts `unauthorized settler`, and critically the nonce is *not*
-     consumed — then the named settler settles the same authorization successfully.
-     Rejecting costs nothing, so a griefer cannot burn the payer's authorization.
-   - Malformed envelopes return `400`, not `500`.
+- **Step 5 needs no restart in the real world** — a second instance behind a load
+  balancer has an empty set too. Restarting is just the fastest way to demonstrate it.
+- **Step 11's underpayment probe** is subtle: the envelope carries our own advertised
+  `1000` in `accepted` *and* a signed `1` in the payload, so the contradiction sits
+  inside a single request. That is what made the original bug (§10.1) invisible.
 
-   Every check is asserted against live on-chain state rather than printed output,
-   and the script exits non-zero if any attack gets through — so it is a regression
-   test, not a narration.
-
-5. **Run `contracts/verify_live.py`** if there's time — proves the full lifecycle
-   including `withdraw()`, the one function the main demo never exercises, which is
-   what guarantees a payer can always exit.
+If there is time, `contracts/verify_live.py` exercises `withdraw()` — the one function
+the demo never touches, and the thing that guarantees a payer can always exit.
 
 ## 8. Real on-chain evidence (from actual runs, not fabricated)
 
@@ -290,27 +279,29 @@ Every tx hash above resolves at `https://testnet.radiustech.xyz/tx/<hash>`.
   requests), so the gateway's own bookkeeping is what's actually observable. Path
   B's contract enforces it itself, on-chain, because nothing else does.
 
-## 10. Four findings from auditing our own code — three fixed, one open
+## 10. Five findings from auditing our own code — three fixed, two open
 
 ### 10.1 — Underpayment: the gateway never checked the amount it advertised
 
 Everything in §9 is about defences that were designed in. This section covers what was
 *missing*, found by auditing our own code after it was already working and demoable.
 §10.1–§10.3 were each reproduced against live infrastructure and fixed; §10.4 was found
-by auditing the fix in §10.3 and is deliberately left open. All four are documented
-rather than quietly patched — the omissions are more instructive than the final code.
+by auditing the fix in §10.3, and §10.5 is architectural rather than a coding mistake.
+Both open findings are documented rather than quietly patched — the omissions are more
+instructive than the final code.
 
 They sit at different layers, and that's the point. §10.1 is an application-layer bug
 — the gateway trusted client input. §10.2 is a contract-layer bug — an omitted field in
 the signed struct. §10.3 is a *protocol-ordering* bug — the right checks in the wrong
 sequence. §10.4 is a *time-of-check* bug, and the only one that came from auditing a
-fix rather than the original code. §10.1 and §10.2 are one instance each of the
-two failure modes described in §11: Path A's *dependency* and Path B's
-*responsibility*.
+fix rather than the original code. §10.5 is a *state-durability* bug, and the only one
+that cannot be fixed properly at the application layer at all. §10.1 and §10.2 are one
+instance each of the two failure modes described in §11: Path A's *dependency* and
+Path B's *responsibility*.
 
 The first two let a caller take more than they paid for. The third let us take
 payment without delivering — an audit that only looks for ways the *customer* cheats
-misses half the problem.
+misses half the problem. The fifth is the one that motivated writing a contract at all.
 
 Note also what §9 has in common: it is all about defending the **payer**. Both bugs
 below were found by instead auditing from the **server's** side, and then by asking
@@ -584,6 +575,87 @@ that currently works end to end. Given the true severity — our own API cost, n
 at risk — shipping it in a hurry would be the wrong call. It is recorded here with the
 remedy identified, which is the honest position.
 
+### 10.5 — Path A's replay guard does not survive a restart (found, **not** fixable at the application layer)
+
+This is the most consequential finding in the section, and unlike §10.1–§10.3 it is not
+a mistake in our code. It is a property of where Path A is *able* to keep its state.
+
+**The mechanism.** Path A's replay protection lives in two Python sets in the gateway
+process (`SEEN_SIGNATURES`, checked before serving; `SEEN_SETTLEMENTS`, the backstop for
+a re-signed duplicate nonce). Restarting the gateway empties both. Replay an already
+settled `X-PAYMENT` header at the fresh process and it has no record of it, so:
+
+1. The gateway checks `SEEN_SIGNATURES` — empty, so the payment looks new.
+2. It calls the facilitator's `/verify`, which returns `isValid: true`.
+3. It serves a **fresh inference**.
+4. It calls `/settle`. **The facilitator is idempotent**: it returns the *same cached
+   transaction hash* and reports success rather than an error, because from its point of
+   view a retry of a submitted payload is a normal, safe thing to do.
+5. `SEEN_SETTLEMENTS` is also empty, so the cached hash passes as a new settlement.
+
+Result: **HTTP 200 with a new completion, and no second on-chain transfer.** One payment,
+two delivered products.
+
+**Verified live**, first on 2026-07-31 and again on 2026-08-06. It is step 5 of
+`demo_final.sh`, which prints the provider's balance either side of the replay:
+
+```
+provider before this replay: 109141002
+provider after  this replay: 109141002   delta 0
+HTTP 200  {"completion": "It's nice to meet you. ..."}
+```
+
+**Severity, precisely.** This is strictly worse than §10.4, and the comparison is the
+point — note where the two rows differ:
+
+| Claim | §10.4 (concurrency) | §10.5 (restart replay) |
+|---|---|---|
+| Funds at risk | No | No |
+| Payer over-charged | No | No — charged exactly once |
+| Provider under-paid | No | No — paid exactly once |
+| **Attacker gets free inference** | **No** — completion withheld | **Yes** — a fresh completion per replay |
+| Our provider API spend amplified | Yes | Yes |
+| Repeatable indefinitely | Bounded by deposit | **Unbounded** |
+
+So §10.4 costs us money; §10.5 gives the product away. The accounting stays consistent
+throughout — which is exactly what makes it easy to miss.
+
+**A restart is not even required.** Two gateway instances behind a load balancer each
+hold their own empty set, so the same replay succeeds against the instance that has not
+seen it, with no restart and no downtime. Horizontal scaling — the ordinary thing to do
+to a working web service — reintroduces the hole permanently.
+
+**Why this cannot be fixed properly in the application.** The obvious remedy is a
+`UNIQUE` constraint on the signature in a shared database, and in production that is
+what one would do. But examine what it actually buys: the guarantee that a payment is
+spent at most once now depends on *our* database being available, correctly migrated,
+not sharded per-region, and never restored from a stale backup. The property has not been
+made durable — it has been **moved into infrastructure we operate**, and the correctness
+of a payment system now rests on our operational discipline.
+
+The deeper reason it can't be fixed here is that Path A has no on-chain component to ask.
+The nonce belongs to Permit2 and is consumed inside a transaction the facilitator
+submitted; the facilitator's idempotency then deliberately hides reuse behind a cached
+success. There is no query available that answers "has this payment already been
+redeemed?" with an authoritative no.
+
+**How Path B answers it.** `nonceUsed[payer][nonce]` is contract storage, so the check
+is neither in our process nor in our database. The gateway holds *no* replay state, and
+`simulate_escrow_settlement` re-derives the answer from the chain on every request —
+which means a restart changes nothing and a second instance is automatically consistent
+with the first. `demo_final.sh` step 10 runs the identical attack from step 5 against
+Path B — same spent authorization, same restart — and gets `409`, then proves the
+rejection came from the chain rather than from our code by reading
+`nonceUsed(payer, nonce) == true` with `cast call` and decoding the EVM revert reason
+`"nonce already used"`.
+
+**Why it is not fixed.** Because "fixing" it means either accepting a database as part
+of the trust base, or moving replay protection on-chain — and the second option is
+Path B, which is built and running. The finding is left open for Path A deliberately: it
+is the strongest available argument for why the contract exists, and papering over it
+with a `UNIQUE` index would hide the trade-off this project is meant to demonstrate.
+See §11, where this is the concrete content of Path A's *dependency* weakness.
+
 ## 11. Path A vs Path B — trade-offs, and why both exist
 
 ### The one distinction everything follows from
@@ -686,6 +758,14 @@ Offering both under a single `accepts[]` is what makes that trade-off demonstrab
 rather than theoretical.
 
 ## 12. Limitations / honest scope notes
+
+- **Path A's replay guard is lost on restart, and gives away free inference** (§10.5) —
+  `SEEN_SIGNATURES`/`SEEN_SETTLEMENTS` are per-process, and the facilitator's idempotency
+  means a replayed payload reads as a fresh success. Reproduced live: a restart plus a
+  replayed header returns `200` with a new completion and no second transfer. Two
+  instances behind a load balancer have the same effect without a restart. Not fixable at
+  the application layer without making a database part of the trust base — which is
+  precisely the argument for Path B, where the guard is contract storage.
 
 - **Concurrent requests from one payer amplify inference cost** (§10.4) — phase 1 reads
   a balance rather than holding it, so N simultaneous requests each consume an LLM call

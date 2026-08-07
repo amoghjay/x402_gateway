@@ -9,6 +9,7 @@ from payment import (
     PAYER_ADDRESS,
     ensure_escrow_deposit,
     explorer_link,
+    native_balance,
     sbc_balance,
     sign_escrow_authorization,
     sign_permit2_payment,
@@ -126,6 +127,7 @@ def demo_escrow_series(prompts: list[str]) -> dict:
 
     provider_before = sbc_balance(PAY_TO_ADDRESS)
     operator_before = sbc_balance(GATEWAY_OPERATOR_ADDRESS)
+    operator_gas_before = native_balance(GATEWAY_OPERATOR_ADDRESS)
     print(f"BEFORE — provider: {fmt_sbc(provider_before)}, operator: {fmt_sbc(operator_before)}")
 
     calls = []
@@ -156,9 +158,15 @@ def demo_escrow_series(prompts: list[str]) -> dict:
 
     provider_after = sbc_balance(PAY_TO_ADDRESS)
     operator_after = sbc_balance(GATEWAY_OPERATOR_ADDRESS)
+    operator_gas_after = native_balance(GATEWAY_OPERATOR_ADDRESS)
     print(f"AFTER  — provider: {fmt_sbc(provider_after)}, operator: {fmt_sbc(operator_after)}")
     print(f"delta  — provider: {provider_after - provider_before} (exactly {len(prompts)} x {price} = {len(prompts) * price})")
-    print(f"delta  — operator: {operator_after - operator_before} (its OWN SBC spent on gas for {len(prompts)} settle() txs — unrelated to the charges above)")
+    # The operator submits every settle() but never holds the money: funds move from
+    # the payer's escrow tab straight to the provider. Gas is native, not SBC.
+    print(f"delta  — operator SBC: {operator_after - operator_before} "
+          f"(ZERO — the operator never takes custody of the payment)")
+    print(f"delta  — operator gas: {operator_gas_after - operator_gas_before} wei of native currency, "
+          f"spent submitting {len(prompts)} settle() txs")
     print(f"nonces used (random + unordered, all distinct): {[fmt_nonce(c['nonce']) for c in calls]}")
 
     resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment})

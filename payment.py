@@ -84,6 +84,12 @@ def sbc_balance(address: str) -> int:
     return _sbc.functions.balanceOf(Web3.to_checksum_address(address)).call()
 
 
+def native_balance(address: str) -> int:
+    """Gas is paid in the chain's native currency, NOT in SBC — so this is the
+    balance that moves when the operator submits settle()."""
+    return _w3.eth.get_balance(Web3.to_checksum_address(address))
+
+
 def explorer_link(tx_hash: str) -> str:
     return f"https://testnet.radiustech.xyz/tx/{tx_hash}"
 
@@ -103,20 +109,29 @@ def _send(account, fn):
     return _w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
 
-def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
-    """Top up the caller's tab if below `min_amount`; returns the new balance.
+def deposit_to_escrow(amount: int) -> dict:
+    """Fund the payer's tab, returning the tx hash so a caller can show the receipt.
     The only gas-paying step the payer makes — everything after is just signing."""
+    account = Account.from_key(WALLET_KEY)
+
+    allowance = _sbc.functions.allowance(account.address, ESCROW_CONTRACT_ADDRESS).call()
+    if allowance < amount:
+        _send(account, _sbc.functions.approve(Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), amount))
+
+    receipt = _send(account, _escrow.functions.deposit(amount))
+    return {
+        "transaction": Web3.to_hex(receipt.transactionHash),
+        "balance": _escrow.functions.balances(account.address).call(),
+    }
+
+
+def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
+    """Idempotent variant: top up only if below `min_amount`. Returns the balance."""
     account = Account.from_key(WALLET_KEY)
     current = _escrow.functions.balances(account.address).call()
     if current >= min_amount:
         return current
-
-    allowance = _sbc.functions.allowance(account.address, ESCROW_CONTRACT_ADDRESS).call()
-    if allowance < top_up:
-        _send(account, _sbc.functions.approve(Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), top_up))
-
-    _send(account, _escrow.functions.deposit(top_up))
-    return _escrow.functions.balances(account.address).call()
+    return deposit_to_escrow(top_up)["balance"]
 
 
 def build_payment_requirements(amount: str = PRICE_BASE_UNITS) -> dict:

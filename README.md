@@ -43,20 +43,29 @@ pip install -r requirements.txt
 
 | Env var | Role | Needs |
 |---|---|---|
-`WALLET_KEY` | **payer** | SBC balance + one-time `approve(Permit2, MAX)` |
-`GATEWAY_OPERATOR_KEY` | **gateway operator** — submits `settle()`, pays its gas | a small SBC balance |
+`WALLET_KEY` | **payer** | SBC balance + one-time `approve(Permit2, MAX)`; also pays gas for `deposit()` |
+`GATEWAY_OPERATOR_KEY` | **gateway operator** — submits `settle()` | **native** currency for gas. It needs *no* SBC: it never takes custody, so its SBC balance never moves |
 `PAY_TO_ADDRESS` | **provider** — receives revenue | nothing |
 
 Fund with `../fund-test-wallet.sh`, or transfer SBC directly if the faucet is dry.
 
 ## Run
 
+The presentation demo drives everything, manages its own gateway, and each of its 12
+steps is independently runnable (`--list`, `--only N`, `--from N`):
+
+```bash
+bash demo_final.sh                     # presenting  (--auto to rehearse)
+```
+
+Or the pieces individually:
+
 ```bash
 uvicorn gateway:app --port 8000        # terminal 1
 
 python client.py                       # happy path: 3 prompts through each scheme
 python security_probes.py              # adversarial: 4 attacks, all blocked
-cd contracts && forge test             # 9/9 contract tests
+forge test --root contracts            # 9/9 contract tests
 cd contracts && python verify_live.py  # live deposit -> settle -> withdraw
 ```
 
@@ -127,6 +136,9 @@ Facilitator | `https://facilitator.testnet.radiustech.xyz` |
 |---|---|
 `gateway.py` | the `402`/`200` endpoint, scheme routing, price enforcement |
 `payment.py` | EIP-712 signing for both schemes, facilitator calls, on-chain settle |
+`demo_final.sh` | **the presentation demo** — 12 steps, both paths, the restart-replay gap |
+`DEMO_NOTES.md` | per-step talking points + prepared answers for likely questions |
+`demo_path_a.sh` | last week's Path A status demo, kept as a fallback |
 `client.py` | the happy-path demo |
 `security_probes.py` | the adversarial demo |
 `llm.py` | Groq inference call |
