@@ -143,6 +143,19 @@ pay() { # pay <header> <prompt> -> full response (headers+body) on stdout
 
 txof() { tr -d '\r' < "$1" | awk 'tolower($1)=="x-payment-response:"{print $2}'; }
 
+# Hand a nonce off to deck.html's live panel. Prints it in full on its own line so
+# it can be read or selected, and pushes it to the clipboard where pbcopy exists —
+# the short form printed during step 8 is deliberately truncated and can't be pasted.
+show_nonce() { # show_nonce <decimal-nonce>
+  echo
+  echo "   ${B}full nonce — paste into the deck's live panel:${R}"
+  echo "   ${C}$1${R}"
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$1" | pbcopy 2>/dev/null &&
+      echo "   ${G}✓ copied to clipboard${R} ${D}— press L in the deck, then ⌘V${R}"
+  fi
+}
+
 # ── lazy dependencies, so any step can run standalone ────────────────────────
 need_path_a_spent() {
   [[ -f "$STATE/a_header" ]] && return
@@ -307,6 +320,7 @@ step_8() {
   note "to the provider. The operator is only allowed to *trigger* that, and only"
   note "for an authorization that names it as settler."
   note "Three distinct random nonces, none collided. No facilitator anywhere."
+  show_nonce "$(cat "$STATE/b_nonce")"
 }
 
 step_9() {
@@ -349,6 +363,7 @@ env = json.loads(base64.b64decode(open('$STATE/b_header').read()))
 print(simulate_escrow_settlement(env['payload']['signature'], env['payload']['escrowAuthorization']))\""
   echo
   echo "   ${B}${G}The gateway restarted and the replay still failed. It holds no state to lose.${R}"
+  show_nonce "$n"
 }
 
 step_11() {

@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<!--
+  Pay-Per-Prompt — presentation deck (INFO7500 final, 2026-08-07)
+
+  Self-contained on purpose: no CDN, no npm, no build step, no external fonts.
+  Open it directly (file://) and it works offline, except for the live on-chain
+  panel, which talks to the Radius testnet RPC. That RPC echoes the Origin header
+  back as Access-Control-Allow-Origin, so the fetches work from file:// too.
+
+    open deck.html                       # macOS
+    python -m http.server 8080           # or serve it, if a browser blocks file://
+
+  Keys:  → / space  next      ← prev      L  live panel      G  slide index
+         F  fullscreen        ?  help     Home/End  first/last
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pay-Per-Prompt — x402 metering for LLM inference</title>
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#111823; --line:#1f2b3a; --ink:#dbe6f3; --dim:#7d8fa6;
+    --cyan:#38bdf8; --green:#34d399; --amber:#fbbf24; --red:#f87171; --violet:#a78bfa;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { height:100%; }
+  body {
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---- slide shell ---------------------------------------------------- */
+  #deck { height:100%; }
+  .slide {
+    display:none; height:100%; padding:4.5vh 5vw 9vh;
+    flex-direction:column; animation:in .18s ease-out;
+  }
+  .slide.active { display:flex; }
+  @keyframes in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+  .kicker {
+    font-family:var(--mono); font-size:1.05vw; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--cyan); margin-bottom:1.6vh;
+  }
+  .kicker.warn { color:var(--amber); }
+  .kicker.good { color:var(--green); }
+  h1 { font-size:5.4vw; line-height:1.04; letter-spacing:-.02em; font-weight:700; }
+  h2 { font-size:3.1vw; line-height:1.12; letter-spacing:-.015em; font-weight:650; margin-bottom:2.4vh; }
+  h3 { font-size:1.5vw; font-weight:650; margin-bottom:1vh; }
+  p, li { font-size:1.42vw; line-height:1.62; color:var(--ink); }
+  .sub { color:var(--dim); }
+  .body { flex:1; min-height:0; display:flex; flex-direction:column; gap:2.2vh; }
+  ul { padding-left:1.5em; display:flex; flex-direction:column; gap:1vh; }
+  strong { color:#fff; font-weight:650; }
+  em { color:var(--amber); font-style:normal; }
+
+  /* ---- reusable bits -------------------------------------------------- */
+  code, .mono { font-family:var(--mono); }
+  code { font-size:.92em; color:var(--cyan); background:#0e1620; padding:.08em .32em; border-radius:3px; }
+
+  pre {
+    font-family:var(--mono); font-size:1.12vw; line-height:1.68;
+    background:#0a1017; border:1px solid var(--line); border-left:3px solid var(--cyan);
+    border-radius:6px; padding:1.6vh 1.4vw; overflow:auto; color:#c7d6e8;
+  }
+  pre .c  { color:#5b6f85; }             /* comment */
+  pre .k  { color:var(--violet); }       /* keyword */
+  pre .s  { color:var(--green); }        /* string */
+  pre .hl { background:#16283a; display:inline-block; width:100%;
+            border-left:2px solid var(--amber); margin-left:-1.4vw; padding-left:calc(1.4vw - 2px); }
+  pre .dim { color:#4a5b6e; }
+
+  table { border-collapse:collapse; width:100%; font-size:1.2vw; }
+  th, td { text-align:left; padding:.95vh 1vw; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; font-size:.95vw; letter-spacing:.09em;
+       text-transform:uppercase; border-bottom-color:#2b3a4d; }
+  td.mono, th.mono { font-family:var(--mono); }
+  .yes { color:var(--green); } .no { color:var(--red); } .warnc { color:var(--amber); }
+
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:2vw; flex:1; min-height:0; }
+  .card {
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:2vh 1.6vw; display:flex; flex-direction:column; gap:1.2vh;
+  }
+  .card.a { border-top:3px solid var(--cyan); }
+  .card.b { border-top:3px solid var(--green); }
+  .card.bad { border-top:3px solid var(--red); }
+  .card h3 { margin:0; }
+  .card .big { font-size:2.6vw; font-weight:700; line-height:1.1; }
+
+  .cut {
+    margin-top:auto; display:flex; align-items:center; gap:.8vw;
+    background:#13202e; border:1px solid #24405c; border-left:3px solid var(--amber);
+    border-radius:6px; padding:1.3vh 1.2vw; font-family:var(--mono); font-size:1.15vw;
+  }
+  .cut b { color:var(--amber); letter-spacing:.06em; }
+  .cut span { color:var(--dim); }
+
+  .flow { display:flex; align-items:center; gap:.7vw; flex-wrap:wrap; font-family:var(--mono); font-size:1.15vw; }
+  .node { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:1vh 1vw; }
+  .node b { display:block; color:#fff; font-size:1.05vw; }
+  .node span { color:var(--dim); font-size:.88vw; }
+  .arrow { color:var(--cyan); font-size:1.4vw; }
+
+  .note { font-size:1.15vw; color:var(--dim); line-height:1.6; }
+  .big-stat { font-family:var(--mono); font-size:2.2vw; color:var(--amber); font-weight:700; }
+
+  /* ---- chrome --------------------------------------------------------- */
+  #bar {
+    position:fixed; left:0; right:0; bottom:0; height:5.6vh; display:flex; align-items:center;
+    gap:1.2vw; padding:0 1.6vw; background:#080c11; border-top:1px solid var(--line);
+    font-family:var(--mono); font-size:.95vw; color:var(--dim); z-index:20;
+  }
+  #bar .title { color:var(--ink); }
+  #bar .spacer { flex:1; }
+  #bar kbd { border:1px solid var(--line); border-radius:3px; padding:.1em .4em; color:var(--dim); }
+  #progress { position:fixed; top:0; left:0; height:2px; background:var(--cyan); z-index:21; transition:width .18s; }
+
+  #live {
+    position:fixed; right:1.4vw; bottom:7.2vh; width:26vw; max-height:66vh; overflow:auto;
+    background:rgba(11,17,25,.97); border:1px solid #24405c; border-radius:8px;
+    padding:1.5vh 1.2vw; font-family:var(--mono); font-size:.95vw; z-index:22;
+    box-shadow:0 18px 50px rgba(0,0,0,.6); display:none;
+  }
+  #live.show { display:block; }
+  #live h4 { font-size:1vw; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
+             margin-bottom:1.1vh; display:flex; align-items:center; gap:.5vw; }
+  #live .row { display:flex; justify-content:space-between; gap:.8vw; padding:.5vh 0;
+               border-bottom:1px solid #16202c; }
+  #live .row:last-child { border-bottom:0; }
+  #live .row span:first-child { color:var(--dim); }
+  #live .row span:last-child { color:var(--ink); text-align:right; word-break:break-all; }
+  #live .dot { width:.6vw; height:.6vw; border-radius:50%; background:var(--dim); flex:none; }
+  #live.ok .dot { background:var(--green); box-shadow:0 0 8px var(--green); }
+  #live.err .dot { background:var(--amber); }
+  #live input {
+    width:100%; margin-top:1.1vh; background:#0a1017; border:1px solid var(--line);
+    color:var(--ink); font-family:var(--mono); font-size:.92vw; padding:.7vh .6vw; border-radius:4px;
+  }
+  #live button {
+    margin-top:.7vh; width:100%; background:#16283a; color:var(--cyan); border:1px solid #24405c;
+    border-radius:4px; padding:.7vh; font-family:var(--mono); font-size:.92vw; cursor:pointer;
+  }
+  #live button:hover { background:#1d3344; }
+  #live .out { margin-top:.9vh; font-size:.92vw; color:var(--dim); line-height:1.5; word-break:break-all; }
+
+  #index {
+    position:fixed; inset:0; background:rgba(6,10,14,.97); z-index:30; display:none;
+    padding:6vh 8vw; overflow:auto;
+  }
+  #index.show { display:block; }
+  #index h3 { font-size:1.6vw; margin-bottom:2.5vh; color:var(--cyan); font-family:var(--mono); }
+  #index ol { list-style:none; display:grid; grid-template-columns:1fr 1fr; gap:.7vh 2vw; }
+  #index li { font-family:var(--mono); font-size:1.15vw; color:var(--dim); cursor:pointer;
+              padding:.7vh 1vw; border-radius:4px; }
+  #index li:hover { background:var(--panel); color:var(--ink); }
+  #index li b { color:var(--cyan); margin-right:.8vw; }
+  #index li.act {
+    grid-column:1 / -1; color:var(--amber); letter-spacing:.16em; text-transform:uppercase;
+    font-size:.95vw; cursor:default; margin-top:1.6vh; padding-left:0;
+  }
+  #index li.act:hover { background:none; color:var(--amber); }
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+<div id="deck"></div>
+
+<!-- live on-chain panel -->
+<div id="live">
+  <h4><span class="dot"></span><span id="liveState">connecting…</span></h4>
+  <div class="row"><span>chain</span><span id="lChain">—</span></div>
+  <div class="row"><span>block</span><span id="lBlock">—</span></div>
+  <div class="row"><span>payer tab (escrow)</span><span id="lTab">—</span></div>
+  <div class="row"><span>provider SBC</span><span id="lProv">—</span></div>
+  <div class="row"><span>escrow <code>provider()</code></span><span id="lImm">—</span></div>
+  <input id="nonceIn" placeholder="paste a nonce → check if spent" spellcheck="false">
+  <button id="nonceGo">nonceUsed(payer, nonce)</button>
+  <div class="out" id="nonceOut">Reads contract storage directly from this browser — a second
+    independent check, not the demo script's word.</div>
+</div>
+
+<div id="index"><h3>slides — click or press number</h3><ol id="indexList"></ol></div>
+
+<div id="bar">
+  <span id="barAct" style="color:var(--cyan)">ACT 1</span>
+  <span class="title" id="barTitle">Pay-Per-Prompt</span>
+  <span class="spacer"></span>
+  <span><kbd>←</kbd><kbd>→</kbd> nav</span>
+  <span><kbd>L</kbd> live</span>
+  <span><kbd>G</kbd> index</span>
+  <span><kbd>F</kbd> full</span>
+  <span id="barCount">1 / 1</span>
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ config */
+const RPC     = "https://rpc.testnet.radiustech.xyz";
+const CHAIN   = 72344;
+const ESCROW  = "0x76c03C8b763a0e2f3594bABfb71847e8a6d502D8";
+const SBC     = "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb";
+const PAYER   = "0xfd4dc70f4b9c4055aC58c6a642aE2bc7be3B032A";
+const OPERATOR= "0xE5377D7716EEC361Be8FA1aEE3BDF92996614C00";
+const PROVIDER= "0xbD5fdCde255Abb883cB0C3137037cAef28ed10ac";
+const PROXY   = "0x402085c248EeA27D92E8b30b2C58ed07f9E20001";
+const PRICE   = 1000;
+
+// selectors, from `cast sig`
+const SEL = {
+  balances:  "0x27e235e3",   // balances(address)
+  nonceUsed: "0x1647795e",   // nonceUsed(address,uint256)
+  balanceOf: "0x70a08231",   // balanceOf(address)
+  provider:  "0x085d4883",   // provider()
+};
+
+/* --------------------------------------------------------------- rpc utils */
+const pad32 = hex => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+const encAddr = a => pad32(a);
+const encUint = n => pad32(BigInt(n).toString(16));
+
+async function rpc(method, params) {
+  const res = await fetch(RPC, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message || "rpc error");
+  return json.result;
+}
+const ethCall = (to, data) => rpc("eth_call", [{ to, data }, "latest"]);
+const asBig    = hex => BigInt(hex);
+const asAddr   = hex => "0x" + hex.slice(-40);
+// SBC has 6 decimals; show base units too, since that's what the demo prints.
+const fmtSbc   = v => `${(Number(v) / 1e6).toFixed(6)} (${v})`;
+
+/* -------------------------------------------------------------- live panel */
+const el = id => document.getElementById(id);
+let liveTimer = null;
+
+async function refreshLive() {
+  const box = el("live");
+  try {
+    const [chainHex, blockHex, tabHex, provHex, immHex] = await Promise.all([
+      rpc("eth_chainId", []),
+      rpc("eth_blockNumber", []),
+      ethCall(ESCROW, SEL.balances + encAddr(PAYER)),
+      ethCall(SBC,    SEL.balanceOf + encAddr(PROVIDER)),
+      ethCall(ESCROW, SEL.provider),
+    ]);
+    const imm = asAddr(immHex);
+    const immOk = imm.toLowerCase() === PROVIDER.toLowerCase();
+
+    el("lChain").textContent = `${asBig(chainHex)}${Number(asBig(chainHex)) === CHAIN ? " ✓" : " ✗"}`;
+    el("lBlock").textContent = asBig(blockHex).toString();
+    el("lTab").textContent   = fmtSbc(asBig(tabHex));
+    el("lProv").textContent  = fmtSbc(asBig(provHex));
+    el("lImm").innerHTML     = immOk
+      ? `<span style="color:var(--green)">${imm.slice(0,10)}… = payTo ✓</span>`
+      : `<span style="color:var(--red)">${imm} ✗</span>`;
+    el("liveState").textContent = "live · reading contract storage";
+    box.className = "show ok";
+  } catch (err) {
+    el("liveState").textContent = "offline — " + err.message;
+    box.className = "show err";
+  }
+}
+
+async function checkNonce() {
+  // Tolerate whatever the terminal hands over: pbcopy may bring a trailing newline,
+  // and long decimals sometimes pick up stray spaces when selected by hand.
+  const raw = el("nonceIn").value.replace(/[\s,]/g, "");
+  const out = el("nonceOut");
+  if (!raw) { out.textContent = "Paste the nonce printed under “full nonce” in demo step 8 or 10."; return; }
+  if (/[…]|\.\.\.$/.test(raw)) {
+    out.innerHTML = `<span style="color:var(--amber)">That's the shortened display form.</span>
+      Use the full value the demo prints under <em>“full nonce”</em> — it's copied to your
+      clipboard automatically, so ⌘V here.`;
+    return;
+  }
+  let n;
+  // BigInt handles both "0x…" and plain decimal, which is what the demo prints.
+  try { n = BigInt(raw); }
+  catch { out.textContent = "Not a valid integer — expected a decimal or 0x-prefixed nonce."; return; }
+  out.textContent = "querying…";
+  try {
+    const res = await ethCall(ESCROW, SEL.nonceUsed + encAddr(PAYER) + encUint(n));
+    const spent = asBig(res) === 1n;
+    out.innerHTML = spent
+      ? `<span style="color:var(--green)">true — spent in contract storage.</span>
+         A replay of this authorization reverts <em>"nonce already used"</em>.`
+      : `<span style="color:var(--amber)">false — not yet spent</span>, so it is still redeemable
+         by the named settler.`;
+  } catch (err) { out.textContent = "failed: " + err.message; }
+}
+
+function toggleLive() {
+  const box = el("live");
+  const showing = box.classList.contains("show");
+  if (showing) {
+    box.classList.remove("show");
+    clearInterval(liveTimer); liveTimer = null;
+  } else {
+    box.classList.add("show");
+    refreshLive();
+    liveTimer = setInterval(refreshLive, 12000);
+  }
+}
+
+/* ------------------------------------------------------------------ slides */
+// Slides are defined by name below, then sequenced by ORDER. Keeping the running
+// order separate from the definitions is what makes the three-act shape easy to
+// re-cut without moving big blocks of HTML around.
+const SLIDES = {};
+const slide = (title, kicker, html) => { SLIDES[title] = { title, kicker, html }; };
+
+const ORDER = [
+  // ── ACT 1 — deck: what I built, and the whole contract ──────────────
+  "Title", "HTTP 402", "Architecture", "Path A",
+  "The contract", "Struct vs Permit2", "settle()", "Unordered nonces",
+  "deposit / withdraw", "Path B — custody", "Tests", "THE GAP",
+  // ── ACT 2 — terminal: one uninterrupted run ─────────────────────────
+  "Intermission",
+  // ── ACT 3 — deck: what that proved, and the honest verdict ──────────
+  "THE PAYOFF", "Why not a DB", "Probes", "Comparison", "What's left", "End",
+];
+
+// First slide index of each act, used for the footer indicator.
+const ACTS = [
+  { at: 0,  label: "ACT 1 · what I built" },
+  { at: 12, label: "ACT 2 · live demo" },
+  { at: 13, label: "ACT 3 · what it proved" },
+];
+const actOf = i => ACTS.filter(a => a.at <= i).pop().label;
+
+slide("Title", null, `
+  <div class="body" style="justify-content:center">
+    <div class="kicker">INFO7500 · Cryptocurrency &amp; Smart Contracts · final project</div>
+    <h1>Pay&#8209;Per&#8209;Prompt</h1>
+    <p style="font-size:1.75vw; margin-top:1.8vh; color:#fff; font-weight:600;
+              letter-spacing:.01em">
+      Amogh Jayasimha
+    </p>
+    <p style="font-size:1.9vw; margin-top:1.5vh; max-width:62ch">
+      An <strong>x402-metered paywall for LLM inference</strong>, built twice —
+      once on existing payment infrastructure, once on a contract I wrote — so the
+      trade-off between them can be <em>measured instead of argued</em>.
+    </p>
+    <p class="note" style="margin-top:2.5vh">
+      Radius testnet · chain 72344 · every transaction in this talk is real<br>
+      Press <b style="color:var(--cyan)">L</b> at any time to read contract storage live from this browser.
+    </p>
+  </div>`);
+
+slide("HTTP 402", "the mechanism", `
+  <h2>HTTP <span style="color:var(--cyan)">402 Payment Required</span> has been in the spec since 1997.<br>
+  Essentially nobody used it.</h2>
+  <div class="body">
+    <p>x402 makes it real: instead of just refusing, the server <strong>names its price in a
+    machine-readable body</strong>. The client pays by signing a message and retries.</p>
+    <pre><span class="c">// POST /infer  with no payment</span>
+<span class="k">402</span> {
+  "x402Version": 2,
+  "accepts": [
+    { "scheme":"exact", "amount":<span class="s">"1000"</span>, <span class="c">// base units, not a float</span>
+      "extra":{ "assetTransferMethod":<span class="s">"permit2"</span> } },          <span class="c">// Path A</span>
+    { "scheme":"exact", "amount":<span class="s">"1000"</span>,
+      "extra":{ "assetTransferMethod":<span class="s">"inference-escrow"</span> } }  <span class="c">// Path B — my contract</span>
+  ]
+}</pre>
+    <p><strong>Two entries. One endpoint. The caller picks how to pay.</strong>
+    That is the whole reason both paths can be compared under identical conditions —
+    same product, same price, same server.</p>
+  </div>`);
+
+slide("Architecture", "three wallets, never collapsed", `
+  <h2>Three genuinely separate wallets</h2>
+  <div class="body">
+    <div class="flow">
+      <div class="node"><b>PAYER</b><span>0xfd4dc70f…</span><span>signs, holds funds</span></div>
+      <span class="arrow">──▶</span>
+      <div class="node"><b>GATEWAY OPERATOR</b><span>0xE5377D77…</span><span>submits settle(), pays gas</span></div>
+      <span class="arrow">──▶</span>
+      <div class="node"><b>PROVIDER</b><span>0xbD5fdCde…</span><span>receives revenue</span></div>
+    </div>
+    <p>Most demos collapse these into one wallet for convenience. Keeping them apart is
+    what makes <code>msg.sender != payer</code> inside <code>settle()</code>
+    <strong>a fact you can watch</strong> rather than a claim I make.</p>
+    <table>
+      <tr><th>Layer</th><th>Path A</th><th>Path B</th></tr>
+      <tr><td>Who settles</td><td>Radius facilitator (3rd party)</td><td class="yes">my operator wallet</td></tr>
+      <tr><td>Who pays gas</td><td class="yes">facilitator — sponsored</td><td>me</td></tr>
+      <tr><td>Contract code I wrote</td><td class="no">none</td><td class="yes">all of it</td></tr>
+    </table>
+    <p class="note"><strong>Path A rents payment infrastructure. Path B owns it.</strong>
+    Every other difference follows from that one line.</p>
+  </div>`);
+
+slide("Path A", "permit2 + facilitator", `
+  <h2>Path A — the payer signs, a third party settles</h2>
+  <div class="body">
+    <pre><span class="c">// EIP-712 PermitWitnessTransferFrom — signed, no transaction sent</span>
+{ permitted: { token: SBC, amount: 1000 },
+  spender:   x402ExactPermit2Proxy,   <span class="c">// only this contract may consume it</span>
+  witness:   { to: PROVIDER },        <span class="c">// recipient is INSIDE the signed hash</span>
+  nonce:     &lt;random 256-bit&gt;,        <span class="c">// unordered → signing needs no chain read</span>
+  deadline:  now + 300 }              <span class="c">// a leaked signature expires</span></pre>
+    <p><code>witness.to</code> being signed is what makes it <em>safe to hand a signature to a
+    stranger</em> — the facilitator submits the transaction but cannot redirect the funds.</p>
+    <div class="cols" style="flex:none">
+      <div class="card a"><h3>The payer's cost</h3><div class="big">0 gas</div>
+        <p class="note">No transaction. Just a signature over typed data. This is the entire
+        appeal of the Permit2 pattern.</p></div>
+      <div class="card bad"><h3>Sharp edge that bit me</h3><div class="big">200 ≠ valid</div>
+        <p class="note">The facilitator returns <code>isValid</code> in the <em>body</em>.
+        A forged payment still gets HTTP 200. Check the status code and you accept fraud.</p></div>
+    </div>
+  </div>`);
+
+slide("THE GAP", null, `
+  <div class="kicker warn">§10.5 · the question the demo is going to answer</div>
+  <h2>Both paths work. But they keep their<br>replay guard in <em>very</em> different places.</h2>
+  <div class="body">
+    <table>
+      <tr><th></th><th>Path A</th><th>Path B</th></tr>
+      <tr><td>What rejects a replay</td>
+          <td class="no">two Python <code>set</code>s in my process</td>
+          <td class="yes"><code>nonceUsed[payer][nonce]</code> — contract storage</td></tr>
+      <tr><td>Why it has to be that way</td>
+          <td>the facilitator is <em>idempotent</em> — replay a payload and it returns the same
+              cached tx hash and reports <strong>success</strong>, not an error</td>
+          <td>the check runs inside <code>settle()</code>, so the chain answers it</td></tr>
+    </table>
+    <p style="font-size:1.6vw; margin-top:1.5vh">So when Path A returns a <code>409</code>,
+    <strong>that rejection is my code's opinion — not the chain's.</strong></p>
+    <div class="card bad" style="flex:none; margin-top:1vh">
+      <h3 style="color:var(--amber)">Predict before I run it</h3>
+      <p style="font-size:1.5vw">Process memory doesn't survive a process ending.
+      <strong>So what happens if I restart the gateway and replay a payment that has
+      already been spent?</strong></p>
+      <p class="note">Hold that answer. It is step 5 of the demo, and it is the reason
+      the second half of this project exists.</p>
+    </div>
+  </div>`);
+
+slide("Intermission", null, `
+  <div class="body" style="justify-content:center">
+    <div class="kicker warn">switching to the terminal now</div>
+    <h1 style="font-size:3.6vw">Everything after this point<br>is <em>live on Radius testnet</em>.</h1>
+    <p style="font-size:1.5vw; margin-top:1vh; max-width:68ch">
+      One script, twelve steps, roughly three minutes. Real signatures, real settlements,
+      real block explorer links. <strong>Nothing is mocked and nothing is pre-recorded.</strong></p>
+    <div class="cols" style="flex:none; margin-top:2vh">
+      <div class="card a"><h3>Path A — steps 1–5</h3>
+        <p class="note mono" style="line-height:1.9">
+          1 · the 402, two schemes<br>
+          2 · pay with a Permit2 signature<br>
+          3 · verify with <code>cast receipt</code><br>
+          4 · replay → 409<br>
+          <span style="color:var(--amber)">5 · restart, replay again → ?</span></p></div>
+      <div class="card b"><h3>Path B — steps 6–11</h3>
+        <p class="note mono" style="line-height:1.9">
+          6 · <code>settle()</code> + forge test 9/9<br>
+          7 · one deposit, one receipt<br>
+          8 · 3 prompts, 3 nonces<br>
+          9 · <code>cast receipt</code> — operator, not payer<br>
+          <span style="color:var(--green)">10 · restart, replay again → ?</span><br>
+          11 · 22 adversarial assertions</p></div>
+    </div>
+    <p class="note" style="margin-top:2vh"><strong>Steps 5 and 10 are the two to watch</strong> —
+    same attack, same restart, opposite outcomes. Everything else is evidence that the
+    money actually moved.<br>
+    <span style="color:var(--dim)">Press <b style="color:var(--cyan)">→</b> when the demo is
+    finished to pick the deck back up.</span></p>
+  </div>`);
+
+slide("Why not a DB", "the objection, answered", `
+  <h2>"Just put the replay guard in a database."</h2>
+  <div class="body">
+    <p style="font-size:1.6vw">It works. In production that is exactly what you would do.
+    <strong>But look at what it actually buys.</strong></p>
+    <table>
+      <tr><th>With a <code>UNIQUE</code> constraint</th><th>With the check in a contract</th></tr>
+      <tr><td>correct while <em>my</em> DB is up</td><td class="yes">correct unconditionally</td></tr>
+      <tr><td>correct if migrations ran</td><td class="yes">no migrations exist</td></tr>
+      <tr><td>breaks if restored from a stale backup</td><td class="yes">no backups to get wrong</td></tr>
+      <tr><td>needs care when sharded per region</td><td class="yes">one global state by construction</td></tr>
+    </table>
+    <p style="font-size:1.6vw; margin-top:1vh">The guarantee has not been made durable.
+    It has been <em>moved into infrastructure I operate</em>.</p>
+    <p class="note">The deeper reason it can't be fixed at the app layer: Path A has
+    <strong>nothing on-chain to ask</strong>. The nonce belongs to Permit2 and was consumed inside
+    a transaction the facilitator submitted, and the facilitator's idempotency then hides reuse
+    behind a cached success. There is no query that answers
+    <em>"has this payment already been redeemed?"</em> with an authoritative no.</p>
+  </div>`);
+
+slide("The contract", "InferenceEscrow.sol", `
+  <div class="kicker good">path B — original work</div>
+  <h2>Deposit once. Sign per prompt. The contract does the rest.</h2>
+  <div class="body">
+    <div class="cols" style="flex:none">
+      <div class="card b"><h3>Three functions, 56 lines</h3>
+        <pre style="font-size:1vw; border:0; padding:0; background:none">
+<span class="k">deposit</span>(amount)   <span class="c">// payer funds a tab — their ONLY tx</span>
+<span class="k">settle</span>(auth, sig) <span class="c">// operator draws down per prompt</span>
+<span class="k">withdraw</span>()       <span class="c">// payer exits, any time</span></pre>
+      </div>
+      <div class="card b"><h3>No privileged role</h3>
+        <div class="big">no owner</div>
+        <p class="note">No <code>Ownable</code>, no admin key, nothing upgradeable, no setters.
+        Nothing for me to compromise or rug with.<br>
+        <strong>Cost, stated honestly:</strong> also no emergency pause.</p>
+      </div>
+    </div>
+    <p>The payer never sends a transaction after the deposit. They sign an
+    <strong>EIP-712 typed-data struct, and the signature <em>is</em> the authorization.</strong></p>
+    <p class="note">The EIP-712 domain is <code>("InferenceEscrow", "1", chainId, contractAddress)</code>.
+    Because my contract's address and the chain ID are inside the hash, a signature for my contract
+    <strong>cannot be replayed against another contract or another chain</strong> — even one with an
+    identical struct layout. OpenZeppelin's <code>EIP712</code> also re-derives the separator if
+    <code>block.chainid</code> changes, so a post-fork chain can't accept the originals.</p>
+  </div>`);
+
+slide("Struct vs Permit2", "what I kept, dropped, and got wrong", `
+  <h2>My <code>Authorization</code> vs Permit2's struct</h2>
+  <div class="body">
+    <table>
+      <tr><th>Permit2 field</th><th>Mine</th><th>Why</th></tr>
+      <tr><td class="mono">spender</td><td class="mono yes">settler</td>
+          <td>Same idea, renamed: who may submit it. <strong class="no">Omitting this was bug §10.2.</strong></td></tr>
+      <tr><td class="mono">witness.to</td><td class="mono dim">— dropped</td>
+          <td>Not needed: <code>provider</code> is <code>immutable</code>, so the recipient isn't a parameter</td></tr>
+      <tr><td class="mono">permitted.token</td><td class="mono dim">— dropped</td>
+          <td><code>token</code> is immutable too</td></tr>
+      <tr><td class="mono">nonce</td><td class="mono">nonce</td>
+          <td>Both unordered. Permit2 packs a bitmap; I use a plain mapping</td></tr>
+      <tr><td class="mono">deadline</td><td class="mono">deadline</td><td>Bounded validity</td></tr>
+    </table>
+    <p style="margin-top:1vh">Every field in Permit2's struct exists to constrain a <em>generic</em>
+    transfer. Mine is single-tenant, so three of them became unnecessary —
+    <strong>but dropping <code>spender</code> was a mistake, and finding that out is the most
+    instructive thing in this project.</strong></p>
+    <p class="note">Without it, <code>settle()</code> accepted <em>any</em> submitter: anyone holding a
+    copy of the payer's signature could burn their nonce and funds without the payer being served.
+    Severity, precisely — <strong>griefing, not theft.</strong> <code>provider</code> is immutable,
+    so funds could never be redirected, only wasted.</p>
+  </div>`);
+
+slide("settle()", "the security argument", `
+  <h2><code>settle()</code> — four checks, in this order on purpose</h2>
+  <div class="body">
+    <pre><span class="k">function</span> settle(Authorization <span class="k">calldata</span> auth, <span class="k">bytes calldata</span> signature) <span class="k">external</span> {
+<span class="hl">    require(msg.sender == auth.settler,       <span class="s">"unauthorized settler"</span>);   <span class="c">// 1</span></span>
+<span class="hl">    require(block.timestamp &lt;= auth.deadline, <span class="s">"authorization expired"</span>);  <span class="c">// 2</span></span>
+
+    bytes32 structHash = keccak256(abi.encode(AUTHORIZATION_TYPEHASH,
+        auth.settler, auth.amount, auth.nonce, auth.deadline));
+    bytes32 digest = _hashTypedDataV4(structHash);
+<span class="hl">    address payer  = ECDSA.recover(digest, signature);                        <span class="c">// 3</span></span>
+
+<span class="hl">    require(!nonceUsed[payer][auth.nonce],    <span class="s">"nonce already used"</span>);     <span class="c">// 4</span></span>
+    nonceUsed[payer][auth.nonce] = <span class="k">true</span>;
+<span class="hl">    require(balances[payer] &gt;= auth.amount,   <span class="s">"insufficient balance"</span>);   <span class="c">// 5</span></span>
+    balances[payer] -= auth.amount;
+
+    token.safeTransfer(provider, auth.amount);   <span class="c">// interaction — last (CEI)</span>
+}</pre>
+    <p><strong>Line 3 is the one to look at.</strong> The payer is <em>derived from the signature</em>.
+    It is not a parameter — there is no <code>from</code> field for an attacker to rewrite. Change any
+    signed field and recovery returns a different address, which has no balance.</p>
+    <p class="note">Nonce is marked spent <em>before</em> the transfer, and the only external call is
+    last: checks-effects-interactions. That's why <code>settle()</code> needs no
+    <code>nonReentrant</code>, while <code>deposit</code> and <code>withdraw</code> do.</p>
+  </div>`);
+
+slide("Unordered nonces", "the decision I'd defend hardest", `
+  <h2>The nonce is <span style="color:var(--cyan)">random</span>, not a counter</h2>
+  <div class="body">
+    <div class="cols" style="flex:none">
+      <div class="card bad"><h3>Sequential counter</h3>
+        <p class="note">Cheaper. But it <strong>serialises the payer</strong>: two prompts signed
+        before the first settles both claim the same next value, so the second reverts as a
+        "replay" <em>despite being completely legitimate</em>.</p>
+        <p class="note">I hit this for real — concurrent prompts produced spurious 409s.</p></div>
+      <div class="card b"><h3>Random 256-bit, unordered</h3>
+        <p class="note">Concurrent prompts can't collide, and choosing a nonce needs
+        <strong>no on-chain read</strong> — so signing stays a purely offline operation.</p>
+        <p class="mono" style="font-size:1vw; color:var(--dim)">mapping(address =&gt; mapping(uint256 =&gt; bool))</p></div>
+    </div>
+    <h3 style="margin-top:1vh">The cost I chose to pay</h3>
+    <p>Permit2 solves this with a <strong>packed bitmap</strong> — 256 nonces per storage slot.
+    I used a plain mapping: about <em>15,000 more gas per settle</em>, and roughly
+    <em>40 fewer lines</em> of bit-twiddling. For a project where someone has to audit it,
+    I took the simpler one. At production volume I would switch.</p>
+    <p class="note">Proven by <code>test_UnorderedNoncesSettleInAnyOrder</code>, which settles
+    <code>type(uint256).max</code>, then <code>7</code>, then <code>0x9e2f</code> — wildly out of
+    order, all fine.</p>
+  </div>`);
+
+slide("deposit / withdraw", "solvency and the exit guarantee", `
+  <h2>The two functions that make this not a trust-me</h2>
+  <div class="body">
+    <pre><span class="k">function</span> deposit(uint256 amount) <span class="k">external</span> nonReentrant {
+    uint256 balanceBefore = token.balanceOf(address(<span class="k">this</span>));
+    token.safeTransferFrom(msg.sender, address(<span class="k">this</span>), amount);
+<span class="hl">    uint256 received = token.balanceOf(address(<span class="k">this</span>)) - balanceBefore;  <span class="c">// the DELTA</span></span>
+    balances[msg.sender] += received;
+}</pre>
+    <p><strong>Credits what actually arrived, not what was requested.</strong> A fee-on-transfer
+    token delivers less than <code>amount</code>; crediting the request would leave the contract
+    <em>owing more than it holds</em>, and the last payer to withdraw could not exit.
+    <code>test_DepositCreditsAmountActuallyReceived</code> asserts the solvency invariant directly
+    against a token that burns 1% in transit.</p>
+    <pre><span class="k">function</span> withdraw() <span class="k">external</span> nonReentrant {
+    uint256 amount = balances[msg.sender];
+    require(amount &gt; 0, <span class="s">"nothing to withdraw"</span>);
+<span class="hl">    balances[msg.sender] = 0;                    <span class="c">// zeroed BEFORE the transfer</span></span>
+    token.safeTransfer(msg.sender, amount);
+}</pre>
+    <p><strong>No owner, no gate, no timelock.</strong> Any payer can leave with their unspent
+    balance at any moment. That is the escrow's exit guarantee.
+    <span class="note">Known limitation: all-or-nothing, no partial withdrawal.</span></p>
+  </div>`);
+
+slide("Tests", "9 behavioural tests, one per property", `
+  <h2>What the test suite actually buys</h2>
+  <div class="body">
+    <table style="font-size:1.1vw">
+      <tr><th>Test</th><th>Property it pins down</th></tr>
+      <tr><td class="mono">ValidSettleDebitsAndPaysProvider</td><td>happy path: debit, pay, nonce marked</td></tr>
+      <tr><td class="mono">RevertOnUnauthorizedSettler</td><td>stranger rejected <strong>and the nonce survives</strong> — a griefer can't burn it</td></tr>
+      <tr><td class="mono">RevertWhenStrangerRewritesSettlerField</td><td>rewriting a <em>signed</em> field changes the digest → different recovered address</td></tr>
+      <tr><td class="mono">RevertOnReplayedNonce</td><td>the on-chain replay guard, isolated</td></tr>
+      <tr><td class="mono">UnorderedNoncesSettleInAnyOrder</td><td><code>uint256.max</code>, <code>7</code>, <code>0x9e2f</code> — arbitrary order</td></tr>
+      <tr><td class="mono">RevertOnExpiredDeadline</td><td><code>vm.warp</code> past the deadline</td></tr>
+      <tr><td class="mono">RevertOnInsufficientBalance</td><td>can't overdraw a tab</td></tr>
+      <tr><td class="mono">DepositCreditsAmountActuallyReceived</td><td>fee-on-transfer solvency invariant</td></tr>
+      <tr><td class="mono">WithdrawAfterPartialSettleReturnsRemainder</td><td>exact remainder returned</td></tr>
+    </table>
+    <p class="note">The test file computes the EIP-712 domain separator <strong>independently</strong>
+    rather than reading it from the contract — so a bug in the contract's hashing cannot hide behind
+    a test that reuses it. Every <code>require()</code> has a test that trips it.</p>
+  </div>`);
+
+slide("Path B — custody", "deposit once, draw down, never take custody", `
+  <h2>Who actually holds the money</h2>
+  <div class="body">
+    <div class="cols" style="flex:none">
+      <div class="card b"><h3>Payer</h3><div class="big">1 tx</div>
+        <p class="note">One <code>deposit()</code>. Everything after is signing — no transactions,
+        no gas.</p></div>
+      <div class="card b"><h3>Operator SBC delta</h3><div class="big" style="color:var(--green)">0</div>
+        <p class="note">It submits every <code>settle()</code> and <strong>never takes custody</strong>.
+        Funds move from the payer's tab straight to <code>provider</code>. Gas comes out of its
+        <em>native</em> balance — a separate flow entirely.</p></div>
+    </div>
+    <p>The operator is only permitted to <em>trigger</em> a payment, and only for an authorization
+    that names it as <code>settler</code>. It cannot choose the recipient, the amount, or the payer.</p>
+    <p class="note">Open the live panel (<b style="color:var(--cyan)">L</b>) and check
+    <code>provider()</code> — the contract's immutable payee, read from storage, matches the
+    advertised <code>payTo</code>. Nothing in the request can change it.</p>
+  </div>`);
+
+slide("THE PAYOFF", null, `
+  <div class="kicker good">what you just watched · steps 5 and 10</div>
+  <h2>Same attack. Same restart. Opposite outcomes.</h2>
+  <div class="body">
+    <div class="cols" style="flex:none">
+      <div class="card bad"><h3>Path A · step 5</h3>
+        <p class="mono" style="font-size:1.5vw">restart → replay → <span class="no">200</span></p>
+        <p class="note">A fresh completion, delivered free. The payer was charged once, the
+        provider paid once — and my accounting stayed perfectly consistent.
+        <strong>That is what made it easy to miss.</strong></p>
+        <p class="big-stat" style="font-size:1.5vw">one payment, two products</p></div>
+      <div class="card b"><h3>Path B · step 10</h3>
+        <p class="mono" style="font-size:1.5vw">restart → replay → <span class="yes">409</span></p>
+        <p class="note">Nothing to wipe. The gateway holds <strong>no replay state at all</strong>,
+        so a restart changes nothing and a second instance behind a load balancer would be
+        automatically consistent with the first.</p>
+        <p class="big-stat" style="font-size:1.5vw; color:var(--green)">one payment, one product</p></div>
+    </div>
+    <h3 style="margin-top:1vh">And that 409 was not my code's opinion</h3>
+    <table style="font-size:1.15vw">
+      <tr><td class="mono" style="width:44%">cast call nonceUsed(payer, nonce)</td>
+          <td class="mono yes">true — spent in contract storage</td></tr>
+      <tr><td class="mono">decoded EVM revert reason</td>
+          <td class="mono yes">"nonce already used"</td></tr>
+    </table>
+    <p><strong>The guarantee moved out of my infrastructure and into the chain.</strong>
+    That is the entire argument for having written a contract.</p>
+    <p class="note">Don't take the terminal's word for it either — press
+    <b style="color:var(--cyan)">L</b>, paste that nonce, and this browser will read the same
+    storage slot independently of the demo script.</p>
+  </div>`);
+
+slide("Probes", "the adversarial half", `
+  <h2>Four attacks that <em>used to succeed</em> against my own code</h2>
+  <div class="body">
+    <table>
+      <tr><th>Probe</th><th>Attack</th><th>Now</th></tr>
+      <tr><td>Underpayment<br><span class="note">both paths</span></td>
+          <td>sign 1 base unit for a 1000-unit product</td>
+          <td class="yes">402 · no funds move · no completion</td></tr>
+      <tr><td>Unauthorized settler</td>
+          <td>redeem an authorization from a wallet that isn't <code>auth.settler</code></td>
+          <td class="yes">revert · <strong>nonce not consumed</strong> · named settler still succeeds</td></tr>
+      <tr><td>Malformed envelope</td>
+          <td>bad base64 / bad JSON / missing keys / non-numeric amount</td>
+          <td class="yes">400, never 500</td></tr>
+      <tr><td>Provider outage</td>
+          <td>pay correctly, but the LLM credentials are broken</td>
+          <td class="yes">502 + <code>charged:false</code> · nonce not consumed</td></tr>
+    </table>
+    <p><strong>22 assertions, checked against live on-chain state</strong> — not against printed
+    output — and the script <em>exits non-zero</em> if any attack gets through. It is a regression
+    test, not a narration.</p>
+    <p class="note">The underpayment probe is the subtle one: the envelope carries my own advertised
+    <code>1000</code> in <code>accepted</code> <em>and</em> a signed <code>1</code> in the payload, so
+    the contradiction sits inside a single request. My original bug built the
+    <code>paymentRequirements</code> sent to <code>/verify</code> from the <em>client's own payload</em>
+    — so the facilitator was comparing the payment against itself.
+    <strong>Its check was correct the whole time; I had disarmed it.</strong></p>
+  </div>`);
+
+slide("Comparison", "the honest verdict", `
+  <h2>I am <em>not</em> claiming mine is better</h2>
+  <div class="body">
+    <table style="font-size:1.15vw">
+      <tr><th></th><th>Path A — Permit2 + facilitator</th><th>Path B — InferenceEscrow</th></tr>
+      <tr><td>Contract code I wrote</td><td>none — audited infra</td><td>56 lines, 9 tests</td></tr>
+      <tr><td>Who pays gas</td><td class="yes">facilitator — sponsored</td><td>me</td></tr>
+      <tr><td>Payer's up-front cost</td><td class="yes">nothing</td><td>one deposit tx</td></tr>
+      <tr><td>On-chain txs per prompt</td><td>1</td><td>1</td></tr>
+      <tr><td>Replay protection lives in</td><td class="no">my process's memory</td><td class="yes">contract storage</td></tr>
+      <tr><td>Survives a restart</td><td class="no">no — step 5</td><td class="yes">yes — step 10</td></tr>
+      <tr><td>Survives horizontal scaling</td><td class="no">no</td><td class="yes">yes</td></tr>
+      <tr><td>Worst case if I'm wrong</td><td>the facilitator rejects it</td><td class="no">I lose people's money</td></tr>
+    </table>
+    <p style="font-size:1.7vw; margin-top:1vh"><strong>They fail in opposite directions:
+    Path A's weakness is <span style="color:var(--cyan)">dependency</span>.
+    Mine is <span style="color:var(--amber)">responsibility</span>.</strong></p>
+    <p>Which wins depends on <em>volume per payer</em>. One prompt: Path A, obviously — deposit plus
+    withdraw to buy a single inference is absurd. Thousands from the same payer: the deposit
+    amortises, and the state problem from step 5 stops being something I can operate my way out of.</p>
+  </div>`);
+
+slide("What's left", "stated, not hidden", `
+  <h2>What I did <em>not</em> do</h2>
+  <div class="body">
+    <table>
+      <tr><th>Gap</th><th>Honest severity</th></tr>
+      <tr><td><strong>Reserve/capture</strong> (§10.4) — validation <em>reads</em> a balance
+          instead of holding it, so concurrent requests each pass before any settles</td>
+          <td>Costs me duplicated model calls. <span class="yes">No funds at risk, no free
+          inference</span> — the completion is withheld when settlement fails.
+          Fix costs <em>two txs per prompt</em>, which weakens Path B's own amortisation argument</td></tr>
+      <tr><td><strong>No emergency pause</strong></td>
+          <td>A discovered bug means funds sit until each payer withdraws. Nothing is trapped,
+          but I have no lever</td></tr>
+      <tr><td><strong>Batched settlement</strong></td>
+          <td class="warnc">Not built — and I won't claim it. One <code>settle()</code> per prompt;
+          step 8 prints three separate tx hashes. Owning the contract makes batching
+          <em>expressible</em>, which is a different claim</td></tr>
+      <tr><td><strong>Malicious gateway operator</strong></td>
+          <td>Unexplored. Every finding so far assumed a malicious <em>payer</em> or a failing
+          <em>provider</em></td></tr>
+      <tr><td><strong>Permit2 bitmap claim</strong></td>
+          <td>From documentation, never verified against the deployed Permit2 on Radius</td></tr>
+    </table>
+    <p class="note">Five findings from auditing my own code are written up in REPORT.md §10 —
+    three fixed, two left open on purpose. <strong>The omissions turned out to be the most
+    instructive part of the project.</strong></p>
+  </div>`);
+
+slide("End", null, `
+  <div class="body" style="justify-content:center">
+    <div class="kicker good">thank you</div>
+    <h1 style="font-size:4.2vw">Two paths. One endpoint.<br>A trade-off you can measure.</h1>
+    <table style="margin-top:3vh; font-size:1.2vw; max-width:74ch">
+      <tr><td>Contract</td><td class="mono">0x76c03C8b763a0e2f3594bABfb71847e8a6d502D8</td></tr>
+      <tr><td>Chain</td><td class="mono">Radius testnet · 72344</td></tr>
+      <tr><td>Tests</td><td class="mono">9/9 Foundry · 22 probe assertions</td></tr>
+      <tr><td>Report</td><td class="mono">REPORT.md — 13 sections, §10 findings, §11 trade-offs</td></tr>
+    </table>
+    <p class="note" style="margin-top:2.5vh">Questions — and the live panel
+    (<b style="color:var(--cyan)">L</b>) is still connected if anyone wants to check state
+    themselves.</p>
+  </div>`);
+
+/* ------------------------------------------------------------- deck engine */
+const S = ORDER.map(name => {
+  const s = SLIDES[name];
+  if (!s) throw new Error(`ORDER references an undefined slide: "${name}"`);
+  return s;
+});
+let cur = 0;
+
+function build() {
+  const deck = el("deck");
+  deck.innerHTML = S.map((s, i) => `
+    <section class="slide" data-i="${i}">
+      ${s.kicker && !s.html.includes('class="kicker') ? `<div class="kicker">${s.kicker}</div>` : ""}
+      ${s.html}
+    </section>`).join("");
+
+  el("indexList").innerHTML = S.map((s, i) => {
+    const actStart = ACTS.find(a => a.at === i);
+    return `${actStart ? `<li class="act">${actStart.label}</li>` : ""}
+      <li data-i="${i}"><b>${String(i + 1).padStart(2, "0")}</b>${s.title}</li>`;
+  }).join("");
+  el("indexList").querySelectorAll("li[data-i]").forEach(li =>
+    li.addEventListener("click", () => { go(+li.dataset.i); el("index").classList.remove("show"); }));
+}
+
+function go(i) {
+  cur = Math.max(0, Math.min(S.length - 1, i));
+  document.querySelectorAll(".slide").forEach(s =>
+    s.classList.toggle("active", +s.dataset.i === cur));
+  el("barTitle").textContent = S[cur].title;
+  el("barAct").textContent = actOf(cur);
+  el("barCount").textContent = `${cur + 1} / ${S.length}`;
+  el("progress").style.width = `${((cur + 1) / S.length) * 100}%`;
+  location.hash = cur + 1;
+}
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") { if (e.key === "Enter") checkNonce(); return; }
+  switch (e.key) {
+    case "ArrowRight": case " ": case "PageDown": go(cur + 1); e.preventDefault(); break;
+    case "ArrowLeft":  case "PageUp":             go(cur - 1); e.preventDefault(); break;
+    case "Home": go(0); break;
+    case "End":  go(S.length - 1); break;
+    case "l": case "L": toggleLive(); break;
+    case "g": case "G": el("index").classList.toggle("show"); break;
+    case "f": case "F":
+      document.fullscreenElement ? document.exitFullscreen() : document.body.requestFullscreen();
+      break;
+    case "Escape": el("index").classList.remove("show"); break;
+  }
+});
+
+// click right/left half to advance — handy when presenting from a trackpad
+document.addEventListener("click", e => {
+  if (e.target.closest("#live, #index, #bar, a, input, button")) return;
+  go(e.clientX > window.innerWidth / 2 ? cur + 1 : cur - 1);
+});
+
+el("nonceGo").addEventListener("click", checkNonce);
+
+build();
+go(location.hash ? parseInt(location.hash.slice(1), 10) - 1 || 0 : 0);
+</script>
+</body>
+</html>
