@@ -49,11 +49,19 @@ GATEWAY_OPERATOR_ADDRESS = Account.from_key(GATEWAY_OPERATOR_KEY).address
 
 _w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
-# Load the ABI from Foundry's artifact so it can't drift from the deployed contract.
-_ESCROW_ARTIFACT = Path(__file__).parent / "contracts" / "out" / "InferenceEscrow.sol" / "InferenceEscrow.json"
-ESCROW_ABI = json.loads(_ESCROW_ARTIFACT.read_text())["abi"]
+# Generated, committed, and CI-verified — not read from Foundry's out/ directory.
+# out/ is build output and untracked, so loading from it made a fresh clone raise
+# FileNotFoundError at import. Committing the ABI trades that for a drift risk, which
+# tests/test_abi_sync.py closes by re-running the extraction and diffing.
+# Regenerate with contracts/sync-abi.sh after any change to InferenceEscrow.sol.
+_ESCROW_ABI_PATH = Path(__file__).parent / "contracts" / "abi" / "InferenceEscrow.json"
+ESCROW_ABI = json.loads(_ESCROW_ABI_PATH.read_text())
 _escrow = _w3.eth.contract(address=Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), abi=ESCROW_ABI)
 
+# Hand-written rather than generated, unlike ESCROW_ABI above, and deliberately so:
+# ERC-20 is a frozen third-party interface we don't build and can't change, and the
+# gateway touches three of its functions. Generate what you own and will modify;
+# hand-write what is external and standardized.
 _ERC20_ABI = [
     {
         "type": "function",

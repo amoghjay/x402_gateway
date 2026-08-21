@@ -3,3 +3,12 @@ venv/
 __pycache__/
 *.pyc
 DEMO_NOTES.md
+
+# Foundry build output. Untracked deliberately: `git rm --cached` alone does not
+# stick, since the files remain on disk and any `git add -A` re-adds them.
+# payment.py reads contracts/abi/InferenceEscrow.json instead — see sync-abi.sh.
+contracts/out/
+contracts/cache/
+
+.pytest_cache/
+PLAN-v2.md
