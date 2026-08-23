@@ -3,10 +3,9 @@ import json
 
 from fastapi import FastAPI, Request, Response
 
+from config import settings
 from llm import InferenceError, call_llm
 from payment import (
-    PRICE_BASE_UNITS,
-    RESOURCE_URL,
     build_escrow_requirements,
     build_payment_requirements,
     settle_payment,
@@ -23,12 +22,15 @@ def _json(status: int, **body) -> Response:
 
 
 def _underpaid(signed_amount: str) -> Response | None:
-    """int() both sides: these arrive as strings, and "9" >= "1000" is True."""
-    if int(signed_amount) < int(PRICE_BASE_UNITS):
+    """The client's amount arrives as a wire string and must be int()ed before
+    comparison — "9" >= "1000" is True lexicographically. The configured price is
+    already an int (see config.Settings.price_base_units), so only one side needs
+    converting and the remaining int() is the one that parses untrusted input."""
+    if int(signed_amount) < settings.price_base_units:
         return _json(
             402,
             error="underpayment",
-            reason=f"signed amount {signed_amount} is less than required {PRICE_BASE_UNITS}",
+            reason=f"signed amount {signed_amount} is less than required {settings.price_base_units}",
         )
     return None
 
@@ -42,7 +44,7 @@ SEEN_SIGNATURES: set[str] = set()
 PAYMENT_REQUIREMENTS_402_BODY = {
     "x402Version": 2,
     "resource": {
-        "url": RESOURCE_URL,
+        "url": settings.resource_url,
         "description": "One LLM inference call",
         "mimeType": "application/json",
     },

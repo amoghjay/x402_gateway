@@ -1,19 +1,17 @@
 import json
-import os
 import re
 import secrets
 import time
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 from eth_abi import decode as abi_decode
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 
-load_dotenv()
+from config import settings
 
 _ERROR_STRING_SELECTOR = bytes.fromhex("08c379a0")
 
@@ -32,22 +30,17 @@ def _decode_revert_reason(exc: ContractLogicError) -> str:
                 pass
     return str(exc)
 
-CHAIN_ID = int(os.environ["CHAIN_ID"])
-PERMIT2_CONTRACT_ADDRESS = os.environ["PERMIT2_CONTRACT_ADDRESS"]
-X402_PROXY_ADDRESS = os.environ["X402_PROXY_ADDRESS"]
-SBC_CONTRACT_ADDRESS = os.environ["SBC_CONTRACT_ADDRESS"]
-PAY_TO_ADDRESS = os.environ["PAY_TO_ADDRESS"]
-WALLET_KEY = os.environ["WALLET_KEY"]
-FACILITATOR_URL = os.environ["FACILITATOR_URL"]
-PRICE_BASE_UNITS = os.environ["PRICE_BASE_UNITS"]
-RPC_URL = os.environ["RPC_URL"]
-ESCROW_CONTRACT_ADDRESS = os.environ["ESCROW_CONTRACT_ADDRESS"]
-GATEWAY_OPERATOR_KEY = os.environ["GATEWAY_OPERATOR_KEY"]
-RESOURCE_URL = "http://localhost:8000/infer"
-PAYER_ADDRESS = Account.from_key(WALLET_KEY).address
-GATEWAY_OPERATOR_ADDRESS = Account.from_key(GATEWAY_OPERATOR_KEY).address
+_w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
 
-_w3 = Web3(Web3.HTTPProvider(RPC_URL))
+
+def _payer_account():
+    return Account.from_key(settings.wallet_key.get_secret_value())
+
+
+def _operator_account():
+    """The wallet that submits settle(). Must not be the payer: the escrow requires
+    msg.sender == auth.settler, so a payer settling for itself proves nothing."""
+    return Account.from_key(settings.gateway_operator_key.get_secret_value())
 
 # Generated, committed, and CI-verified — not read from Foundry's out/ directory.
 # out/ is build output and untracked, so loading from it made a fresh clone raise
@@ -56,7 +49,9 @@ _w3 = Web3(Web3.HTTPProvider(RPC_URL))
 # Regenerate with contracts/sync-abi.sh after any change to InferenceEscrow.sol.
 _ESCROW_ABI_PATH = Path(__file__).parent / "contracts" / "abi" / "InferenceEscrow.json"
 ESCROW_ABI = json.loads(_ESCROW_ABI_PATH.read_text())
-_escrow = _w3.eth.contract(address=Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), abi=ESCROW_ABI)
+# Addresses arrive from config already EIP-55 checksummed (config.Settings validates
+# and normalises them), so there is no to_checksum_address call here.
+_escrow = _w3.eth.contract(address=settings.escrow_contract_address, abi=ESCROW_ABI)
 
 # Hand-written rather than generated, unlike ESCROW_ABI above, and deliberately so:
 # ERC-20 is a frozen third-party interface we don't build and can't change, and the
@@ -85,7 +80,7 @@ _ERC20_ABI = [
         "outputs": [{"type": "uint256"}],
     },
 ]
-_sbc = _w3.eth.contract(address=Web3.to_checksum_address(SBC_CONTRACT_ADDRESS), abi=_ERC20_ABI)
+_sbc = _w3.eth.contract(address=settings.sbc_contract_address, abi=_ERC20_ABI)
 
 
 def sbc_balance(address: str) -> int:
@@ -99,32 +94,39 @@ def native_balance(address: str) -> int:
 
 
 def explorer_link(tx_hash: str) -> str:
-    return f"https://testnet.radiustech.xyz/tx/{tx_hash}"
+    return f"{settings.explorer_base_url}/tx/{tx_hash}"
 
 
 def _send(account, fn):
     tx = fn.build_transaction(
         {
             "from": account.address,
-            "chainId": CHAIN_ID,
+            "chainId": settings.chain_id,
             "nonce": _w3.eth.get_transaction_count(account.address, "pending"),
-            "gas": 300_000,
+            "gas": settings.settlement_gas_limit,
             "gasPrice": _w3.eth.gas_price,
         }
     )
     signed = account.sign_transaction(tx)
     tx_hash = _w3.eth.send_raw_transaction(signed.raw_transaction)
-    return _w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    # poll_latency is passed explicitly at web3's own default so the polling rate is
+    # visible and tunable rather than inherited; both values are retuned in the
+    # correctness pass, not here.
+    return _w3.eth.wait_for_transaction_receipt(
+        tx_hash,
+        timeout=settings.receipt_timeout_seconds,
+        poll_latency=settings.receipt_poll_latency_seconds,
+    )
 
 
 def deposit_to_escrow(amount: int) -> dict:
     """Fund the payer's tab, returning the tx hash so a caller can show the receipt.
     The only gas-paying step the payer makes — everything after is just signing."""
-    account = Account.from_key(WALLET_KEY)
+    account = _payer_account()
 
-    allowance = _sbc.functions.allowance(account.address, ESCROW_CONTRACT_ADDRESS).call()
+    allowance = _sbc.functions.allowance(account.address, settings.escrow_contract_address).call()
     if allowance < amount:
-        _send(account, _sbc.functions.approve(Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS), amount))
+        _send(account, _sbc.functions.approve(Web3.to_checksum_address(settings.escrow_contract_address), amount))
 
     receipt = _send(account, _escrow.functions.deposit(amount))
     return {
@@ -135,21 +137,25 @@ def deposit_to_escrow(amount: int) -> dict:
 
 def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
     """Idempotent variant: top up only if below `min_amount`. Returns the balance."""
-    account = Account.from_key(WALLET_KEY)
+    account = _payer_account()
     current = _escrow.functions.balances(account.address).call()
     if current >= min_amount:
         return current
     return deposit_to_escrow(top_up)["balance"]
 
 
-def build_payment_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
-    """One `accepts[]` entry, reused as `paymentRequirements` for the facilitator."""
+def build_payment_requirements(amount: int | None = None) -> dict:
+    """One `accepts[]` entry, reused as `paymentRequirements` for the facilitator.
+
+    `amount` is an int here and a decimal string on the wire: x402 serialises token
+    amounts as strings because JSON cannot hold a uint256, and str() at this boundary
+    is the only place the conversion happens."""
     return {
         "scheme": "exact",
-        "network": f"eip155:{CHAIN_ID}",
-        "amount": amount,
-        "payTo": PAY_TO_ADDRESS,
-        "asset": SBC_CONTRACT_ADDRESS,
+        "network": f"eip155:{settings.chain_id}",
+        "amount": str(settings.price_base_units if amount is None else amount),
+        "payTo": settings.pay_to_address,
+        "asset": settings.sbc_contract_address,
         "maxTimeoutSeconds": 300,
         "extra": {
             "assetTransferMethod": "permit2",
@@ -160,14 +166,14 @@ def build_payment_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
 
 
 def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str, dict]:
-    """Sign a Permit2 PermitWitnessTransferFrom for `amount` of SBC to PAY_TO_ADDRESS.
+    """Sign a Permit2 PermitWitnessTransferFrom for `amount` of SBC to settings.pay_to_address.
     Returns (signature_hex, the `permit2Authorization` dict the facilitator expects)."""
-    account = Account.from_key(WALLET_KEY)
+    account = _payer_account()
 
     domain = {
         "name": "Permit2",
-        "chainId": CHAIN_ID,
-        "verifyingContract": PERMIT2_CONTRACT_ADDRESS,
+        "chainId": settings.chain_id,
+        "verifyingContract": settings.permit2_contract_address,
     }
 
     types = {
@@ -192,11 +198,11 @@ def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str,
     deadline = int(time.time()) + deadline_seconds
 
     message = {
-        "permitted": {"token": SBC_CONTRACT_ADDRESS, "amount": amount},
-        "spender": X402_PROXY_ADDRESS,
+        "permitted": {"token": settings.sbc_contract_address, "amount": amount},
+        "spender": settings.x402_proxy_address,
         "nonce": nonce,
         "deadline": deadline,
-        "witness": {"to": PAY_TO_ADDRESS, "validAfter": 0},
+        "witness": {"to": settings.pay_to_address, "validAfter": 0},
     }
 
     signable = encode_typed_data(domain_data=domain, message_types=types, message_data=message)
@@ -205,12 +211,12 @@ def sign_permit2_payment(amount: int, deadline_seconds: int = 300) -> tuple[str,
     # hexbytes .hex() is not 0x-prefixed on this version.
     signature_hex = "0x" + signed.signature.hex()
     authorization = {
-        "permitted": {"token": SBC_CONTRACT_ADDRESS, "amount": str(amount)},
+        "permitted": {"token": settings.sbc_contract_address, "amount": str(amount)},
         "from": account.address,
-        "spender": X402_PROXY_ADDRESS,
+        "spender": settings.x402_proxy_address,
         "nonce": str(nonce),
         "deadline": str(deadline),
-        "witness": {"to": PAY_TO_ADDRESS, "validAfter": "0"},
+        "witness": {"to": settings.pay_to_address, "validAfter": "0"},
     }
     return signature_hex, authorization
 
@@ -222,7 +228,7 @@ def _build_facilitator_request(signature: str, authorization: dict) -> dict:
     payment_payload = {
         "x402Version": 2,
         "resource": {
-            "url": RESOURCE_URL,
+            "url": settings.resource_url,
             "description": "One LLM inference call",
             "mimeType": "application/json",
         },
@@ -243,7 +249,7 @@ def verify_payment(signature: str, authorization: dict) -> dict:
     """POST to the facilitator's /verify. Validity is signaled by `isValid` in
     the response BODY, not by HTTP status — a bad signature still returns 200."""
     body = _build_facilitator_request(signature, authorization)
-    resp = requests.post(f"{FACILITATOR_URL}/verify", json=body, timeout=10)
+    resp = requests.post(f"{settings.facilitator_url}/verify", json=body, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -252,7 +258,7 @@ def settle_payment(signature: str, authorization: dict) -> dict:
     """POST /settle. A replayed payload returns the SAME cached tx hash rather than
     erroring — the facilitator is idempotent, so the gateway must catch reuse."""
     body = _build_facilitator_request(signature, authorization)
-    resp = requests.post(f"{FACILITATOR_URL}/settle", json=body, timeout=10)
+    resp = requests.post(f"{settings.facilitator_url}/settle", json=body, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -260,19 +266,20 @@ def settle_payment(signature: str, authorization: dict) -> dict:
 # --- Milestone 2: InferenceEscrow — deposit once, sign+settle per prompt ---
 
 
-def build_escrow_requirements(amount: str = PRICE_BASE_UNITS) -> dict:
+def build_escrow_requirements(amount: int | None = None) -> dict:
     """Second `accepts[]` entry. `payTo` is just the contract: `provider` is
-    immutable, set at deploy, not chosen per request."""
+    immutable, set at deploy, not chosen per request. `amount` is serialised as a
+    decimal string for the same reason as build_payment_requirements()."""
     return {
         "scheme": "exact",
-        "network": f"eip155:{CHAIN_ID}",
-        "amount": amount,
-        "payTo": ESCROW_CONTRACT_ADDRESS,
-        "asset": SBC_CONTRACT_ADDRESS,
+        "network": f"eip155:{settings.chain_id}",
+        "amount": str(settings.price_base_units if amount is None else amount),
+        "payTo": settings.escrow_contract_address,
+        "asset": settings.sbc_contract_address,
         "maxTimeoutSeconds": 300,
         "extra": {
             "assetTransferMethod": "inference-escrow",
-            "contractAddress": ESCROW_CONTRACT_ADDRESS,
+            "contractAddress": settings.escrow_contract_address,
         },
     }
 
@@ -281,15 +288,15 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
     """Authorize a draw-down against an existing deposit; moves no funds itself.
     `settler` is the only address that may submit it, so an eavesdropper can't
     redeem it. Nonces are random/unordered, so concurrent prompts can't collide."""
-    account = Account.from_key(WALLET_KEY)
+    account = _payer_account()
     nonce = int.from_bytes(secrets.token_bytes(32), "big")
     deadline = int(time.time()) + deadline_seconds
 
     domain = {
         "name": "InferenceEscrow",
         "version": "1",
-        "chainId": CHAIN_ID,
-        "verifyingContract": ESCROW_CONTRACT_ADDRESS,
+        "chainId": settings.chain_id,
+        "verifyingContract": settings.escrow_contract_address,
     }
     types = {
         "Authorization": [
@@ -300,7 +307,7 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
         ],
     }
     message = {
-        "settler": GATEWAY_OPERATOR_ADDRESS,
+        "settler": settings.gateway_operator_address,
         "amount": amount,
         "nonce": nonce,
         "deadline": deadline,
@@ -311,7 +318,7 @@ def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple
 
     signature_hex = "0x" + signed.signature.hex()
     authorization = {
-        "settler": GATEWAY_OPERATOR_ADDRESS,
+        "settler": settings.gateway_operator_address,
         "amount": str(amount),
         "nonce": str(nonce),
         "deadline": str(deadline),
@@ -332,7 +339,7 @@ def _escrow_settle_fn(signature: str, authorization: dict):
 def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
     """Free pre-flight — this path's /verify. Asks the EVM whether settle() would
     succeed, costing no gas, so the gateway can validate before serving."""
-    account = Account.from_key(GATEWAY_OPERATOR_KEY)
+    account = _operator_account()
     try:
         _escrow_settle_fn(signature, authorization).call({"from": account.address})
     except ContractLogicError as exc:
@@ -341,9 +348,9 @@ def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
 
 
 def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
-    """Settle on-chain from GATEWAY_OPERATOR_KEY — a different wallet from the
+    """Settle on-chain from the operator wallet — a different wallet from the
     payer, so msg.sender genuinely isn't the payer (and must equal auth.settler)."""
-    account = Account.from_key(GATEWAY_OPERATOR_KEY)
+    account = _operator_account()
     receipt = _send(account, _escrow_settle_fn(signature, authorization))
     return {"success": receipt.status == 1, "transaction": Web3.to_hex(receipt.transactionHash)}
 

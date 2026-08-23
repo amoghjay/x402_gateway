@@ -19,10 +19,8 @@ import requests
 from web3.exceptions import ContractLogicError
 
 from client import build_x_payment_header, get_requirements
+from config import settings
 from payment import (
-    GATEWAY_OPERATOR_ADDRESS,
-    PAYER_ADDRESS,
-    PAY_TO_ADDRESS,
     _decode_revert_reason,
     _escrow,
     ensure_escrow_deposit,
@@ -50,7 +48,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 def probe_underpayment(name: str, requirement: dict, auth_key: str, signer) -> None:
     print(f"\n--- Underpayment via {name} ---")
     advertised = int(requirement["amount"])
-    provider_before = sbc_balance(PAY_TO_ADDRESS)
+    provider_before = sbc_balance(settings.pay_to_address)
 
     signature, authorization = signer(amount=UNDERPAY)
     # `accepted` carries the gateway's OWN advertised price, untouched. Only the
@@ -60,7 +58,7 @@ def probe_underpayment(name: str, requirement: dict, auth_key: str, signer) -> N
 
     resp = requests.post(GATEWAY_URL, json={"prompt": "free lunch?"}, headers={"X-PAYMENT": header})
     check("rejected with 402", resp.status_code == 402, f"got {resp.status_code}: {resp.text[:90]}")
-    check("no funds moved", sbc_balance(PAY_TO_ADDRESS) == provider_before)
+    check("no funds moved", sbc_balance(settings.pay_to_address) == provider_before)
     check("no completion served", "completion" not in resp.text)
 
 
@@ -73,27 +71,27 @@ def probe_unauthorized_settler() -> None:
     signature, auth = sign_escrow_authorization(amount=price)
     nonce = int(auth["nonce"])
     auth_tuple = (auth["settler"], int(auth["amount"]), nonce, int(auth["deadline"]))
-    tab_before = _escrow.functions.balances(PAYER_ADDRESS).call()
+    tab_before = _escrow.functions.balances(settings.payer_address).call()
 
     print(f"  auth.settler     = {auth['settler']} (the gateway operator)")
-    print(f"  attempting from  = {PAYER_ADDRESS} (the payer's OWN wallet)")
+    print(f"  attempting from  = {settings.payer_address} (the payer's OWN wallet)")
 
     # Even the payer cannot submit their own authorization — only the named settler.
     try:
-        _escrow.functions.settle(auth_tuple, bytes.fromhex(signature[2:])).call({"from": PAYER_ADDRESS})
+        _escrow.functions.settle(auth_tuple, bytes.fromhex(signature[2:])).call({"from": settings.payer_address})
         check("stranger rejected", False, "NO REVERT — settler check is not working")
     except ContractLogicError as exc:
         reason = _decode_revert_reason(exc)
         check("stranger rejected", reason == "unauthorized settler", f"reverted: {reason!r}")
 
-    check("nonce not consumed", not _escrow.functions.nonceUsed(PAYER_ADDRESS, nonce).call())
-    check("tab untouched", _escrow.functions.balances(PAYER_ADDRESS).call() == tab_before)
+    check("nonce not consumed", not _escrow.functions.nonceUsed(settings.payer_address, nonce).call())
+    check("tab untouched", _escrow.functions.balances(settings.payer_address).call() == tab_before)
 
     # The rejection cost nothing, so the authorization is still redeemable.
     result = settle_escrow_payment(signature, auth)
     check("named settler still succeeds", result.get("success") is True)
-    check("nonce now consumed", _escrow.functions.nonceUsed(PAYER_ADDRESS, nonce).call())
-    charged = tab_before - _escrow.functions.balances(PAYER_ADDRESS).call()
+    check("nonce now consumed", _escrow.functions.nonceUsed(settings.payer_address, nonce).call())
+    charged = tab_before - _escrow.functions.balances(settings.payer_address).call()
     check("charged exactly once", charged == price, f"charged {charged}")
     if result.get("transaction"):
         print(f"  settled by named settler: {explorer_link(result['transaction'])}")
@@ -152,16 +150,16 @@ def probe_provider_outage() -> None:
         nonce = int(auth["nonce"])
         header = build_x_payment_header(RESOURCE, escrow, signature, "escrowAuthorization", auth)
 
-        provider_before = sbc_balance(PAY_TO_ADDRESS)
-        tab_before = _escrow.functions.balances(PAYER_ADDRESS).call()
+        provider_before = sbc_balance(settings.pay_to_address)
+        tab_before = _escrow.functions.balances(settings.payer_address).call()
         resp = requests.post(url, json={"prompt": "what is a mutex?"}, headers={"X-PAYMENT": header})
 
         check("returns 5xx, not a fake 200", resp.status_code >= 500, f"got {resp.status_code}: {resp.text[:80]}")
         check("no canned completion served", "completion" not in resp.text)
         check("response says charged=false", resp.json().get("charged") is False)
-        check("provider received nothing", sbc_balance(PAY_TO_ADDRESS) == provider_before)
-        check("payer's tab untouched", _escrow.functions.balances(PAYER_ADDRESS).call() == tab_before)
-        check("nonce NOT consumed — settle never ran", not _escrow.functions.nonceUsed(PAYER_ADDRESS, nonce).call())
+        check("provider received nothing", sbc_balance(settings.pay_to_address) == provider_before)
+        check("payer's tab untouched", _escrow.functions.balances(settings.payer_address).call() == tab_before)
+        check("nonce NOT consumed — settle never ran", not _escrow.functions.nonceUsed(settings.payer_address, nonce).call())
     finally:
         proc.terminate()
         proc.wait(timeout=10)
@@ -175,7 +173,7 @@ if __name__ == "__main__":
     print("=" * 72)
     print("ADVERSARIAL PROBES — every one of these used to succeed")
     print("=" * 72)
-    print(f"payer    {PAYER_ADDRESS}\noperator {GATEWAY_OPERATOR_ADDRESS}\nprovider {PAY_TO_ADDRESS}")
+    print(f"payer    {settings.payer_address}\noperator {settings.gateway_operator_address}\nprovider {settings.pay_to_address}")
 
     probe_underpayment("Permit2 + facilitator", permit2_req, "permit2Authorization", sign_permit2_payment)
     probe_underpayment("InferenceEscrow", escrow_req, "escrowAuthorization", sign_escrow_authorization)

@@ -3,10 +3,8 @@ import json
 
 import requests
 
+from config import settings
 from payment import (
-    GATEWAY_OPERATOR_ADDRESS,
-    PAY_TO_ADDRESS,
-    PAYER_ADDRESS,
     ensure_escrow_deposit,
     explorer_link,
     native_balance,
@@ -62,8 +60,8 @@ def fmt_nonce(nonce: str) -> str:
 def demo_permit2_series(prompts: list[str]) -> dict:
     print(f"=== Demo 1: Permit2 + Radius facilitator — {len(prompts)} sequential prompts ===")
 
-    payer_before = sbc_balance(PAYER_ADDRESS)
-    provider_before = sbc_balance(PAY_TO_ADDRESS)
+    payer_before = sbc_balance(settings.payer_address)
+    provider_before = sbc_balance(settings.pay_to_address)
     print(f"BEFORE — payer: {fmt_sbc(payer_before)}, provider: {fmt_sbc(provider_before)}")
 
     calls = []
@@ -93,8 +91,8 @@ def demo_permit2_series(prompts: list[str]) -> dict:
         calls.append({"prompt": prompt, "tx": tx_hash})
         last_x_payment, last_prompt = x_payment, prompt
 
-    payer_after = sbc_balance(PAYER_ADDRESS)
-    provider_after = sbc_balance(PAY_TO_ADDRESS)
+    payer_after = sbc_balance(settings.payer_address)
+    provider_after = sbc_balance(settings.pay_to_address)
     print(f"AFTER  — payer: {fmt_sbc(payer_after)}, provider: {fmt_sbc(provider_after)}")
     print(f"delta  — payer: {payer_after - payer_before}, provider: {provider_after - provider_before} "
           f"(exactly {len(prompts)} x {price} = {len(prompts) * price})")
@@ -122,12 +120,12 @@ def demo_escrow_series(prompts: list[str]) -> dict:
 
     balance = ensure_escrow_deposit(min_amount=price * len(prompts))
     print(f"escrow deposit balance: {balance} base units (covers all {len(prompts)} calls from ONE deposit tx)")
-    print(f"payer wallet    : {PAYER_ADDRESS}")
-    print(f"gateway operator: {GATEWAY_OPERATOR_ADDRESS}  <- DIFFERENT wallet, submits settle() + pays its own gas")
+    print(f"payer wallet    : {settings.payer_address}")
+    print(f"gateway operator: {settings.gateway_operator_address}  <- DIFFERENT wallet, submits settle() + pays its own gas")
 
-    provider_before = sbc_balance(PAY_TO_ADDRESS)
-    operator_before = sbc_balance(GATEWAY_OPERATOR_ADDRESS)
-    operator_gas_before = native_balance(GATEWAY_OPERATOR_ADDRESS)
+    provider_before = sbc_balance(settings.pay_to_address)
+    operator_before = sbc_balance(settings.gateway_operator_address)
+    operator_gas_before = native_balance(settings.gateway_operator_address)
     print(f"BEFORE — provider: {fmt_sbc(provider_before)}, operator: {fmt_sbc(operator_before)}")
 
     calls = []
@@ -156,9 +154,9 @@ def demo_escrow_series(prompts: list[str]) -> dict:
         calls.append({"prompt": prompt, "tx": tx_hash, "nonce": authorization["nonce"]})
         last_x_payment, last_prompt, last_nonce = x_payment, prompt, authorization["nonce"]
 
-    provider_after = sbc_balance(PAY_TO_ADDRESS)
-    operator_after = sbc_balance(GATEWAY_OPERATOR_ADDRESS)
-    operator_gas_after = native_balance(GATEWAY_OPERATOR_ADDRESS)
+    provider_after = sbc_balance(settings.pay_to_address)
+    operator_after = sbc_balance(settings.gateway_operator_address)
+    operator_gas_after = native_balance(settings.gateway_operator_address)
     print(f"AFTER  — provider: {fmt_sbc(provider_after)}, operator: {fmt_sbc(operator_after)}")
     print(f"delta  — provider: {provider_after - provider_before} (exactly {len(prompts)} x {price} = {len(prompts) * price})")
     # The operator submits every settle() but never holds the money: funds move from

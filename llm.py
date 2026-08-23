@@ -1,13 +1,11 @@
-import os
-
-from dotenv import load_dotenv
 from groq import Groq
 
-load_dotenv()
+from config import settings
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
-
-MODEL = "llama-3.3-70b-versatile"
+# GROQ_MODEL was present in .env but ignored here: the model was hardcoded, so the
+# variable had no effect and the two could silently disagree. Now the config is the
+# single source.
+client = Groq(api_key=settings.groq_api_key.get_secret_value())
 
 
 class InferenceError(RuntimeError):
@@ -17,7 +15,7 @@ class InferenceError(RuntimeError):
 def call_llm(prompt: str) -> str:
     try:
         r = client.chat.completions.create(
-            model=MODEL,
+            model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
