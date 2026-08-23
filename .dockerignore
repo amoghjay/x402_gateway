@@ -1,0 +1,35 @@
+# The gateway image needs the Python sources, requirements.txt, and the escrow
+# ABI. Nothing else — in particular not the Solidity toolchain or its
+# dependencies, which is why payment.py reads contracts/abi/ rather than
+# Foundry's out/ (see contracts/sync-abi.sh).
+
+.git
+.gitmodules
+.github
+
+# Secrets. .env.example is also excluded: the image takes config from the
+# environment, and shipping a template invites someone to bake it in.
+.env
+.env.example
+
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+
+# Everything under contracts/ except the one file the runtime reads.
+contracts/*
+!contracts/abi
+
+# Docs, demos, and presentation assets are not runtime artifacts.
+*.md
+deck.html
+demo_final.sh
+demo_path_a.sh
+fund-*.sh
+security_probes.py
+client.py
+
+Dockerfile
+.dockerignore

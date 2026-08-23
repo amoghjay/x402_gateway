@@ -10,5 +10,12 @@ DEMO_NOTES.md
 contracts/out/
 contracts/cache/
 
+# forge script writes a per-chain deployment record under broadcast/. Real-chain
+# records are kept on purpose — they are the provenance the original hand-deploy
+# never produced. Only local noise is ignored: 31337 is anvil, and dry-run/ is
+# output from invocations that never broadcast.
+contracts/broadcast/*/31337/
+contracts/broadcast/**/dry-run/
+
 .pytest_cache/
 PLAN-v2.md
