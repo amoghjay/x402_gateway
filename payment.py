@@ -90,6 +90,24 @@ def explorer_link(tx_hash: str) -> str:
     return f"{settings.explorer_base_url}/tx/{tx_hash}"
 
 
+def rpc_reachable() -> bool:
+    """Path B needs this. Path A does not — the facilitator submits its own txs."""
+    try:
+        return _w3.is_connected()
+    except Exception:
+        return False
+
+
+def facilitator_reachable(timeout: float = 2.0) -> bool:
+    """Path A needs this. Any HTTP reply counts: only a connection failure means
+    unreachable, and /verify rejects the bodyless probe a HEAD would send."""
+    try:
+        requests.head(settings.facilitator_url, timeout=timeout)
+        return True
+    except requests.RequestException:
+        return False
+
+
 _nonce_lock = threading.Lock()
 _next_nonce: dict[str, int] = {}
 
@@ -358,7 +376,11 @@ def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
     payer, so msg.sender genuinely isn't the payer (and must equal auth.settler)."""
     account = _operator_account()
     receipt = _send(account, _escrow_settle_fn(signature, authorization))
-    return {"success": receipt.status == 1, "transaction": Web3.to_hex(receipt.transactionHash)}
+    return {
+        "success": receipt.status == 1,
+        "transaction": Web3.to_hex(receipt.transactionHash),
+        "gas_used": receipt.gasUsed,
+    }
 
 
 def settle_escrow_payment(signature: str, authorization: dict) -> dict:
