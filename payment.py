@@ -1,6 +1,7 @@
 import json
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 
@@ -38,25 +39,17 @@ def _payer_account():
 
 
 def _operator_account():
-    """The wallet that submits settle(). Must not be the payer: the escrow requires
-    msg.sender == auth.settler, so a payer settling for itself proves nothing."""
+    """Submits settle(). Must differ from the payer: the escrow requires
+    msg.sender == auth.settler."""
     return Account.from_key(settings.gateway_operator_key.get_secret_value())
 
-# Generated, committed, and CI-verified — not read from Foundry's out/ directory.
-# out/ is build output and untracked, so loading from it made a fresh clone raise
-# FileNotFoundError at import. Committing the ABI trades that for a drift risk, which
-# tests/test_abi_sync.py closes by re-running the extraction and diffing.
-# Regenerate with contracts/sync-abi.sh after any change to InferenceEscrow.sol.
+# Committed, not read from the untracked out/ dir. Regenerate: contracts/sync-abi.sh
+# (tests/test_abi_sync.py fails on drift). Addresses are checksummed by config.
 _ESCROW_ABI_PATH = Path(__file__).parent / "contracts" / "abi" / "InferenceEscrow.json"
 ESCROW_ABI = json.loads(_ESCROW_ABI_PATH.read_text())
-# Addresses arrive from config already EIP-55 checksummed (config.Settings validates
-# and normalises them), so there is no to_checksum_address call here.
 _escrow = _w3.eth.contract(address=settings.escrow_contract_address, abi=ESCROW_ABI)
 
-# Hand-written rather than generated, unlike ESCROW_ABI above, and deliberately so:
-# ERC-20 is a frozen third-party interface we don't build and can't change, and the
-# gateway touches three of its functions. Generate what you own and will modify;
-# hand-write what is external and standardized.
+# Hand-written, unlike ESCROW_ABI: ERC-20 is frozen and external, and we use 3 calls.
 _ERC20_ABI = [
     {
         "type": "function",
@@ -97,21 +90,38 @@ def explorer_link(tx_hash: str) -> str:
     return f"{settings.explorer_base_url}/tx/{tx_hash}"
 
 
+_nonce_lock = threading.Lock()
+_next_nonce: dict[str, int] = {}
+
+
 def _send(account, fn):
-    tx = fn.build_transaction(
-        {
-            "from": account.address,
-            "chainId": settings.chain_id,
-            "nonce": _w3.eth.get_transaction_count(account.address, "pending"),
-            "gas": settings.settlement_gas_limit,
-            "gasPrice": _w3.eth.gas_price,
-        }
-    )
-    signed = account.sign_transaction(tx)
-    tx_hash = _w3.eth.send_raw_transaction(signed.raw_transaction)
-    # poll_latency is passed explicitly at web3's own default so the polling rate is
-    # visible and tunable rather than inherited; both values are retuned in the
-    # correctness pass, not here.
+    # Reading the "pending" nonce per request races: two concurrent sends pick the
+    # same number and one is dropped. Serialise assignment, and hold the lock only
+    # until the tx is broadcast — waiting for the receipt under it would cap
+    # throughput at one settlement per block. Per-process only: two workers sharing
+    # one key still collide.
+    address = account.address
+    with _nonce_lock:
+        nonce = max(_w3.eth.get_transaction_count(address, "pending"), _next_nonce.get(address, 0))
+        _next_nonce[address] = nonce + 1
+        try:
+            tx = fn.build_transaction(
+                {
+                    "from": address,
+                    "chainId": settings.chain_id,
+                    "nonce": nonce,
+                    "gas": settings.settlement_gas_limit,
+                    "gasPrice": _w3.eth.gas_price,
+                }
+            )
+            signed = account.sign_transaction(tx)
+            tx_hash = _w3.eth.send_raw_transaction(signed.raw_transaction)
+        except Exception:
+            # Unused nonce: drop local state so the next call resyncs from chain
+            # rather than leaving a gap that stalls every later tx.
+            _next_nonce.pop(address, None)
+            raise
+
     return _w3.eth.wait_for_transaction_receipt(
         tx_hash,
         timeout=settings.receipt_timeout_seconds,
@@ -146,10 +156,7 @@ def ensure_escrow_deposit(min_amount: int, top_up: int = 20_000) -> int:
 
 def build_payment_requirements(amount: int | None = None) -> dict:
     """One `accepts[]` entry, reused as `paymentRequirements` for the facilitator.
-
-    `amount` is an int here and a decimal string on the wire: x402 serialises token
-    amounts as strings because JSON cannot hold a uint256, and str() at this boundary
-    is the only place the conversion happens."""
+    int in, decimal string out — JSON cannot hold a uint256."""
     return {
         "scheme": "exact",
         "network": f"eip155:{settings.chain_id}",
@@ -268,8 +275,7 @@ def settle_payment(signature: str, authorization: dict) -> dict:
 
 def build_escrow_requirements(amount: int | None = None) -> dict:
     """Second `accepts[]` entry. `payTo` is just the contract: `provider` is
-    immutable, set at deploy, not chosen per request. `amount` is serialised as a
-    decimal string for the same reason as build_payment_requirements()."""
+    immutable, set at deploy, not chosen per request."""
     return {
         "scheme": "exact",
         "network": f"eip155:{settings.chain_id}",

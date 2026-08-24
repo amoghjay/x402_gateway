@@ -2,9 +2,6 @@ from groq import Groq
 
 from config import settings
 
-# GROQ_MODEL was present in .env but ignored here: the model was hardcoded, so the
-# variable had no effect and the two could silently disagree. Now the config is the
-# single source.
 client = Groq(api_key=settings.groq_api_key.get_secret_value())
 
 
@@ -18,6 +15,8 @@ def call_llm(prompt: str) -> str:
             model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
+            # Price is fixed, so provider cost must be bounded.
+            max_completion_tokens=settings.max_completion_tokens,
         )
     except Exception as exc:
         raise InferenceError(f"{type(exc).__name__}: {exc}") from exc

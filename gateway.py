@@ -1,7 +1,9 @@
 import base64
 import json
 
+import requests
 from fastapi import FastAPI, Request, Response
+from web3.exceptions import Web3Exception
 
 from config import settings
 from llm import InferenceError, call_llm
@@ -136,6 +138,16 @@ async def infer(request: Request):
         error, settle = prepare(payload)
     except (KeyError, TypeError, ValueError) as exc:
         return _json(400, error="malformed payment payload", reason=f"{type(exc).__name__}: {exc}")
+    except requests.HTTPError as exc:
+        # verify_payment/settle_payment call raise_for_status(). A 4xx means the
+        # facilitator rejected the payer's payload; anything else is our dependency
+        # failing. Both used to surface as a 500.
+        status = exc.response.status_code if exc.response is not None else None
+        if status is not None and 400 <= status < 500:
+            return _json(402, error="payment invalid", reason=f"facilitator rejected payload ({status})")
+        return _json(503, error="validation unavailable", reason=f"facilitator error ({status})")
+    except (requests.RequestException, Web3Exception) as exc:
+        return _json(503, error="validation unavailable", reason=f"{type(exc).__name__}: {exc}")
     if error is not None:
         return error
 
@@ -147,7 +159,12 @@ async def infer(request: Request):
         return _json(502, error="inference failed", reason=str(exc), charged=False)
 
     # Phase 3: settle. On failure we absorb one inference rather than serve unpaid.
-    error, tx_hash = settle()
+    # No `charged` claim here, unlike phase 2: a receipt timeout (Web3 TimeExhausted)
+    # means the tx may still land, so we genuinely do not know.
+    try:
+        error, tx_hash = settle()
+    except (requests.RequestException, Web3Exception) as exc:
+        return _json(502, error="settlement failed", reason=f"{type(exc).__name__}: {exc}")
     if error is not None:
         return error
 
