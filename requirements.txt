@@ -3,7 +3,7 @@ uvicorn==0.51.0
 groq==1.6.0
 web3==7.16.0
 eth-account==0.13.7
-requests==2.32.5
+requests==2.34.2
 pydantic-settings==2.15.0
 structlog==26.1.0
 prometheus-client==0.26.0
