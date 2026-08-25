@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import time
 
 import requests
@@ -30,6 +31,9 @@ from payment import (
     sign_escrow_authorization,
     sign_permit2_payment,
 )
+
+# Settlement waits on a block, so this is generous — but never unbounded.
+HTTP_TIMEOUT = 90
 
 GATEWAY_URL = "http://localhost:8000/infer"
 UNDERPAY = 1
@@ -56,7 +60,7 @@ def probe_underpayment(name: str, requirement: dict, auth_key: str, signer) -> N
     header = build_x_payment_header(RESOURCE, requirement, signature, auth_key, authorization)
     print(f"  advertised {advertised}, signed {UNDERPAY} ({advertised}x underpayment)")
 
-    resp = requests.post(GATEWAY_URL, json={"prompt": "free lunch?"}, headers={"X-PAYMENT": header})
+    resp = requests.post(GATEWAY_URL, json={"prompt": "free lunch?"}, headers={"X-PAYMENT": header}, timeout=HTTP_TIMEOUT)
     check("rejected with 402", resp.status_code == 402, f"got {resp.status_code}: {resp.text[:90]}")
     check("no funds moved", sbc_balance(settings.pay_to_address) == provider_before)
     check("no completion served", "completion" not in resp.text)
@@ -114,7 +118,7 @@ def probe_malformed_envelopes() -> None:
         ).decode(),
     }
     for label, header in cases.items():
-        resp = requests.post(GATEWAY_URL, json={"prompt": "x"}, headers={"X-PAYMENT": header})
+        resp = requests.post(GATEWAY_URL, json={"prompt": "x"}, headers={"X-PAYMENT": header}, timeout=HTTP_TIMEOUT)
         check(f"{label} -> 4xx not 5xx", 400 <= resp.status_code < 500, f"got {resp.status_code}")
 
 
@@ -126,7 +130,7 @@ def probe_provider_outage() -> None:
     port = 8001
     env = {**os.environ, "GROQ_API_KEY": "gsk_deliberately_invalid_key_for_probe"}
     proc = subprocess.Popen(
-        ["venv/bin/python", "-m", "uvicorn", "gateway:app", "--port", str(port)],
+        [sys.executable, "-m", "uvicorn", "gateway:app", "--port", str(port)],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     url = f"http://localhost:{port}/infer"
@@ -141,7 +145,7 @@ def probe_provider_outage() -> None:
             check("broken-LLM gateway started", False, "never became ready")
             return
 
-        req = requests.post(url, json={"prompt": "ping"}).json()
+        req = requests.post(url, json={"prompt": "ping"}, timeout=HTTP_TIMEOUT).json()
         escrow = next(r for r in req["accepts"] if r["extra"]["assetTransferMethod"] == "inference-escrow")
         price = int(escrow["amount"])
         ensure_escrow_deposit(min_amount=price * 2)
@@ -152,7 +156,7 @@ def probe_provider_outage() -> None:
 
         provider_before = sbc_balance(settings.pay_to_address)
         tab_before = _escrow.functions.balances(settings.payer_address).call()
-        resp = requests.post(url, json={"prompt": "what is a mutex?"}, headers={"X-PAYMENT": header})
+        resp = requests.post(url, json={"prompt": "what is a mutex?"}, headers={"X-PAYMENT": header}, timeout=HTTP_TIMEOUT)
 
         check("returns 5xx, not a fake 200", resp.status_code >= 500, f"got {resp.status_code}: {resp.text[:80]}")
         check("no canned completion served", "completion" not in resp.text)

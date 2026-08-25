@@ -5,6 +5,9 @@ libs = ["lib"]
 gas_price = 1000000000
 evm_version = "cancun"
 via_ir = true
+# Pinned: the pragma allows any ^0.8.20, so an unpinned CI would pick a newer
+# compiler, change gas, and fail `forge snapshot --check` on an unrelated day.
+solc = "0.8.33"
 
 remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",

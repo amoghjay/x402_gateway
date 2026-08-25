@@ -13,6 +13,9 @@ from payment import (
     sign_permit2_payment,
 )
 
+# Settlement waits on a block, so this is generous — but never unbounded.
+HTTP_TIMEOUT = 90
+
 GATEWAY_URL = "http://localhost:8000/infer"
 
 PERMIT2_PROMPTS = [
@@ -42,7 +45,7 @@ def build_x_payment_header(resource: dict, requirement: dict, signature: str, au
 
 
 def get_requirements(prompt: str) -> dict:
-    resp = requests.post(GATEWAY_URL, json={"prompt": prompt})
+    resp = requests.post(GATEWAY_URL, json={"prompt": prompt}, timeout=HTTP_TIMEOUT)
     assert resp.status_code == 402
     return resp.json()
 
@@ -79,7 +82,7 @@ def demo_permit2_series(prompts: list[str]) -> dict:
             requirements["resource"], permit2_req, signature, "permit2Authorization", authorization
         )
 
-        resp = requests.post(GATEWAY_URL, json={"prompt": prompt}, headers={"X-PAYMENT": x_payment})
+        resp = requests.post(GATEWAY_URL, json={"prompt": prompt}, headers={"X-PAYMENT": x_payment}, timeout=HTTP_TIMEOUT)
         assert resp.status_code == 200, f"call {i} failed: {resp.status_code} {resp.text}"
         tx_hash = resp.headers.get("X-PAYMENT-RESPONSE")
         completion = resp.json()["completion"]
@@ -97,7 +100,7 @@ def demo_permit2_series(prompts: list[str]) -> dict:
     print(f"delta  — payer: {payer_after - payer_before}, provider: {provider_after - provider_before} "
           f"(exactly {len(prompts)} x {price} = {len(prompts) * price})")
 
-    resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment})
+    resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment}, timeout=HTTP_TIMEOUT)
     print(f"[replay] reusing call #{len(prompts)}'s payment -> {resp.status_code}")
     assert resp.status_code == 409
     print(f"    body: {resp.json()}")
@@ -142,7 +145,7 @@ def demo_escrow_series(prompts: list[str]) -> dict:
             requirements["resource"], escrow_req, signature, "escrowAuthorization", authorization
         )
 
-        resp = requests.post(GATEWAY_URL, json={"prompt": prompt}, headers={"X-PAYMENT": x_payment})
+        resp = requests.post(GATEWAY_URL, json={"prompt": prompt}, headers={"X-PAYMENT": x_payment}, timeout=HTTP_TIMEOUT)
         assert resp.status_code == 200, f"call {i} failed: {resp.status_code} {resp.text}"
         tx_hash = resp.headers.get("X-PAYMENT-RESPONSE")
         completion = resp.json()["completion"]
@@ -167,7 +170,7 @@ def demo_escrow_series(prompts: list[str]) -> dict:
           f"spent submitting {len(prompts)} settle() txs")
     print(f"nonces used (random + unordered, all distinct): {[fmt_nonce(c['nonce']) for c in calls]}")
 
-    resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment})
+    resp = requests.post(GATEWAY_URL, json={"prompt": last_prompt}, headers={"X-PAYMENT": last_x_payment}, timeout=HTTP_TIMEOUT)
     print(f"[replay] reusing call #{len(prompts)}'s payment (nonce {fmt_nonce(last_nonce)} again) -> {resp.status_code}")
     assert resp.status_code == 409
     print(f"    body: {resp.json()}")

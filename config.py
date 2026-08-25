@@ -3,7 +3,6 @@ from pathlib import Path
 from eth_account import Account
 from pydantic import Field, SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from web3 import Web3
 
 _ADDRESS_FIELDS = (
@@ -48,7 +47,6 @@ class Settings(BaseSettings):
     price_base_units: int = Field(gt=0)
 
     resource_url: str = "http://localhost:8000/infer"
-    gateway_port: int = 8000
 
     settlement_gas_limit: int = Field(default=300_000, gt=0)
     receipt_timeout_seconds: float = Field(default=20.0, gt=0)

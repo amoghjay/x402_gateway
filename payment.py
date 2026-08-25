@@ -27,7 +27,7 @@ def _decode_revert_reason(exc: ContractLogicError) -> str:
             try:
                 (reason,) = abi_decode(["string"], data[4:])
                 return reason
-            except Exception:
+            except Exception:  # noqa: S110 - not Error(string); fall through
                 pass
     return str(exc)
 

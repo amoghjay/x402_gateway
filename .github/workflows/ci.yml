@@ -1,0 +1,55 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # pytest needs forge and anvil too: it runs Deploy.s.sol for real and
+      # re-runs `forge inspect` to catch a stale committed ABI.
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - run: ruff check .
+
+      - run: forge test && forge snapshot --check
+        working-directory: contracts
+
+      # No secrets: tests/conftest.py supplies a hermetic environment.
+      - run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start
+        run: |
+          docker build -t x402-gateway .
+          docker run -d --name gw -p 8000:8000 --env-file .env.ci x402-gateway
+          for _ in $(seq 30); do
+            curl -sf localhost:8000/healthz && break
+            sleep 1
+          done
+
+      - name: Serves the 402 challenge with no chain reachable
+        run: |
+          # Not -f: 402 is the expected status, and -f aborts without writing.
+          code=$(curl -s -o body.json -w '%{http_code}' -X POST localhost:8000/infer \
+            -H 'Content-Type: application/json' -d '{"prompt":"hi"}')
+          test "$code" = 402
+          jq -e '[.accepts[].extra.assetTransferMethod] == ["permit2","inference-escrow"]' body.json
+
+      - if: always()
+        run: docker logs gw
