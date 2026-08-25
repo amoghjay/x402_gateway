@@ -1,13 +1,8 @@
-import os
-
-from dotenv import load_dotenv
 from groq import Groq
 
-load_dotenv()
+from config import settings
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
-
-MODEL = "llama-3.3-70b-versatile"
+client = Groq(api_key=settings.groq_api_key.get_secret_value())
 
 
 class InferenceError(RuntimeError):
@@ -17,9 +12,11 @@ class InferenceError(RuntimeError):
 def call_llm(prompt: str) -> str:
     try:
         r = client.chat.completions.create(
-            model=MODEL,
+            model=settings.groq_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
+            # Price is fixed, so provider cost must be bounded.
+            max_completion_tokens=settings.max_completion_tokens,
         )
     except Exception as exc:
         raise InferenceError(f"{type(exc).__name__}: {exc}") from exc

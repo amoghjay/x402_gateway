@@ -1,0 +1,9 @@
+# The Dockerfile copies an explicit file list, so this only controls build-context
+# size and keeps secrets out of the context entirely.
+.git
+venv/
+__pycache__/
+.pytest_cache/
+.env*
+contracts/*
+!contracts/abi

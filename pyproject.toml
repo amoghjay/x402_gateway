@@ -1,0 +1,17 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["venv", "contracts/lib", "contracts/out"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+# S101: asserts are the point in tests.
+# S603/S607: dev tooling shells out to forge, anvil and uvicorn by design.
+ignore = ["E501", "S101", "S603", "S607"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+# The modules under test sit at the repo root, which bare `pytest` does not put on
+# sys.path (only `python -m pytest` does). Without this, CI fails to import them.
+pythonpath = ["."]
