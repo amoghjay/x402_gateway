@@ -11,7 +11,8 @@ COPY config.py observability.py payment.py llm.py gateway.py ./
 COPY contracts/abi ./contracts/abi
 
 # Config comes from the environment; .dockerignore keeps every .env out of the image.
-RUN adduser --system --no-create-home --uid 10001 gateway
+# Not --system: that caps the uid at 999, and Kubernetes runAsNonRoot wants a high one.
+RUN adduser --disabled-password --gecos "" --no-create-home --uid 10001 gateway
 USER gateway
 
 EXPOSE 8000
