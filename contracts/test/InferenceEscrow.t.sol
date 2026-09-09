@@ -1,216 +1,270 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
 import {InferenceEscrow} from "../src/InferenceEscrow.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {InferenceEscrowCollector} from "../src/InferenceEscrowCollector.sol";
+import {FeeOnTransferSBC} from "./helpers/MockTokens.sol";
+import {EscrowTestBase} from "./helpers/EscrowTestBase.sol";
 
-contract MockSBC is ERC20 {
-    constructor() ERC20("Mock Stable Coin", "SBC") {
-        _mint(msg.sender, 1_000_000 * 10 ** 6);
-    }
-
-    function decimals() public pure override returns (uint8) {
-        return 6;
-    }
-}
-
-/// Burns 1% on every transfer, so the recipient receives less than was sent.
-contract FeeOnTransferSBC is ERC20 {
-    constructor() ERC20("Fee SBC", "fSBC") {
-        _mint(msg.sender, 1_000_000 * 10 ** 6);
-    }
-
-    function decimals() public pure override returns (uint8) {
-        return 6;
-    }
-
-    function _update(address from, address to, uint256 value) internal override {
-        if (from != address(0) && to != address(0)) {
-            uint256 fee = value / 100;
-            super._update(from, address(0xDEAD), fee);
-            value -= fee;
-        }
-        super._update(from, to, value);
-    }
-}
-
-contract InferenceEscrowTest is Test {
-    InferenceEscrow escrow;
-    MockSBC token;
-
+/// Core auth-capture behaviour: authorize/capture, charge (autoCapture),
+/// void, reclaim, refund, and the deposit-once tab underneath all of them.
+contract InferenceEscrowTest is EscrowTestBase {
     uint256 payerKey = 0xA11CE;
     address payer;
-    address provider = address(0xBEEF);
-    address settler = address(0x6A7E);   // the gateway operator wallet
-    address stranger = address(0xBAD);
-
-    bytes32 domainSeparator;
 
     function setUp() public {
+        _deploy();
         payer = vm.addr(payerKey);
-        token = new MockSBC();
-        escrow = new InferenceEscrow(address(token), provider);
+        _fund(payer, 5_000 * 10 ** 6);
+    }
 
-        // Mirrors what _hashTypedDataV4 does internally — computed independently
-        // here rather than relying on the contract, same as we cross-checked the
-        // Python signing against a second, independent recovery earlier.
-        domainSeparator = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("InferenceEscrow")),
-                keccak256(bytes("1")),
-                block.chainid,
-                address(escrow)
+    function test_AuthorizeThenCaptureDebitsTabAndPaysReceiver() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+
+        assertEq(escrow.balances(payer), 4_000 * 10 ** 6, "tab debited on authorize");
+        assertEq(token.balanceOf(receiver), 0, "receiver not paid until capture");
+
+        vm.prank(operator);
+        escrow.capture(info, amount, 0, address(0));
+
+        assertEq(token.balanceOf(receiver), amount, "receiver paid on capture");
+        bytes32 hash = escrow.getHash(info);
+        (bool collected, uint120 capturable, uint120 refundable) = escrow.paymentState(hash);
+        assertTrue(collected);
+        assertEq(capturable, 0, "hold fully captured");
+        assertEq(refundable, amount, "captured amount becomes refundable");
+    }
+
+    /// The racy control: one call debits the tab and pays receiver, no hold.
+    function test_ChargeAutoCaptureDebitsTabAndPaysReceiverInOneTx() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+
+        vm.prank(operator);
+        escrow.charge(info, amount, address(paymentCollector), _collectorData(sig), 0, address(0));
+
+        assertEq(escrow.balances(payer), 4_000 * 10 ** 6, "tab debited");
+        assertEq(token.balanceOf(receiver), amount, "receiver paid immediately");
+    }
+
+    function test_RevertOnAuthorizeWithWrongPayerSignature() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        uint256 strangerKey = 0xBAD;
+        bytes memory wrongSig = _collectSignature(info, amount, strangerKey);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(InferenceEscrowCollector.InvalidPayerSignature.selector, vm.addr(strangerKey), payer)
+        );
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(wrongSig));
+
+        assertEq(escrow.balances(payer), 5_000 * 10 ** 6, "tab untouched on rejected consent");
+    }
+
+    function test_RevertOnPaymentAlreadyCollected() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+
+        // Computed before pranking: escrow.getHash(info) is itself an external
+        // call, and vm.prank only covers the very next one — it would be spent
+        // here, not on authorize(), same trap the v2 tests already noted.
+        bytes32 hash = escrow.getHash(info);
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(InferenceEscrow.PaymentAlreadyCollected.selector, hash));
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+    }
+
+    function test_VoidRecreditsTab() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+        assertEq(escrow.balances(payer), 4_000 * 10 ** 6, "held");
+
+        vm.prank(operator);
+        escrow.void(info);
+
+        assertEq(escrow.balances(payer), 5_000 * 10 ** 6, "released hold re-credited to the tab, not the EOA");
+        assertEq(token.balanceOf(payer), 0, "no external payout happened");
+    }
+
+    function test_RevertOnReclaimBeforeAuthorizationExpiry() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+
+        vm.prank(payer);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                InferenceEscrow.BeforeAuthorizationExpiry.selector, uint48(block.timestamp), info.authorizationExpiry
             )
         );
-
-        token.transfer(payer, 10_000 * 10 ** 6);
-        vm.prank(payer);
-        token.approve(address(escrow), type(uint256).max);
-        vm.prank(payer);
-        escrow.deposit(5_000 * 10 ** 6);
+        escrow.reclaim(info);
     }
 
-    function _sign(address settler_, uint256 amount, uint256 nonce, uint256 deadline)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(escrow.AUTHORIZATION_TYPEHASH(), settler_, amount, nonce, deadline)
+    function test_ReclaimAfterAuthorizationExpiryRecreditsTab() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+
+        vm.warp(info.authorizationExpiry);
+        vm.prank(payer);
+        escrow.reclaim(info);
+
+        assertEq(escrow.balances(payer), 5_000 * 10 ** 6, "payer self-served the release back into the tab");
+    }
+
+    function test_RevertOnCaptureAfterAuthorizationExpiry() public {
+        uint256 amount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+        vm.prank(operator);
+        escrow.authorize(info, amount, address(paymentCollector), _collectorData(sig));
+
+        vm.warp(info.authorizationExpiry);
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                InferenceEscrow.AfterAuthorizationExpiry.selector, uint48(block.timestamp), info.authorizationExpiry
+            )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerKey, digest);
-        return abi.encodePacked(r, s, v);
+        escrow.capture(info, amount, 0, address(0));
     }
 
-    /// Build the matching auth struct for a signature made by _sign.
-    function _auth(address settler_, uint256 amount, uint256 nonce, uint256 deadline)
-        internal
-        pure
-        returns (InferenceEscrow.Authorization memory)
-    {
-        return InferenceEscrow.Authorization({
-            settler: settler_,
-            amount: amount,
-            nonce: nonce,
-            deadline: deadline
-        });
+    function test_PartialCaptureThenVoidRemainder() public {
+        uint256 maxAmount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, maxAmount, 0);
+        bytes memory sig = _collectSignature(info, maxAmount, payerKey);
+        vm.prank(operator);
+        escrow.authorize(info, maxAmount, address(paymentCollector), _collectorData(sig));
+
+        uint256 partialAmount = 400 * 10 ** 6;
+        vm.prank(operator);
+        escrow.capture(info, partialAmount, 0, address(0));
+        assertEq(token.balanceOf(receiver), partialAmount, "partial capture paid");
+
+        vm.prank(operator);
+        escrow.void(info);
+        assertEq(
+            escrow.balances(payer), 5_000 * 10 ** 6 - partialAmount, "only the captured share left the tab permanently"
+        );
     }
 
-    function test_ValidSettleDebitsAndPaysProvider() public {
+    function test_RefundPullsOperatorLiquidityAndPaysPayer() public {
         uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+        vm.prank(operator);
+        escrow.charge(info, amount, address(paymentCollector), _collectorData(sig), 0, address(0));
+        assertEq(token.balanceOf(receiver), amount);
 
-        vm.prank(settler);
-        escrow.settle(_auth(settler, amount, 0, deadline), sig);
+        _approveOperatorRefundLiquidity(amount);
 
-        assertEq(escrow.balances(payer), 4_000 * 10 ** 6, "payer balance should be debited");
-        assertEq(token.balanceOf(provider), amount, "provider should be paid");
-        assertTrue(escrow.nonceUsed(payer, 0), "nonce should be marked spent");
+        vm.prank(operator);
+        escrow.refund(info, amount, address(refundCollector), "");
+
+        assertEq(token.balanceOf(payer), amount, "refund paid the payer's EOA directly, from fresh liquidity");
+        (, , uint120 refundable) = escrow.paymentState(escrow.getHash(info));
+        assertEq(refundable, 0, "refundable balance consumed");
     }
 
-    /// The payer names the gateway as settler; a stranger who obtained a copy of
-    /// the signature must not be able to redeem it (burning the payer's nonce and
-    /// funds without the payer ever being served).
-    function test_RevertOnUnauthorizedSettler() public {
+    function test_RevertOnRefundAfterRefundExpiry() public {
         uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
-        InferenceEscrow.Authorization memory auth = _auth(settler, amount, 0, deadline);
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, amount, 0);
+        bytes memory sig = _collectSignature(info, amount, payerKey);
+        vm.prank(operator);
+        escrow.charge(info, amount, address(paymentCollector), _collectorData(sig), 0, address(0));
+        _approveOperatorRefundLiquidity(amount);
 
-        vm.prank(stranger);
-        vm.expectRevert("unauthorized settler");
-        escrow.settle(auth, sig);
-
-        // Nothing was consumed: the authorization is still spendable by the gateway.
-        assertFalse(escrow.nonceUsed(payer, 0), "nonce must not be spent on a rejected settle");
-        assertEq(escrow.balances(payer), 5_000 * 10 ** 6, "balance must be untouched");
-
-        vm.prank(settler);
-        escrow.settle(auth, sig);
-        assertTrue(escrow.nonceUsed(payer, 0), "gateway can still settle afterwards");
+        vm.warp(info.refundExpiry);
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(InferenceEscrow.AfterRefundExpiry.selector, uint48(block.timestamp), info.refundExpiry)
+        );
+        escrow.refund(info, amount, address(refundCollector), "");
     }
 
-    /// A stranger cannot escape the check by rewriting `settler` in the calldata:
-    /// that field is signed, so the digest changes and recovery yields a different
-    /// address than the payer.
-    function test_RevertWhenStrangerRewritesSettlerField() public {
-        uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
+    function test_RevertOnExceedsMaxAmount() public {
+        uint256 maxAmount = 1_000 * 10 ** 6;
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, maxAmount, 0);
+        uint256 tooMuch = maxAmount + 1;
+        bytes memory sig = _collectSignature(info, tooMuch, payerKey);
 
-        vm.prank(stranger);
-        vm.expectRevert("insufficient balance"); // recovered address is not the payer
-        escrow.settle(_auth(stranger, amount, 0, deadline), sig);
-
-        assertEq(escrow.balances(payer), 5_000 * 10 ** 6, "payer must be untouched");
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(InferenceEscrow.ExceedsMaxAmount.selector, tooMuch, maxAmount));
+        escrow.authorize(info, tooMuch, address(paymentCollector), _collectorData(sig));
     }
 
-    function test_RevertOnReplayedNonce() public {
-        uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
-        InferenceEscrow.Authorization memory auth = _auth(settler, amount, 0, deadline);
+    function test_RevertOnInvalidExpiryOrdering() public {
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, 1_000 * 10 ** 6, 0);
+        info.authorizationExpiry = info.preApprovalExpiry - 1; // authorization before preApproval: invalid
+        bytes memory sig = _collectSignature(info, 1_000 * 10 ** 6, payerKey);
 
-        vm.prank(settler);
-        escrow.settle(auth, sig);
-
-        vm.prank(settler);
-        vm.expectRevert("nonce already used");
-        escrow.settle(auth, sig); // same nonce (0) again — replay
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                InferenceEscrow.InvalidExpiries.selector,
+                info.preApprovalExpiry,
+                info.authorizationExpiry,
+                info.refundExpiry
+            )
+        );
+        escrow.authorize(info, 1_000 * 10 ** 6, address(paymentCollector), _collectorData(sig));
     }
 
-    /// The point of unordered nonces: arbitrary, non-sequential values settle fine
-    /// and in any order, so concurrent prompts from one payer can't collide.
-    function test_UnorderedNoncesSettleInAnyOrder() public {
-        uint256 amount = 100 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        uint256[3] memory nonces = [type(uint256).max, uint256(7), 0x9e2f];
+    function test_RevertOnAfterPreApprovalExpiry() public {
+        InferenceEscrow.PaymentInfo memory info = _paymentInfo(payer, 1_000 * 10 ** 6, 0);
+        bytes memory sig = _collectSignature(info, 1_000 * 10 ** 6, payerKey);
 
-        for (uint256 i = 0; i < nonces.length; i++) {
-            // Build the signature BEFORE pranking: _sign reads
-            // escrow.AUTHORIZATION_TYPEHASH(), and vm.prank only covers the very
-            // next external call — it would be spent on that read, not on settle().
-            bytes memory sig = _sign(settler, amount, nonces[i], deadline);
-            vm.prank(settler);
-            escrow.settle(_auth(settler, amount, nonces[i], deadline), sig);
-            assertTrue(escrow.nonceUsed(payer, nonces[i]), "each nonce marked spent");
-        }
-
-        assertEq(escrow.balances(payer), 5_000 * 10 ** 6 - 3 * amount, "all three charged");
-        assertEq(token.balanceOf(provider), 3 * amount, "provider paid three times");
+        vm.warp(info.preApprovalExpiry);
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                InferenceEscrow.AfterPreApprovalExpiry.selector, uint48(block.timestamp), info.preApprovalExpiry
+            )
+        );
+        escrow.authorize(info, 1_000 * 10 ** 6, address(paymentCollector), _collectorData(sig));
     }
 
-    function test_RevertOnExpiredDeadline() public {
-        uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
+    function test_WithdrawPartial() public {
+        vm.prank(payer);
+        escrow.withdraw(1_000 * 10 ** 6);
 
-        vm.warp(deadline + 1);
-        vm.prank(settler);
-        vm.expectRevert("authorization expired");
-        escrow.settle(_auth(settler, amount, 0, deadline), sig);
+        assertEq(escrow.balances(payer), 4_000 * 10 ** 6, "partial withdrawal leaves the remainder in the tab");
+        assertEq(token.balanceOf(payer), 1_000 * 10 ** 6);
     }
 
-    function test_RevertOnInsufficientBalance() public {
-        uint256 amount = 6_000 * 10 ** 6; // payer only deposited 5,000
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
-
-        vm.prank(settler);
-        vm.expectRevert("insufficient balance");
-        escrow.settle(_auth(settler, amount, 0, deadline), sig);
+    function test_RevertOnWithdrawMoreThanBalance() public {
+        vm.prank(payer);
+        vm.expectRevert(
+            abi.encodeWithSelector(InferenceEscrow.InsufficientTabBalance.selector, payer, 5_000 * 10 ** 6, 6_000 * 10 ** 6)
+        );
+        escrow.withdraw(6_000 * 10 ** 6);
     }
 
     /// deposit() must credit what ARRIVED, not what was asked for. Crediting the
     /// requested amount against a fee-on-transfer token would leave the contract
-    /// owing more than it holds, and the last withdrawer would be unable to exit.
+    /// owing more than it holds. Unchanged behaviour from the prior design.
     function test_DepositCreditsAmountActuallyReceived() public {
         FeeOnTransferSBC feeToken = new FeeOnTransferSBC();
-        InferenceEscrow feeEscrow = new InferenceEscrow(address(feeToken), provider);
+        InferenceEscrow feeEscrow = new InferenceEscrow(address(feeToken));
 
         feeToken.transfer(payer, 10_000 * 10 ** 6);
         vm.startPrank(payer);
@@ -224,24 +278,8 @@ contract InferenceEscrowTest is Test {
         assertEq(credited, requested - requested / 100, "credited the 99% that arrived");
         assertEq(feeToken.balanceOf(address(feeEscrow)), credited, "contract is solvent: holds exactly what it owes");
 
-        // And the payer can actually get it all back out.
         vm.prank(payer);
-        feeEscrow.withdraw();
+        feeEscrow.withdraw(credited);
         assertEq(feeEscrow.balances(payer), 0, "tab drained");
-    }
-
-    function test_WithdrawAfterPartialSettleReturnsRemainder() public {
-        uint256 amount = 1_000 * 10 ** 6;
-        uint256 deadline = block.timestamp + 300;
-        bytes memory sig = _sign(settler, amount, 0, deadline);
-        vm.prank(settler);
-        escrow.settle(_auth(settler, amount, 0, deadline), sig);
-
-        uint256 payerBalBefore = token.balanceOf(payer);
-        vm.prank(payer);
-        escrow.withdraw();
-
-        assertEq(escrow.balances(payer), 0, "escrow balance should be zeroed");
-        assertEq(token.balanceOf(payer), payerBalBefore + 4_000 * 10 ** 6, "payer should get exact remainder back");
     }
 }

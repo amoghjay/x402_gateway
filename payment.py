@@ -7,6 +7,7 @@ from pathlib import Path
 
 import requests
 from eth_abi import decode as abi_decode
+from eth_abi import encode as abi_encode
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
@@ -288,94 +289,208 @@ def settle_payment(signature: str, authorization: dict) -> dict:
     return resp.json()
 
 
-# --- Milestone 2: InferenceEscrow — deposit once, sign+settle per prompt ---
+# --- Milestone 2: InferenceEscrow — deposit once, auth-capture per prompt ---
+#
+# The escrow implements the x402 `auth-capture` scheme. `PaymentInfo` is the
+# scheme's payment identity: 12 fields hashed (with chainId and the escrow
+# address) into a `paymentInfoHash` that keys all on-chain state. The gateway
+# reconstructs that struct from its own config plus the two fields only the
+# client supplies — `payer` and `salt` — exactly as the spec's facilitator does,
+# so no per-payment state is stored on either side.
+
+# Field order is load-bearing: it must match InferenceEscrow.PaymentInfo and
+# PAYMENT_INFO_TYPEHASH exactly, or every hash silently diverges.
+PAYMENT_INFO_FIELDS = (
+    ("operator", "address"),
+    ("payer", "address"),
+    ("receiver", "address"),
+    ("token", "address"),
+    ("maxAmount", "uint120"),
+    ("preApprovalExpiry", "uint48"),
+    ("authorizationExpiry", "uint48"),
+    ("refundExpiry", "uint48"),
+    ("minFeeBps", "uint16"),
+    ("maxFeeBps", "uint16"),
+    ("feeReceiver", "address"),
+    ("salt", "uint256"),
+)
+_PAYMENT_INFO_TUPLE_TYPE = "(" + ",".join(t for _, t in PAYMENT_INFO_FIELDS) + ")"
+PAYMENT_INFO_TYPEHASH = Web3.keccak(
+    text="PaymentInfo(" + ",".join(f"{t} {n}" for n, t in PAYMENT_INFO_FIELDS) + ")"
+)
+
+# Fees are declared out of scope for this implementation: the scheme's fee split
+# is real surface deliberately not built, so every payment pins them to zero.
+NO_FEE = {"minFeeBps": 0, "maxFeeBps": 0, "feeReceiver": "0x" + "00" * 20}
 
 
 def build_escrow_requirements(amount: int | None = None) -> dict:
-    """Second `accepts[]` entry. `payTo` is just the contract: `provider` is
-    immutable, set at deploy, not chosen per request."""
+    """Second `accepts[]` entry. Carries everything the client needs to rebuild
+    `PaymentInfo` itself — the deadlines are absolute, so the client echoes them
+    back and the gateway re-derives the same hash without storing anything."""
+    price = settings.price_base_units if amount is None else amount
+    now = int(time.time())
     return {
+        # Still "exact" with a homegrown discriminator: moving to
+        # scheme: "auth-capture" is Phase 1.5's transport work, deliberately
+        # separate from this contract change.
         "scheme": "exact",
         "network": f"eip155:{settings.chain_id}",
-        "amount": str(settings.price_base_units if amount is None else amount),
-        "payTo": settings.escrow_contract_address,
+        "amount": str(price),
+        "payTo": settings.pay_to_address,
         "asset": settings.sbc_contract_address,
-        "maxTimeoutSeconds": 300,
+        "maxTimeoutSeconds": settings.pre_approval_expiry_seconds,
         "extra": {
             "assetTransferMethod": "inference-escrow",
             "contractAddress": settings.escrow_contract_address,
+            "tokenCollector": settings.escrow_collector_address,
+            "captureAuthorizer": settings.gateway_operator_address,
+            "preApprovalExpiry": now + settings.pre_approval_expiry_seconds,
+            "captureDeadline": now + settings.authorization_expiry_seconds,
+            "refundDeadline": now + settings.refund_expiry_seconds,
+            **NO_FEE,
         },
     }
 
 
-def sign_escrow_authorization(amount: int, deadline_seconds: int = 300) -> tuple[str, dict]:
-    """Authorize a draw-down against an existing deposit; moves no funds itself.
-    `settler` is the only address that may submit it, so an eavesdropper can't
-    redeem it. Nonces are random/unordered, so concurrent prompts can't collide."""
+def build_payment_info(payer: str, salt: int, requirements: dict) -> dict:
+    """Assemble the PaymentInfo the escrow will hash. Every field except `payer`
+    and `salt` comes from the requirements the gateway itself issued."""
+    extra = requirements["extra"]
+    return {
+        "operator": Web3.to_checksum_address(extra["captureAuthorizer"]),
+        "payer": Web3.to_checksum_address(payer),
+        "receiver": Web3.to_checksum_address(requirements["payTo"]),
+        "token": Web3.to_checksum_address(requirements["asset"]),
+        "maxAmount": int(requirements["amount"]),
+        "preApprovalExpiry": int(extra["preApprovalExpiry"]),
+        "authorizationExpiry": int(extra["captureDeadline"]),
+        "refundExpiry": int(extra["refundDeadline"]),
+        "minFeeBps": int(extra["minFeeBps"]),
+        "maxFeeBps": int(extra["maxFeeBps"]),
+        "feeReceiver": Web3.to_checksum_address(extra["feeReceiver"]),
+        "salt": int(salt),
+    }
+
+
+def payment_info_tuple(info: dict) -> tuple:
+    """Solidity calldata ordering. web3.py takes structs as plain tuples."""
+    return tuple(
+        Web3.to_checksum_address(info[name]) if solidity_type == "address" else int(info[name])
+        for name, solidity_type in PAYMENT_INFO_FIELDS
+    )
+
+
+def payment_info_hash(info: dict) -> bytes:
+    """Recompute the escrow's `getHash` off-chain, so the payer can sign the
+    payment's identity without an RPC round trip.
+
+    Mirrors InferenceEscrow.getHash: the struct is hashed with its typehash,
+    then again with chainId and the escrow address — which is what stops a
+    signature crossing chains or escrow deployments. tests/test_payment_info_hash.py
+    asserts this equals the contract's own getHash() against a live anvil, rather
+    than trusting that this reimplementation stayed correct.
+    """
+    struct_hash = Web3.keccak(
+        abi_encode(
+            ["bytes32", _PAYMENT_INFO_TUPLE_TYPE],
+            [PAYMENT_INFO_TYPEHASH, payment_info_tuple(info)],
+        )
+    )
+    return Web3.keccak(
+        abi_encode(
+            ["uint256", "address", "bytes32"],
+            [settings.chain_id, settings.escrow_contract_address, struct_hash],
+        )
+    )
+
+
+def sign_escrow_collect(amount: int, requirements: dict | None = None) -> tuple[str, dict]:
+    """Payer side. Signs `Collect(paymentInfoHash, amount)` in the collector's
+    own EIP-712 domain — consent for the collector to debit this payer's tab for
+    this one payment, and nothing else.
+
+    Returns (signature, payload) where payload carries the full PaymentInfo, so
+    the gateway can rebuild the identical struct without keeping state.
+    """
     account = _payer_account()
-    nonce = int.from_bytes(secrets.token_bytes(32), "big")
-    deadline = int(time.time()) + deadline_seconds
+    requirements = build_escrow_requirements() if requirements is None else requirements
+    # The client's only entropy contribution, and what keeps concurrent prompts
+    # from the same payer distinct — same role as the scheme's `salt`.
+    salt = int.from_bytes(secrets.token_bytes(32), "big")
+    info = build_payment_info(account.address, salt, requirements)
 
     domain = {
-        "name": "InferenceEscrow",
+        "name": "InferenceEscrowCollector",
         "version": "1",
         "chainId": settings.chain_id,
-        "verifyingContract": settings.escrow_contract_address,
+        "verifyingContract": settings.escrow_collector_address,
     }
     types = {
-        "Authorization": [
-            {"name": "settler", "type": "address"},
+        "Collect": [
+            {"name": "paymentInfoHash", "type": "bytes32"},
             {"name": "amount", "type": "uint256"},
-            {"name": "nonce", "type": "uint256"},
-            {"name": "deadline", "type": "uint256"},
         ],
     }
-    message = {
-        "settler": settings.gateway_operator_address,
-        "amount": amount,
-        "nonce": nonce,
-        "deadline": deadline,
-    }
+    message = {"paymentInfoHash": payment_info_hash(info), "amount": amount}
 
     signable = encode_typed_data(domain_data=domain, message_types=types, message_data=message)
     signed = account.sign_message(signable)
 
-    signature_hex = "0x" + signed.signature.hex()
-    authorization = {
-        "settler": settings.gateway_operator_address,
+    payload = {
+        "paymentInfo": {k: str(v) for k, v in info.items()},
         "amount": str(amount),
-        "nonce": str(nonce),
-        "deadline": str(deadline),
     }
-    return signature_hex, authorization
+    return "0x" + signed.signature.hex(), payload
 
 
-def _escrow_settle_fn(signature: str, authorization: dict):
-    auth_tuple = (
-        Web3.to_checksum_address(authorization["settler"]),
-        int(authorization["amount"]),
-        int(authorization["nonce"]),
-        int(authorization["deadline"]),
+def _collector_data(signature: str) -> bytes:
+    """The collector reads its payer signature as an abi-encoded `bytes`, so the
+    opaque `collectorData` blob the scheme passes through is that encoding."""
+    return abi_encode(["bytes"], [bytes.fromhex(signature[2:])])
+
+
+def _authorize_fn(info: dict, amount: int, signature: str):
+    return _escrow.functions.authorize(
+        payment_info_tuple(info),
+        amount,
+        settings.escrow_collector_address,
+        _collector_data(signature),
     )
-    return _escrow.functions.settle(auth_tuple, bytes.fromhex(signature[2:]))
 
 
-def simulate_escrow_settlement(signature: str, authorization: dict) -> dict:
-    """Free pre-flight — this path's /verify. Asks the EVM whether settle() would
-    succeed, costing no gas, so the gateway can validate before serving."""
+def _capture_fn(info: dict, amount: int):
+    return _escrow.functions.capture(
+        payment_info_tuple(info), amount, 0, NO_FEE["feeReceiver"]
+    )
+
+
+def _charge_fn(info: dict, amount: int, signature: str):
+    return _escrow.functions.charge(
+        payment_info_tuple(info),
+        amount,
+        settings.escrow_collector_address,
+        _collector_data(signature),
+        0,
+        NO_FEE["feeReceiver"],
+    )
+
+
+def _void_fn(info: dict):
+    return _escrow.functions.void(payment_info_tuple(info))
+
+
+def _simulate(fn) -> dict:
     account = _operator_account()
     try:
-        _escrow_settle_fn(signature, authorization).call({"from": account.address})
+        fn.call({"from": account.address})
     except ContractLogicError as exc:
         return {"ok": False, "error": _decode_revert_reason(exc)}
     return {"ok": True}
 
 
-def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
-    """Settle on-chain from the operator wallet — a different wallet from the
-    payer, so msg.sender genuinely isn't the payer (and must equal auth.settler)."""
-    account = _operator_account()
-    receipt = _send(account, _escrow_settle_fn(signature, authorization))
+def _submit(fn) -> dict:
+    receipt = _send(_operator_account(), fn)
     return {
         "success": receipt.status == 1,
         "transaction": Web3.to_hex(receipt.transactionHash),
@@ -383,10 +498,41 @@ def submit_escrow_settlement(signature: str, authorization: dict) -> dict:
     }
 
 
-def settle_escrow_payment(signature: str, authorization: dict) -> dict:
-    """Wrapper for scripts. The gateway drives the two phases separately so it can
-    serve the inference in between."""
-    simulated = simulate_escrow_settlement(signature, authorization)
-    if not simulated["ok"]:
-        return {"success": False, "error": simulated["error"]}
-    return submit_escrow_settlement(signature, authorization)
+def simulate_escrow_authorization(signature: str, payload: dict) -> dict:
+    """Free pre-flight: would placing the hold succeed? Catches a spent payment,
+    an underfunded tab, a bad signature, and expired deadlines, all without gas."""
+    info, amount = payload["paymentInfo"], int(payload["amount"])
+    return _simulate(_authorize_fn(info, amount, signature))
+
+
+def submit_escrow_authorization(signature: str, payload: dict) -> dict:
+    """Place the hold on-chain. Unlike the v2 single-shot settle(), this happens
+    BEFORE the inference runs — the funds are reserved but not yet the
+    provider's, which is the whole point of the two-phase flow."""
+    info, amount = payload["paymentInfo"], int(payload["amount"])
+    return _submit(_authorize_fn(info, amount, signature))
+
+
+def submit_escrow_capture(payload: dict) -> dict:
+    """Pay the receiver out of an existing hold, after the inference succeeded."""
+    info, amount = payload["paymentInfo"], int(payload["amount"])
+    return _submit(_capture_fn(info, amount))
+
+
+def submit_escrow_void(payload: dict) -> dict:
+    """Release a hold we will not capture — the inference failed, so the payer
+    must get their tab credit back rather than wait for `authorizationExpiry`."""
+    return _submit(_void_fn(payload["paymentInfo"]))
+
+
+def simulate_escrow_charge(signature: str, payload: dict) -> dict:
+    info, amount = payload["paymentInfo"], int(payload["amount"])
+    return _simulate(_charge_fn(info, amount, signature))
+
+
+def submit_escrow_charge(signature: str, payload: dict) -> dict:
+    """Single-shot autoCapture: debit and pay in one transaction. Kept deployed
+    and reachable as the deliberately racy control for the amplification A/B —
+    both arms are conformant `auth-capture` modes of the same contract."""
+    info, amount = payload["paymentInfo"], int(payload["amount"])
+    return _submit(_charge_fn(info, amount, signature))
