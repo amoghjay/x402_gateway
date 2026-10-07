@@ -33,6 +33,18 @@ take more than they paid for, one where *we* could take payment and deliver noth
 found by auditing that last fix, and one where **Path A hands out free inference after a
 restart** — left open on purpose, because it is the reason Path B exists (§10.5).
 
+## Where this is going
+
+The next act moves enforcement out of the application and into the data plane — see
+**[ROADMAP.md](ROADMAP.md)**. In short: the escrow becomes a conformant implementation
+of the published x402 [`auth-capture`](https://github.com/x402-foundation/x402/tree/main/specs/schemes/auth-capture)
+scheme, the transport moves to x402 V2 headers, and an Envoy `ext_proc` filter plus a
+Gateway API `PaymentPolicy` CRD make any HTTP route pay-per-call with zero backend
+changes. The headline constraint is already known: Envoy gives a filter **200ms** by
+default and serves the response **unpaid** when a fail-open filter blows it — an
+on-chain settlement is seconds, so enforcement at ingress must be
+reserve-inline/settle-async, and the roadmap's job is to measure what that costs.
+
 ## Setup
 
 ```bash
