@@ -63,8 +63,12 @@ any payment logic exists.
 
 V2 moved payment data into headers (`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` /
 `PAYMENT-RESPONSE`), which is what lets a filter decide in `request_headers` without ever
-buffering a body. Verify what the Radius facilitator actually supports (`/supported`)
-before writing code against it. The validator keeps every lesson from §10: requirements
+buffering a body. The Radius facilitator's `/supported` (checked 2026-10-12) advertises
+V2 `exact` on SBC with two transfer methods, `permit2` and `eip3009`, selected by the
+spec's `extra.assetTransferMethod`; both are supported, and EIP-3009 is proven with a real
+payment first because Radius's docs list it as unavailable for SBC. The legacy app's
+real deviation was filing its escrow under `scheme: exact` — that goes. The validator
+keeps every lesson from §10: requirements
 come from server config, never from the client; price is a floor; asset, `payTo` and
 network must match. Chain-specific values live in network profiles, so mainnet is
 configuration, not a fork.
@@ -105,15 +109,47 @@ policy never touch the filter.
 Predictions committed before results: the `message_timeout` sweep (200ms / 1s / 5s /
 30s); the overdraft with a balance funded for exactly *k* calls, predicting `A = N/k`;
 replay across replicas, then with Redis killed (fail-open vs fail-closed); pod deletion
-under load; per-request latency decomposition. A reconciliation job checks captured
+under load; per-request latency decomposition. Rail metrics alongside them: receipt
+latency p50/p99, time at risk per paid request, settlement fee as a share of price,
+settlement misses within the authorization window — and, optionally, the same filter
+pointed at a reference rail (Base Sepolia through the public x402 facilitator, a
+network-profile change) so the comparison in [Why Radius](#why-radius) is measured
+rather than asserted. A reconciliation job checks captured
 payments against on-chain transfers. Mainnet waits on a 7-day soak with every SLI at
 target and reconciliation at zero diff.
 
 ### Phase 7 — Mainnet
 
-Network profile switch, isolated namespace and Redis (AOF on a persistent volume), a
+Radius mainnet (`eip155:723487`) already has an x402 V2 facilitator at
+`facilitator.radiustech.xyz` with the same `exact` kinds as testnet, so this is a network
+profile switch, re-verified at cutover. Then: isolated namespace and Redis (AOF on a persistent volume), a
 cold `payTo`, image promotion by digest from the soaked testnet build, a capped price in
 CEL, and a canary on one route with one wallet before anyone else's.
+
+## Why Radius
+
+The filter's design has a cost it cannot avoid: it releases the response in
+milliseconds and settles afterwards, so from that moment until settlement lands the
+seller holds **unsettled revenue — the time at risk**. Replays, concurrent overdrafts and
+expiring authorizations all live in that gap. The rail decides how wide it is, and
+everything else in the filter follows from it.
+
+| Radius property | Evidence (checked 2026-10-12) | What it buys the filter |
+|---|---|---|
+| Finality on the timescale of the request — no block interval, no reorgs | `eth_blockNumber` returns a millisecond timestamp (`1791838582754`); docs cite ~500ms finality | Time at risk shrinks to roughly one request. Reservation TTLs are seconds, not minutes. The settler needs no confirmation-depth logic: one receipt is final. |
+| Fixed fee, no bidding, failed transactions free | transaction-cost API: `$0.000100` per transfer | Prices have a computable floor (the fee is 10% of a $0.001 call, 1% of a $0.01 one), so a policy can be rejected for pricing below its own settlement cost. Settler retries never cost money. |
+| Stablecoin-native | SBC is priced in USD; gas through Turnstile; facilitator offers `eip2612GasSponsoring` | Buyers — including agents — hold one asset. Nothing in the path manages a native token. |
+| x402 V2 facilitator on testnet **and** mainnet | `/supported` on both | No contract and no keys in the cluster, on either network. |
+
+**The claim this sets up for measurement.** On a ~12s-finality chain, or even a ~2s L2,
+the time at risk is an order of magnitude longer than the request it is attached to,
+and synchronous settlement inside a proxy's timeout is impossible. On Radius the
+prediction is that `captureMode: Sync` — the spec's default *settle, then respond* —
+fits inside a 1s `message_timeout`. If Phase 6 confirms it, Radius is the rail on which a
+data plane gets to *choose* its settlement ordering per route rather than being forced
+into async. Pay-per-request HTTP needs a rail whose finality lives on the same timescale
+as an HTTP request; the measurements exist to show, with numbers anyone can reproduce,
+that Radius is that rail.
 
 ## Related work
 

@@ -53,6 +53,17 @@ Buyer ──► GCP LB ──► Envoy Gateway ──ext_proc──► x402-filt
 Runs on GKE. The cluster holds **no private keys**: buyers sign, and the facilitator
 submits the settlement transaction.
 
+## Why Radius
+
+Settling after the response means the seller holds unsettled revenue until settlement
+lands, and the rail decides how long that is. On Radius, block numbers are millisecond
+timestamps, there are no reorgs, and a settlement costs a fixed ~$0.0001 in stablecoin.
+The window shrinks to roughly the length of the request itself, one receipt is final,
+and a $0.001 call is still economic. The prediction this project exists to test: on
+Radius, even the spec's synchronous *settle, then respond* ordering fits inside a proxy's
+timeout, which no slower rail allows. The full argument and its evidence are in
+[ROADMAP.md](ROADMAP.md#why-radius).
+
 ## Repository
 
 | Path | What |
