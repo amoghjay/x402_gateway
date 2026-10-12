@@ -6,86 +6,89 @@
 > and the deliverable is what that costs to build, run, and get wrong. The finding
 > generalises past x402 to any settlement rail slower than a few hundred milliseconds.
 
-**Status.** Phase 0 (baseline hardening) is complete and merged at `845d52f`: 41 tracked
-files, 29 pytest + 9 forge tests, structured logging, Prometheus metrics, CI, container
-build. Next up: Phase 1.
+**Status.** Phase 0 (reframe and restructure) is in progress. The application-layer
+gateway it grew out of — both settlement paths, five findings, 29 pytest + 9 forge
+tests — lives on, green, under [`legacy/llm-gateway/`](legacy/llm-gateway/).
+
+## What changed, and why
+
+The project started as an LLM pay-per-prompt gateway with its own escrow contract. Its
+two open findings ([REPORT §10.4 and §10.5](legacy/llm-gateway/REPORT.md)) are not
+application bugs: replay across replicas and concurrent overdraft are properties of
+*where* enforcement runs. So enforcement moves into the data plane, and the product is
+the enforcer rather than any one backend.
+
+Two scope decisions follow:
+
+- **The escrow contract is shelved.** The `exact` scheme settles through the Radius
+  facilitator, which submits the transaction itself — so the cluster holds **no private
+  keys and no hot wallet**. Contract work returns only if a policy needs on-chain
+  enforcement that no facilitator offers.
+- **The LLM is no longer the product.** Demo backends are deliberately unmodified
+  (`httpbin`) or deliberately ordinary (a small paid-data API).
 
 ## Prior art, stated up front
 
-The two findings left open in [REPORT.md](REPORT.md) §10 correspond to flaw classes
-independently documented in [arXiv 2605.30998](https://arxiv.org/abs/2605.30998)
-(*Free-Riding in the AI Economy: Demystifying Logic Flaws in x402-Enabled Payment
-Systems*, May 2026) — §10.4 maps onto its *allowance overdraft*, §10.5 onto its
-*duplicate-settlement race*. The mitigation that paper recommends, two-phase locking
-with escrow contracts, is this repo's Path B, arrived at independently. So the
-contribution here is not discovery: the flaw classes are documented and the mitigation
-is prescribed, but **nobody has implemented that mitigation inside a production data
-plane and measured what it costs to operate.** That measurement is the deliverable.
+§10.4 and §10.5 correspond to flaw classes independently documented in
+[arXiv 2605.30998](https://arxiv.org/abs/2605.30998) (*Free-Riding in the AI Economy*,
+May 2026) — *allowance overdraft* and *duplicate-settlement race*. The contribution
+here is not discovery: it is implementing the mitigation **inside a production data
+plane** and measuring what it costs to operate. Cloudflare and AWS shipped x402
+enforcement at their edges in 2026; a platform team on Envoy Gateway has no equivalent.
 
-Cloudflare and AWS both shipped x402 enforcement at their edges in mid-2026.
-Kubernetes has no equivalent. Phases 2–3 build one, as a Gateway API policy —
-while noting honestly that x402 settlement volume is down sharply year-to-date;
-the bet being made is the same infrastructure bet those vendors are making, not a
-market-size claim.
+## Phases
 
-## Phase 1 — Escrow v3 as an `auth-capture` implementation
+| # | Phase | Gate to leave it |
+|---|---|---|
+| 0 | Reframe and restructure | legacy suites green from `legacy/`; Go module + CI in place |
+| 1 | GCP foundation + **Gate Zero** | a no-op Go `ext_proc` filter logs both phases for traffic to the GKE public IP |
+| 2 | x402 V2 done properly | golden vectors pass; buyer CLI pays the real facilitator with V2 headers |
+| 3 | The enforcing filter + settler | 402 → paid 200 → replay rejected → 5xx not charged, live; all probes blocked |
+| 4 | `PaymentPolicy` CRD + controller | apply six lines of YAML → route priced; delete → free; backend never restarts |
+| 5 | Showcase | scripted five-minute demo + SLI dashboard on GKE over TLS |
+| 6 | Testnet confidence | 7-day soak, chaos runs, reconciliation at zero diff, measurement campaign |
+| 7 | Mainnet | only after Phase 6's gate; canary first |
+| 8 | Stretch | `upto`; the same filter as a GCP Service Extensions callout |
 
-The x402 Foundation has since published
-[`auth-capture`](https://github.com/x402-foundation/x402/tree/main/specs/schemes/auth-capture)
-as a standard scheme — it is `reserve/capture/release` under spec names, so v3
-implements the published scheme rather than a parallel private API:
+### Phase 1 — GCP foundation and Gate Zero
 
-- `authorize` / `capture` / `charge` / `void` / `reclaim` / `refund` per
-  `scheme_auth_capture_evm.md`, with the three ordered deadlines
-  (`preApprovalExpiry <= authorizationExpiry <= refundExpiry`) enforced on-chain.
-- `InferenceEscrow`'s deposit-once model becomes a **custom `tokenCollector`** drawing
-  from an internal balance — the spec's intended extension point, not a divergence.
-  An EIP-3009 or Permit2 collector ships alongside it so at least one path is stock.
-- Single-shot `charge()` (`autoCapture`) stays deployed as the racy control: the A/B
-  in Phase 3 is two conformant modes of one published scheme, not two private designs.
-- **A conformance table is itself a deliverable** — operation by operation,
-  implemented / partial / declared out of scope (fees are out of scope and say so).
-- Tier A first: invariant, reentrancy, multi-payer, and cross-contract-replay tests
-  against the current contract, so a baseline exists before anything is redeployed.
+Terraform for a zonal GKE Standard cluster on a spot node pool, Artifact Registry,
+Workload Identity Federation for CI, a budget alert and a static IP. Envoy Gateway at a
+pinned version, in-cluster Redis, kube-prometheus-stack. Then the most important gate in
+the plan: a Go `ext_proc` filter that only logs, attached through `EnvoyExtensionPolicy`,
+with `message_timeout` and `max_message_timeout` set explicitly and recorded — before
+any payment logic exists.
 
-## Phase 1.5 — x402 V2 transport
+### Phase 2 — x402 V2 done properly
 
 V2 moved payment data into headers (`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` /
-`PAYMENT-RESPONSE`). The gateway dual-stacks: V2 headers served and accepted, the V1
-body kept working until the existing demos pass and are updated deliberately. The
-homegrown `extra.assetTransferMethod` discriminator is replaced by the standard
-`scheme` field. Beyond hygiene, header-borne payments are what let a proxy filter
-decide in `request_headers` without ever buffering a request body.
+`PAYMENT-RESPONSE`), which is what lets a filter decide in `request_headers` without ever
+buffering a body. Verify what the Radius facilitator actually supports (`/supported`)
+before writing code against it. The validator keeps every lesson from §10: requirements
+come from server config, never from the client; price is a floor; asset, `payTo` and
+network must match. Chain-specific values live in network profiles, so mainnet is
+configuration, not a fork.
 
-## Phase 2 — The Envoy `ext_proc` filter
+### Phase 3 — The enforcing filter
 
-The instrument that produces the headline measurement. `ext_authz` is a pre-filter
-and physically cannot settle after a response exists; `ext_proc` holds a bidirectional
-gRPC stream per request, hooks both `request_headers` and `response_body`, and can
-return an `ImmediateResponse` (the 402).
+Envoy's `ext_proc.message_timeout` defaults to **200ms**; with `failure_mode_allow: true`
+an expired filter **releases the response unpaid**. An on-chain settlement is seconds.
+The only shape that fits:
 
-Envoy's own semantics dictate the design: `ext_proc.message_timeout` defaults to
-**200ms**, on expiry Envoy returns 504 — unless `failure_mode_allow: true`, in which
-case **the response is released unpaid**. An on-chain settlement is seconds. Open
-leaks revenue on every slow settlement; Closed fails a buyer whose payment may have
-partially landed. The only shape that fits the data plane's contract:
+1. `request_headers`: no payment → `ImmediateResponse` 402. Payment → validate, verify,
+   **reserve in Redis** (nonce `SET NX` + per-payer in-flight sum), continue.
+2. Response: 2xx → enqueue capture, release immediately. 5xx → drop the reservation;
+   nobody is charged.
+3. `x402-settler` workers settle off-path from a Redis Stream, idempotently.
 
-1. `request_headers`: no payment → immediate 402; payment → validate free, **reserve
-   in Redis** (milliseconds), continue.
-2. `response_body`: release immediately.
-3. Async worker: drive the contract's `authorize`/`capture`.
+The synchronous capture mode is built too — it exists to be measured failing.
 
-The same wall exists on the protocol side: the spec's `authorize()` is itself an
-on-chain call, so the standard scheme applied naively does not fit the 200ms budget
-either. The inline reservation is not a shortcut around the spec — it is the price of
-honouring it at ingress. Both capture modes get built; the synchronous one exists to
-be shown failing, exactly like single-shot `charge()`.
+### Phase 4 — The platform layer
 
-## Phase 3 — The platform layer, and the measurements
-
-**`PaymentPolicy` CRD + controller** (Gateway API direct-attached policy, GEP-2648):
-`kubectl apply` a six-line policy at an HTTPRoute fronting unmodified `httpbin` and
-the route is monetized; `kubectl delete` and it is free again, backend untouched.
+A `PaymentPolicy` CRD, direct-attached to one HTTPRoute per Gateway API GEP-713, with
+CEL validation and standard status conditions. The controller projects accepted policies
+into the filter's price table and owns the `EnvoyExtensionPolicy`, so routes without a
+policy never touch the filter.
 
 **Correctness SLIs** — a payment filter's SLIs are correctness, not availability:
 
@@ -97,32 +100,32 @@ the route is monetized; `kubectl delete` and it is free again, backend untouched
 | reservations expired unreleased | 0 |
 | filter added latency p99 | within budget |
 
-**Measurement campaign** (predictions committed before results):
+### Phase 6 — Testnet confidence, and the measurement campaign
 
-1. The `message_timeout` sweep — sync capture against 200ms / 1s / 5s / 30s, recording
-   when Envoy 504s, when it serves unpaid, and what async capture costs instead.
-2. The overdraft measured correctly: escrow funded for exactly *k* calls, *N* fired
-   concurrently, amplification predicted at `A = N/k`. The independent variable is the
-   balance, not the concurrency.
-3. The A/B: the same burst against `charge()` and against `authorize()`+`capture()`,
-   with the gas delta reported as the price of the mitigation the literature recommends.
-4. The replay finding at multi-replica, then against Redis: kill the store and the
-   original bug reproduces one hop over; fail-open serves every replay, fail-closed
-   drops every legitimate request. The dependency is the cost of the fix — measured,
-   not asserted.
-5. Pod deletion under load: no reservation orphaned past its TTL.
+Predictions committed before results: the `message_timeout` sweep (200ms / 1s / 5s /
+30s); the overdraft with a balance funded for exactly *k* calls, predicting `A = N/k`;
+replay across replicas, then with Redis killed (fail-open vs fail-closed); pod deletion
+under load; per-request latency decomposition. A reconciliation job checks captured
+payments against on-chain transfers. Mainnet waits on a 7-day soak with every SLI at
+target and reconciliation at zero diff.
 
-## Phase 4 — Writeup
+### Phase 7 — Mainnet
 
-REPORT.md grows a prior-work section (before the findings, not after), the corrected
-§10.4 (the shipped runtime's single blocking worker was an accidental mitigation, not
-a control), the measured §10.5, and three new sections: the convergence of the
-contract's escrow and the filter's reservation on one algorithm with different trust
-bases; where payment enforcement should live (app / ingress / edge / WAF) argued from
-measurements; and the data plane's contract as the general result.
+Network profile switch, isolated namespace and Redis (AOF on a persistent volume), a
+cold `payTo`, image promotion by digest from the soaked testnet build, a capped price in
+CEL, and a canary on one route with one wallet before anyone else's.
+
+## Related work
+
+[Anteroom](https://anteroom.dev) ([source](https://github.com/radiustechsystems/anteroom))
+is a self-hosted reverse proxy that gates a single app behind proof-of-work, with an
+experimental x402 pay door that settles before issuing a time-based pass. This project is
+the complement: per-request payment inside a shared gateway, settled after the response,
+with reservations shared across replicas. *Anteroom is the front door for one app; this
+is the toll layer for a platform's gateway.*
 
 ## Explicitly not doing
 
-No GPU inference backends, no agent-protocol extensions (AP2/A2A), no rewrite of the
-audited signing path in Go — EIP-712 signing and settlement stay in Python, because
-rewriting working crypto under a deadline is how the §10 class of bug comes back.
+No new contract work (see above). No GPU inference backends. No agent-protocol
+extensions (AP2/A2A). No signing in Go: the filter never signs anything — buyers sign,
+and the facilitator settles.

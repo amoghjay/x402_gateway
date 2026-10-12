@@ -1,19 +1,19 @@
-FROM python:3.12-slim
+# Builds any binary under cmd/: docker build --build-arg BINARY=x402-filter .
+FROM golang:1.27 AS build
+ARG BINARY
+ARG VERSION=dev
+WORKDIR /src
+COPY go.mod ./
+# go.sum joins the COPY above once the module has dependencies (Phase 1).
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath \
+	-ldflags "-s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version=${VERSION}" \
+	-o /out/app ./cmd/${BINARY}
 
-# No Foundry in the image: payment.py reads the committed
-# contracts/abi/InferenceEscrow.json. See contracts/sync-abi.sh.
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY config.py observability.py payment.py llm.py gateway.py ./
-COPY contracts/abi ./contracts/abi
-
-# Config comes from the environment; .dockerignore keeps every .env out of the image.
-# Not --system: that caps the uid at 999, and Kubernetes runAsNonRoot wants a high one.
-RUN adduser --disabled-password --gecos "" --no-create-home --uid 10001 gateway
-USER gateway
-
-EXPOSE 8000
-CMD ["uvicorn", "gateway:app", "--host", "0.0.0.0", "--port", "8000"]
+# Distroless static: no shell, no package manager, uid 65532. Kubernetes runAsNonRoot
+# accepts it as-is.
+FROM gcr.io/distroless/static-debian13:nonroot
+COPY --from=build /out/app /app
+ENTRYPOINT ["/app"]

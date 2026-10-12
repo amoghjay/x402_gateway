@@ -1,9 +1,8 @@
-# The Dockerfile copies an explicit file list, so this only controls build-context
-# size and keeps secrets out of the context entirely.
+# Only cmd/, internal/ and go.mod are copied; this keeps the context small and
+# secrets out of it.
 .git
+bin/
 venv/
-__pycache__/
-.pytest_cache/
-.env*
-contracts/*
-!contracts/abi
+legacy/
+deploy/
+**/.env*
