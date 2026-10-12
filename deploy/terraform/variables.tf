@@ -26,3 +26,14 @@ variable "budget_usd" {
   description = "Monthly budget in USD, measured before credits. A budget alerts; it never stops spend."
   default     = 100
 }
+
+variable "zone" {
+  type        = string
+  description = "Zone for the cluster. A zonal cluster is the one GKE's free tier pays the management fee for."
+  default     = "us-central1-a"
+}
+
+variable "cluster_name" {
+  type    = string
+  default = "x402"
+}

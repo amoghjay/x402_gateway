@@ -30,6 +30,12 @@ On a fresh project the first apply can fail with a 403 on a resource whose API t
 apply just enabled: enabling is eventually consistent and takes a minute or two to
 propagate. Nothing rolls back; re-plan and apply, and only the failed resources remain.
 
+## Sizing against the free-trial quotas
+
+`CPUS_ALL_REGIONS` is 12 and cannot be raised on the trial: `system` (max 2) + `workload`
+(max 3) x 2 vCPU + one 2-vCPU upgrade surge = 12. `SSD_TOTAL_GB` is 250: hence 40GB boot
+disks instead of the 100GB default. Private nodes keep `IN_USE_ADDRESSES` (8) free.
+
 ## Files
 
 | File | What |
@@ -39,4 +45,7 @@ propagate. Nothing rolls back; re-plan and apply, and only the failed resources 
 | `variables.tf` | inputs; `project_id` refuses `radius-*` work projects |
 | `apis.tf` | every API the stack uses |
 | `budget.tf` | monthly budget on gross spend (credits excluded), alerts at 25/50/90% and forecast 100% |
+| `network.tf` | dedicated VPC; subnet with secondary ranges for pods and Services; Cloud NAT for private nodes; the reserved Gateway IP |
+| `iam.tf` | least-privilege node service account (not the Editor-holding default) |
+| `gke.tf` | zonal cluster (private nodes, Workload Identity, Dataplane V2, deletion protection) and two pools: on-demand `system`, tainted spot `workload` |
 | `.terraform.lock.hcl` | provider checksums for darwin_arm64 and linux_amd64; committed |
