@@ -26,6 +26,10 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
+On a fresh project the first apply can fail with a 403 on a resource whose API the same
+apply just enabled: enabling is eventually consistent and takes a minute or two to
+propagate. Nothing rolls back; re-plan and apply, and only the failed resources remain.
+
 ## Files
 
 | File | What |
