@@ -47,5 +47,5 @@ disks instead of the 100GB default. Private nodes keep `IN_USE_ADDRESSES` (8) fr
 | `budget.tf` | monthly budget on gross spend (credits excluded), alerts at 25/50/90% and forecast 100% |
 | `network.tf` | dedicated VPC; subnet with secondary ranges for pods and Services; Cloud NAT for private nodes; the reserved Gateway IP |
 | `iam.tf` | least-privilege node service account (not the Editor-holding default) |
-| `gke.tf` | zonal cluster (private nodes, Workload Identity, Dataplane V2, deletion protection) and two pools: on-demand `system`, tainted spot `workload` |
+| `gke.tf` | zonal cluster (private nodes, Workload Identity, Dataplane V2, deletion protection) and two pools: on-demand `system`, tainted spot `workload`; `paused` scales both to zero (`make gke-down` / `make gke-up`) |
 | `.terraform.lock.hcl` | provider checksums for darwin_arm64 and linux_amd64; committed |

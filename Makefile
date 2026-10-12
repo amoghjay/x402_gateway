@@ -4,7 +4,7 @@ LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version
 BINARIES := x402-filter
 REGISTRY ?= local
 
-.PHONY: build test lint images legacy-test
+.PHONY: build test lint images legacy-test gke-down gke-up
 
 build:
 	@mkdir -p bin
@@ -27,3 +27,15 @@ images:
 
 legacy-test:
 	cd legacy/llm-gateway && ruff check . && pytest -q
+
+# Pause and resume the cluster through Terraform, so state never drifts from reality.
+# Paused: both node pools at zero; control plane (free tier), disks, IPs stay.
+# Run from inside the repo so direnv supplies the personal identity.
+TF := terraform -chdir=deploy/terraform
+
+gke-down:
+	$(TF) apply -var paused=true
+
+gke-up:
+	$(TF) apply -var paused=false
+	@echo "Nodes take ~3-5 minutes to join: kubectl get nodes -w"
