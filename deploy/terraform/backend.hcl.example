@@ -1,0 +1,3 @@
+# Copy to backend.hcl (gitignored), then: terraform init -backend-config=backend.hcl
+bucket = "your-project-id-tfstate"
+prefix = "foundation"

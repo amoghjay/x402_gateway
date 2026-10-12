@@ -17,6 +17,9 @@ PLAN-v2.md
 *.tfstate
 *.tfstate.*
 *.tfvars
+# Saved plans embed resolved values and can hold secrets.
+tfplan
+*.tfplan
 !*.tfvars.example
 
 # Legacy Foundry build output. Untracked deliberately: `git rm --cached` alone does
@@ -31,3 +34,7 @@ legacy/llm-gateway/contracts/cache/
 # output from invocations that never broadcast.
 legacy/llm-gateway/contracts/broadcast/*/31337/
 legacy/llm-gateway/contracts/broadcast/**/dry-run/
+.envrc
+
+# Terraform backend config carries the project ID; kept out of the public repo.
+deploy/terraform/backend.hcl
