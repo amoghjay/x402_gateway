@@ -82,16 +82,9 @@ resource "google_container_node_pool" "system" {
   location = var.zone
 
   initial_node_count = 1
-
-  # Paused: autoscaling off and zero nodes. Left on, the autoscaler would see system
-  # pods (DNS, metrics) go Pending and add a node straight back.
-  node_count = var.paused ? 0 : null
-  dynamic "autoscaling" {
-    for_each = var.paused ? [] : [1]
-    content {
-      min_node_count = 1
-      max_node_count = 2
-    }
+  autoscaling {
+    min_node_count = 1
+    max_node_count = 2
   }
 
   management {
@@ -131,14 +124,9 @@ resource "google_container_node_pool" "workload" {
   location = var.zone
 
   initial_node_count = 1
-
-  node_count = var.paused ? 0 : null
-  dynamic "autoscaling" {
-    for_each = var.paused ? [] : [1]
-    content {
-      min_node_count = 0
-      max_node_count = 3
-    }
+  autoscaling {
+    min_node_count = 0
+    max_node_count = 3
   }
 
   management {

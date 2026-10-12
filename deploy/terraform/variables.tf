@@ -37,9 +37,3 @@ variable "cluster_name" {
   type    = string
   default = "x402"
 }
-
-variable "paused" {
-  type        = bool
-  description = "true scales both node pools to zero nodes; the cluster, disks and IPs stay. Use make gke-down / gke-up."
-  default     = false
-}
