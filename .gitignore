@@ -17,6 +17,9 @@ PLAN-v2.md
 *.tfstate
 *.tfstate.*
 *.tfvars
+# Saved plans embed resolved values and can hold secrets.
+tfplan
+*.tfplan
 !*.tfvars.example
 
 # Legacy Foundry build output. Untracked deliberately: `git rm --cached` alone does
