@@ -1,0 +1,13 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec      # the filter sits in front of every priced request
+    - errorlint  # wrapped errors drive the facilitator status mapping
+    - misspell
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
