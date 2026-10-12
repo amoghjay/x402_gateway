@@ -20,6 +20,24 @@ jobs:
         with:
           version: v2.14.0
 
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.1
+
+      # No credentials in CI: -backend=false validates the configuration without
+      # touching state or GCP.
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
   image:
     runs-on: ubuntu-latest
     steps:
