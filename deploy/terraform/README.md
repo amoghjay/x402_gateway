@@ -8,8 +8,13 @@ Artifact Registry, Workload Identity Federation and a static IP as Phase 1 conti
 - Run from inside the repo so direnv loads `.envrc`: the personal gcloud identity,
   its ADC, and a separate `KUBECONFIG`. `gcloud config list` must show the personal
   account before any command below.
-- The state bucket exists (created once by hand; Terraform cannot create the bucket it
-  stores its own state in).
+- Bootstrap, once per project, by hand. Each item is something Terraform needs before
+  it can run, so Terraform cannot create it:
+  - the state bucket: Terraform cannot create the bucket it stores its own state in;
+  - `gcloud services enable cloudresourcemanager.googleapis.com`: `data.google_project`
+    is read during `plan`, before any `google_project_service` has been applied.
+    (`serviceusage` is already on in new projects.) `apis.tf` still lists both, so
+    Terraform adopts them on the first apply.
 
 ## First run
 
