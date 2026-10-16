@@ -1,12 +1,15 @@
 # Roadmap: payment enforcement as data-plane infrastructure
 
-> **The claim this roadmap exists to measure.** An L7 proxy will not hold a connection
-> open for a settlement rail, and when it gives up, its default is to serve the response
-> unpaid. Payment enforcement in a data plane must therefore be reserve-then-capture —
-> and the deliverable is what that costs to build, run, and get wrong. The finding
-> generalises past x402 to any settlement rail slower than a few hundred milliseconds.
+> **The claim this roadmap exists to measure.** An L7 proxy gives an external filter a
+> fixed budget (200 ms per message by default in Envoy). When the filter runs out, the
+> request fails with a 504, or goes out unpaid if the filter fails open. Neither is
+> acceptable for a payment, and a facilitator round trip does not fit the budget. Payment
+> enforcement in a data plane must therefore check locally and capture after the response
+> (reserve-then-capture). The deliverable is what that costs to build, run, and get wrong.
+> The finding generalises past x402 to any settlement path slower than the proxy's budget.
 
-**Status.** Phase 0 (reframe and restructure) is in progress. The application-layer
+**Status.** Phase 0 is done. Phase 1 (GCP foundation) is in progress: the GKE cluster is
+in Terraform. The application-layer
 gateway it grew out of — both settlement paths, five findings, 29 pytest + 9 forge
 tests — lives on, green, under [`legacy/llm-gateway/`](legacy/llm-gateway/).
 
@@ -33,8 +36,30 @@ Two scope decisions follow:
 [arXiv 2605.30998](https://arxiv.org/abs/2605.30998) (*Free-Riding in the AI Economy*,
 May 2026) — *allowance overdraft* and *duplicate-settlement race*. The contribution
 here is not discovery: it is implementing the mitigation **inside a production data
-plane** and measuring what it costs to operate. Cloudflare and AWS shipped x402
-enforcement at their edges in 2026; a platform team on Envoy Gateway has no equivalent.
+plane** and measuring what it costs to operate.
+
+Enforcing x402 in infrastructure, with the application untouched, is not new either:
+
+- **AWS** documents the same pattern on CloudFront and Lambda@Edge
+  ([guide](https://builder.aws.com/content/38fLQk6zKRfLnaUNzcLPsUexUlZ/monetize-any-http-application-with-x402-and-cloudfront-lambdaedge)).
+  Verification runs on the origin request; settlement runs on the origin response, only for a
+  status below 400. "Without modifying a single line of backend code."
+- **Cloudflare** has a Monetization Gateway in waitlist.
+- **[traefik-x402](https://github.com/lukaszraczylo/traefik-x402)** (October 2026, MIT) is an
+  x402 v2 Traefik middleware. It calls the facilitator's `/verify` before the upstream and
+  `/settle` after a successful upstream status, before the first byte reaches the client. Its
+  replay guard is in-memory per Traefik instance. It is the closest prior work to this project.
+
+What this project adds is the point on the latency/risk curve and where it runs:
+
+- **In the cluster's own Envoy data plane,** not a CDN.
+- **No facilitator call on the request path.** It verifies locally, reserves in Redis shared by
+  every replica, and settles after the response. That moves roughly a second of facilitator
+  latency (measured on Radius) off each paid request, and in exchange accepts a bounded window of
+  unsettled revenue. The settle-before-release model the others use is kept as
+  `captureMode: Sync`, so both can be measured side by side.
+- **Self-service through a `PaymentPolicy` with status conditions,** so app teams price their own
+  routes.
 
 ## Phases
 
@@ -75,17 +100,23 @@ configuration, not a fork.
 
 ### Phase 3 — The enforcing filter
 
-Envoy's `ext_proc.message_timeout` defaults to **200ms**; with `failure_mode_allow: true`
-an expired filter **releases the response unpaid**. An on-chain settlement is seconds.
-The only shape that fits:
+Envoy's `ext_proc.message_timeout` defaults to **200ms**. When it expires, the default
+(`failure_mode_allow: false`) is a **504**; with `failure_mode_allow: true` the response
+is **released unpaid**. Measured on Radius testnet, facilitator `/verify` takes ~300 ms
+(median) and `/settle` 0.6–1.1 s, so neither belongs on the request path. The shape that
+fits ([design note](docs/design/request-path-budget.md)):
 
-1. `request_headers`: no payment → `ImmediateResponse` 402. Payment → validate, verify,
-   **reserve in Redis** (nonce `SET NX` + per-payer in-flight sum), continue.
+1. `request_headers`: no payment → `ImmediateResponse` 402. Payment → verify **locally**
+   (EIP-712 `ecrecover`, requirements match, balance and Permit2 allowance from a cached
+   batched RPC read), **reserve in Redis** (nonce `SET NX` that outlives the signature's
+   deadline + per-payer in-flight sum), continue. All under a filter-owned deadline
+   shorter than Envoy's timeout, so the filter, not Envoy, answers when it is slow.
 2. Response: 2xx → enqueue capture, release immediately. 5xx → drop the reservation;
    nobody is charged.
 3. `x402-settler` workers settle off-path from a Redis Stream, idempotently.
 
-The synchronous capture mode is built too — it exists to be measured failing.
+The synchronous capture mode is built too, with a 2 s budget, to measure whether
+settle-then-respond can fit from inside the cluster.
 
 ### Phase 4 — The platform layer
 
@@ -134,22 +165,22 @@ seller holds **unsettled revenue — the time at risk**. Replays, concurrent ove
 expiring authorizations all live in that gap. The rail decides how wide it is, and
 everything else in the filter follows from it.
 
-| Radius property | Evidence (checked 2026-10-12) | What it buys the filter |
+| Radius property | Evidence (checked 2026-10-12, measured 2026-10-16) | What it buys the filter |
 |---|---|---|
-| Finality on the timescale of the request — no block interval, no reorgs | `eth_blockNumber` returns a millisecond timestamp (`1791838582754`); docs cite ~500ms finality | Time at risk shrinks to roughly one request. Reservation TTLs are seconds, not minutes. The settler needs no confirmation-depth logic: one receipt is final. |
+| Finality on the timescale of the request — no block interval, no reorgs | `eth_blockNumber` returns a millisecond timestamp; docs: a sync receipt is "~100 ms, final"; measured: transfer to final receipt 100–179 ms, median 112 ms | Time at risk shrinks to roughly one request. Reservation TTLs are seconds, not minutes. The settler needs no confirmation-depth logic: one receipt is final. |
 | Fixed fee, no bidding, failed transactions free | transaction-cost API: `$0.000100` per transfer | Prices have a computable floor (the fee is 10% of a $0.001 call, 1% of a $0.01 one), so a policy can be rejected for pricing below its own settlement cost. Settler retries never cost money. |
 | Stablecoin-native | SBC is priced in USD; gas through Turnstile; facilitator offers `eip2612GasSponsoring` | Buyers — including agents — hold one asset. Nothing in the path manages a native token. |
-| x402 V2 facilitator on testnet **and** mainnet | `/supported` on both | No contract and no keys in the cluster, on either network. |
+| x402 V2 facilitator on testnet **and** mainnet | `/supported` on both; 10 testnet settlements, `permit2` and `eip3009` | No contract and no keys in the cluster, on either network. |
 
-**The claim this sets up for measurement.** On a ~12s-finality chain, or even a ~2s L2,
-the time at risk is an order of magnitude longer than the request it is attached to,
-and synchronous settlement inside a proxy's timeout is impossible. On Radius the
-prediction is that `captureMode: Sync` — the spec's default *settle, then respond* —
-fits inside a 1s `message_timeout`. If Phase 6 confirms it, Radius is the rail on which a
-data plane gets to *choose* its settlement ordering per route rather than being forced
-into async. Pay-per-request HTTP needs a rail whose finality lives on the same timescale
-as an HTTP request; the measurements exist to show, with numbers anyone can reproduce,
-that Radius is that rail.
+**The question this sets up for measurement.** On a ~12s-block chain, or even a ~2s L2,
+the time at risk is an order of magnitude longer than the request it is attached to. On
+Radius the chain itself finalizes inside Envoy's default budget (112 ms median, measured).
+The facilitator round trip is the slower part: 0.82 s median, up to 1.13 s, measured from
+a laptop. Whether `captureMode: Sync`, the spec's default *settle, then respond*, fits a
+1 s budget from inside the cluster is an open question for Phase 6. If it does, routes on
+Radius can choose their settlement ordering instead of being forced into async. The
+measurements exist to answer that with numbers anyone can reproduce
+([`tools/latency/`](tools/latency/README.md)).
 
 ## Related work
 

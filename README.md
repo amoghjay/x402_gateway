@@ -23,14 +23,16 @@ restarts.
 
 ## Why the data plane forces the design
 
-An L7 proxy gives an external filter **200ms** by default, and a fail-open filter that
-blows it **releases the response unpaid**. An on-chain settlement takes seconds. So a
-payment enforcer in the data plane cannot settle inline; it has to **decide from local
-state in milliseconds and settle asynchronously**:
+An L7 proxy gives an external filter **200ms** by default. A filter that blows it gets
+the request failed with a 504, or, if it fails open, **releases the response unpaid**.
+A facilitator round trip takes hundreds of milliseconds to over a second. So a payment
+enforcer in the data plane cannot call out inline; it has to **verify locally in
+milliseconds and settle asynchronously**
+([design note](docs/design/request-path-budget.md)):
 
 ```
 request_headers   no payment  → 402 + PAYMENT-REQUIRED          (backend never sees it)
-                  payment     → verify, RESERVE in Redis         (~ms)
+                  payment     → verify locally, RESERVE in Redis (~ms)
 response          2xx         → release now, enqueue settlement
                   5xx         → drop the reservation             (nobody is charged)
 x402-settler      off-path    → settle through the facilitator   (~s)
@@ -59,9 +61,10 @@ Settling after the response means the seller holds unsettled revenue until settl
 lands, and the rail decides how long that is. On Radius, block numbers are millisecond
 timestamps, there are no reorgs, and a settlement costs a fixed ~$0.0001 in stablecoin.
 The window shrinks to roughly the length of the request itself, one receipt is final,
-and a $0.001 call is still economic. The prediction this project exists to test: on
-Radius, even the spec's synchronous *settle, then respond* ordering fits inside a proxy's
-timeout, which no slower rail allows. The full argument and its evidence are in
+and a $0.001 call is still economic. The chain finalizes a transfer in about
+110 ms (measured), inside a proxy's default budget. The open question this project
+measures is whether the spec's synchronous *settle, then respond* ordering, including the
+facilitator round trip, can fit as well. The full argument and its evidence are in
 [ROADMAP.md](ROADMAP.md#why-radius).
 
 ## Repository
