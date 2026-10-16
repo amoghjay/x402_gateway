@@ -1,0 +1,155 @@
+# The request-path budget: what happens past 200 ms, and how the filter stays inside it
+
+Status: proposed design for Phase 3. Measurements taken 2026-10-16.
+
+## The constraint
+
+Envoy gives an `ext_proc` filter **200 ms per message** by default. The timer restarts
+on each message Envoy sends the filter (request headers, then response headers). It is a
+budget for each phase, not for the whole request.
+
+| Setting | Envoy | Envoy Gateway (`EnvoyExtensionPolicy.extProc`) |
+|---|---|---|
+| Per-message timeout | `message_timeout`, default 200 ms | `messageTimeout`, default 200 ms |
+| Behaviour on failure | `failure_mode_allow`, default `false` | `failOpen`, default `false` |
+| Filter asks for more time | `override_message_timeout`, capped by `max_message_timeout` (default 0 = disabled) | not exposed in `ExtProc`; would need an `EnvoyPatchPolicy` |
+
+**By default a timeout fails closed.** Envoy sends a local reply, **504** for a timeout
+and 500 for other failures. A response goes out unpaid only when the filter is set to
+fail open. The filter's late answer is ignored. The route timeout (15 s by default) is
+separate.
+
+What a timeout means for a payment, by phase:
+
+| Timeout during | `failOpen: false` (default) | `failOpen: true` |
+|---|---|---|
+| Request headers: check and reserve | Buyer gets a 504 and the backend never runs. Nothing is charged, but a valid payer gets an error and any reservation is left behind. | The request reaches the backend unchecked: **free access**. |
+| Response headers: release and queue the settlement | The backend did the work, but the buyer gets a 504. A synchronous settle that finished late means **charged, nothing delivered**. | The response goes out but may never be recorded, so the settlement is missed: **lost revenue**. |
+
+`failOpen: true` turns any slowdown into free access, so the filter never uses it.
+
+## What the facilitator costs on the request path
+
+Measured on Radius testnet from a laptop (about 70 ms network round trip to the RPC).
+Script: [`tools/latency/measure_settle.py`](../../tools/latency/measure_settle.py).
+
+| Call | n | min | median | max |
+|---|---|---|---|---|
+| SBC transfer, `eth_sendRawTransactionSync`, submit to **final** receipt | 8 | 100 ms | 112 ms | 179 ms |
+| Facilitator `/verify` (Permit2 + EIP-3009) | 10 | 186 ms | ~300 ms | 826 ms |
+| Facilitator `/settle` (Permit2 + EIP-3009) | 10 | 604 ms | 815 ms | 1129 ms |
+
+- The **chain** finishes inside Envoy's 200 ms default. Radius's docs say "~100 ms, final".
+- **`/verify` on the request path breaks the default budget** for most requests.
+- **Settle-then-respond** (x402's default order, our `captureMode: Sync`) does not reliably fit in 1 s through the facilitator. The maximum was 1.13 s.
+- **EIP-3009 settles on SBC testnet.** Radius's docs say SBC has no EIP-3009; `/supported` lists it first, and 4 of the 10 settlements above used it.
+
+## What "verify" has to check, and who says so
+
+- [x402 exact EVM scheme](https://github.com/coinbase/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md):
+  - signature recovers to the payer;
+  - sufficient balance;
+  - amount and validity window meet the requirements;
+  - token and network match;
+  - for Permit2: Permit2 allowance;
+  - simulation of the settlement call.
+- Radius facilitator `/verify` returns `isValid` when "the payment signature and balance check pass".
+- Radius docs, *Check settlement and delivery*: "If you verify payments yourself, check the payment against your own requirements before settling":
+  - `scheme`, `network`, `asset` and `payTo` match what you offered;
+  - `amount` is at least the price;
+  - the signature is valid and the validity window has not expired.
+- Radius docs: SBC has no EIP-1271. Payers are plain accounts, so `ecrecover` is a complete signature check, with no contract call.
+
+All of this can run inside the filter except simulation, and `/settle` simulates anyway.
+
+## What each check costs
+
+Script: [`tools/latency/measure_checks.py`](../../tools/latency/measure_checks.py) and
+[`tools/latency/verifybench`](../../tools/latency/verifybench).
+
+| Check | Cost | Source |
+|---|---|---|
+| Requirements match against the price table | microseconds | trivial |
+| EIP-712 Permit2 hash + `ecrecover`, go-ethereum v1.14.12 | **~95 µs** with `CGO_ENABLED=0` (as `make build` ships), ~40 µs with cgo | benchmark, Apple M4 Max |
+| `balanceOf` via `eth_call` | p50 81 ms, max 225 ms (testnet) / 168 ms (mainnet) | measured, laptop, n=20 |
+| `balanceOf` + Permit2 `allowance` in **one JSON-RPC batch** | p50 ~80 ms, p90 86–111 ms, max 166 ms | measured, both networks, n=20 |
+| Cached balance and allowance read from Redis | ~1 ms | **estimate**, measure at Gate Zero |
+| Nonce `SET NX` + in-flight sum (one Lua script) | ~1 ms | **estimate**, measure at Gate Zero |
+
+The balance check is required. Without it, an empty wallet can sign valid payments
+indefinitely. Each one passes the signature check, the response is served, and only
+the settlement fails later. The in-flight sum also needs a known balance to subtract
+from.
+
+## Proposed design
+
+**Request path**, under a filter-owned deadline of 150 ms:
+
+1. Decode `PAYMENT-SIGNATURE` and match it against the route's requirements.
+2. Recover the signature (~95 µs).
+3. Read balance and allowance from the Redis cache (TTL of a few seconds). On a miss, make one batched RPC call (~80 ms) and cache the result.
+4. Check that cached balance minus in-flight reservations covers the price, then reserve the nonce and amount atomically.
+5. Past the deadline, the filter itself answers 503 with `Retry-After` and releases the reservation. Envoy's 504 should only ever fire if the filter hangs.
+
+**After the response:** on a 2xx, queue the settlement; the settler calls `/settle` off the request path. On a 5xx, drop the reservation.
+
+**Limiting losses:** a settlement that fails for lack of funds marks the payer in Redis, and the filter refuses that payer until the balance refreshes. A bad wallet gets at most one cache window of requests.
+
+**Envoy settings**, generated by the PaymentPolicy controller and never set by app teams:
+
+| `captureMode` | `messageTimeout` | Filter deadline | Why |
+|---|---|---|---|
+| `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (166 ms) fits |
+| `Sync` (opt-in) | 2 s | 1.5 s | measured settle max was 1.13 s |
+
+`failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
+
+**Precedent.** Envoy's [`jwt_authn`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/jwt_authn_filter)
+filter verifies signatures locally, using keys fetched remotely and cached for
+`cache_duration`, rather than calling the issuer on every request. This design does the
+same with payment signatures and balances.
+
+## The trade-off against settle-before-release
+
+The closest prior work, [traefik-x402](https://github.com/lukaszraczylo/traefik-x402) and
+AWS's CloudFront pattern, calls the facilitator inline:
+
+1. `/verify` before the upstream;
+2. `/settle` after a successful upstream status, before any byte reaches the client.
+
+That guarantees **zero unpaid responses**. On Radius's facilitator it adds roughly **1.1 s**
+per paid request (≈0.3 s verify + ≈0.8 s settle, medians measured above). It also has to run
+in a proxy that tolerates holding a request that long; Traefik middleware can, but an Envoy
+`ext_proc` filter on default settings cannot.
+
+This design takes the other point on the curve: **~2 ms** on the request path, plus a bounded
+window of unsettled revenue. The bounds are the balance check, the in-flight sum, and the loss
+limit.
+
+Shared Redis is what makes that safe. With settle-before-release, a replay on another replica
+only costs duplicate upstream work, because its settlement fails before the body leaves. With
+settle-after, that replay would be a free response, so the nonce must be claimed somewhere
+every replica sees.
+
+Both models stay available: settle-before-release is `captureMode: Sync`, with its own 2 s
+budget, and Phase 6 measures the two side by side.
+
+## Risks we accept
+
+- **No simulation on the request path.** A paused token or a blocklisted payer shows up as a failed settlement. The loss limit above bounds it.
+- **A balance cached for a few seconds can be stale.** The in-flight sum covers concurrent requests through this gateway. Spending elsewhere during the TTL is the remaining gap.
+- **Caches in front of the gateway.** A shared cache could resell a paid response for free. Paid responses get `Cache-Control: private, no-store`, overriding the upstream's value.
+
+## Still to measure, from GKE
+
+- Redis round trip and the ext_proc hop inside the cluster: Gate Zero.
+- RPC and facilitator latency from `us-central1`: the numbers above are from a laptop.
+- `ext_proc` stats on the Envoy admin endpoint during the timeout drill. Expect counters such as `message_timeouts` and `failure_mode_allowed`; confirm the names there.
+
+## Sources
+
+- [Envoy ext_proc API](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto)
+- [Envoy Gateway `ExtProc` types](https://github.com/envoyproxy/gateway/blob/main/api/v1alpha1/ext_proc_types.go)
+- [x402 exact EVM scheme](https://github.com/coinbase/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md)
+- [Radius docs](https://docs.radiustech.xyz/llms-full.txt): instant finality, `eth_sendRawTransactionSync`, facilitator API, SBC transfer methods, self-verification checks
+- [Envoy JWT authn filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/jwt_authn_filter)
