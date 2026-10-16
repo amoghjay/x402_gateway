@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.pyc
 DEMO_NOTES.md
+PITCH_NOTES.md
 .pytest_cache/
 .ruff_cache/
 PLAN-v2.md
