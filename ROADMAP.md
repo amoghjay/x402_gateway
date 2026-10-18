@@ -8,8 +8,17 @@
 > (reserve-then-capture). The deliverable is what that costs to build, run, and get wrong.
 > The finding generalises past x402 to any settlement path slower than the proxy's budget.
 
-**Status.** Phase 0 is done. Phase 1 (GCP foundation) is in progress: the GKE cluster is
-in Terraform. The application-layer
+**Status.** Phase 0 is done. Phase 1's GCP foundation is applied: the GKE cluster,
+Artifact Registry, and keyless image push from CI. Gate Zero is in progress.
+
+**Build order.** The phases keep their numbers and gates; the build order is
+integration-first: 1 → 2 → 3.1 (402 from the price table) → 4 (the controller) →
+3.2–3.4 (verify, reserve, settle), then 5 and 6. The first target is the core path
+working end to end on testnet — apply a policy, get a 402, pay, get a 200, replay
+rejected, delete the policy, free again. Hardening (more transfer methods, failure modes,
+synchronous capture, observability) follows on a working base.
+
+The application-layer
 gateway it grew out of — both settlement paths, five findings, 29 pytest + 9 forge
 tests — lives on, green, under [`legacy/llm-gateway/`](legacy/llm-gateway/).
 
