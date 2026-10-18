@@ -79,10 +79,11 @@ What this project adds is the point on the latency/risk curve and where it runs:
 
 Terraform for a zonal GKE Standard cluster on a spot node pool, Artifact Registry,
 Workload Identity Federation for CI, a budget alert and a static IP. Envoy Gateway at a
-pinned version, in-cluster Redis, kube-prometheus-stack. Then the most important gate in
+pinned version (v1.9.2) and in-cluster Redis. Then the most important gate in
 the plan: a Go `ext_proc` filter that only logs, attached through `EnvoyExtensionPolicy`,
-with `message_timeout` and `max_message_timeout` set explicitly and recorded — before
-any payment logic exists.
+with `processingMode` and `messageTimeout` set explicitly and recorded — before
+any payment logic exists. (Envoy Gateway sends neither phase unless `processingMode`
+asks for it, and does not expose Envoy's `max_message_timeout`.)
 
 ### Phase 2 — x402 V2 done properly
 
@@ -90,8 +91,10 @@ V2 moved payment data into headers (`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` /
 `PAYMENT-RESPONSE`), which is what lets a filter decide in `request_headers` without ever
 buffering a body. The Radius facilitator's `/supported` (checked 2026-10-12) advertises
 V2 `exact` on SBC with two transfer methods, `permit2` and `eip3009`, selected by the
-spec's `extra.assetTransferMethod`; both are supported, and EIP-3009 is proven with a real
-payment first because Radius's docs list it as unavailable for SBC. The legacy app's
+spec's `extra.assetTransferMethod`. The filter starts with `eip3009`, the spec's default:
+a signature plus a balance is the whole local check, and the buyer needs no approval
+transaction. `permit2` follows, for tokens without EIP-3009. EIP-3009 settles on SBC
+testnet (measured), although Radius's docs list it as unavailable for SBC. The legacy app's
 real deviation was filing its escrow under `scheme: exact` — that goes. The validator
 keeps every lesson from §10: requirements
 come from server config, never from the client; price is a floor; asset, `payTo` and
@@ -107,8 +110,8 @@ is **released unpaid**. Measured on Radius testnet, facilitator `/verify` takes 
 fits ([design note](docs/design/request-path-budget.md)):
 
 1. `request_headers`: no payment → `ImmediateResponse` 402. Payment → verify **locally**
-   (EIP-712 `ecrecover`, requirements match, balance and Permit2 allowance from a cached
-   batched RPC read), **reserve in Redis** (nonce `SET NX` that outlives the signature's
+   (EIP-712 `ecrecover`, requirements match, balance from a cached RPC read; Permit2 adds
+   its allowance to the same read), **reserve in Redis** (nonce `SET NX` that outlives the signature's
    deadline + per-payer in-flight sum), continue. All under a filter-owned deadline
    shorter than Envoy's timeout, so the filter, not Envoy, answers when it is slow.
 2. Response: 2xx → enqueue capture, release immediately. 5xx → drop the reservation;
