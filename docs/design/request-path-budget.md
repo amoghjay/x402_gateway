@@ -73,7 +73,7 @@ Script: [`tools/latency/measure_checks.py`](../../tools/latency/measure_checks.p
 | EIP-712 Permit2 hash + `ecrecover`, go-ethereum v1.14.12 | **~95 µs** with `CGO_ENABLED=0` (as `make build` ships), ~40 µs with cgo | benchmark, Apple M4 Max |
 | `balanceOf` via `eth_call` | p50 81 ms, max 225 ms (testnet) / 168 ms (mainnet) | measured, laptop, n=20 |
 | `balanceOf` + Permit2 `allowance` in **one JSON-RPC batch** | p50 ~80 ms, p90 86–111 ms, max 166 ms | measured, both networks, n=20 |
-| Cached balance and allowance read from Redis | ~1 ms | **estimate**, measure at Gate Zero |
+| Cached balance read from Redis | ~1 ms | **estimate**, measure at Gate Zero |
 | Nonce `SET NX` + in-flight sum (one Lua script) | ~1 ms | **estimate**, measure at Gate Zero |
 
 The balance check is required. Without it, an empty wallet can sign valid payments
@@ -87,7 +87,7 @@ from.
 
 1. Decode `PAYMENT-SIGNATURE` and match it against the route's requirements.
 2. Recover the signature (~95 µs).
-3. Read balance and allowance from the Redis cache (TTL of a few seconds). On a miss, make one batched RPC call (~80 ms) and cache the result.
+3. Read the balance from the Redis cache (TTL of a few seconds). On a miss, call `balanceOf` (~80 ms) and cache the result. EIP-3009, the first transfer method, needs nothing else. Permit2 adds its `allowance` to the same JSON-RPC batch.
 4. Check that cached balance minus in-flight reservations covers the price, then reserve the nonce and amount atomically.
 5. Past the deadline, the filter itself answers 503 with `Retry-After` and releases the reservation. Envoy's 504 should only ever fire if the filter hangs.
 
@@ -99,7 +99,7 @@ from.
 
 | `captureMode` | `messageTimeout` | Filter deadline | Why |
 |---|---|---|---|
-| `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (166 ms) fits |
+| `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (225 ms, laptop) fits Envoy's timeout; the filter deadline is re-set from the in-cluster baseline at Gate Zero |
 | `Sync` (opt-in) | 2 s | 1.5 s | measured settle max was 1.13 s |
 
 `failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
