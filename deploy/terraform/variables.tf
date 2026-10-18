@@ -37,3 +37,21 @@ variable "cluster_name" {
   type    = string
   default = "x402"
 }
+
+# GitHub repository allowed to push images through Workload Identity Federation (wif.tf).
+# The numeric IDs are what the trust condition matches on; they are public, not secrets.
+# Look them up with: gh api repos/<owner>/<repo> --jq '{id, owner_id: .owner.id}'
+variable "github_repository" {
+  type    = string
+  default = "amoghjay/x402_gateway"
+}
+
+variable "github_repository_id" {
+  type    = string
+  default = "1315121044"
+}
+
+variable "github_owner_id" {
+  type    = string
+  default = "83763739"
+}

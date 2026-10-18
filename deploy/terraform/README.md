@@ -1,7 +1,7 @@
 # deploy/terraform
 
-GCP foundation for the x402 stack: project APIs and a budget today; VPC, GKE,
-Artifact Registry, Workload Identity Federation and a static IP as Phase 1 continues.
+GCP foundation for the x402 stack: project APIs, a budget, VPC, GKE, a static IP,
+Artifact Registry, and Workload Identity Federation so CI pushes images without a key.
 
 ## Prerequisites
 
@@ -47,5 +47,7 @@ disks instead of the 100GB default. Private nodes keep `IN_USE_ADDRESSES` (8) fr
 | `budget.tf` | monthly budget on gross spend (credits excluded), alerts at 25/50/90% and forecast 100% |
 | `network.tf` | dedicated VPC; subnet with secondary ranges for pods and Services; Cloud NAT for private nodes; the reserved Gateway IP |
 | `iam.tf` | least-privilege node service account (not the Editor-holding default) |
+| `registry.tf` | regional Docker repository `x402` for the filter, settler and controller images; cleanup keeps the 10 newest versions |
+| `wif.tf` | Workload Identity Federation: GitHub Actions runs on `main` of this repo (matched by numeric IDs) impersonate `x402-ci-push`, which can only write to that repository |
 | `gke.tf` | zonal cluster (private nodes, Workload Identity, Dataplane V2, deletion protection) and two pools: on-demand `system`, tainted spot `workload`. Pause with `make gke-down` / `make gke-up` (gcloud; autoscaling off, then resize) |
 | `.terraform.lock.hcl` | provider checksums for darwin_arm64 and linux_amd64; committed |
