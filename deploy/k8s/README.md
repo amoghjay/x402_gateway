@@ -17,9 +17,13 @@ kubectl apply -f gateway/
 
 # 3. The demo backend and its route
 kubectl apply -f demo/
+
+# 4. Our platform components: Redis (later the filter, settler and controller)
+kubectl apply -f x402-system/
 ```
 
 | Path | What |
 |---|---|
 | `gateway/` | `gateway` namespace; `EnvoyProxy` (LoadBalancer on the reserved IP, proxies on the system pool); `GatewayClass x402`; `Gateway x402` with one HTTP listener that accepts routes only from labelled namespaces |
 | `demo/` | `demo` namespace (labelled for routes); httpbin on the spot pool; an `HTTPRoute` sending `/` to it |
+| `x402-system/` | `x402-system` namespace; Redis as a one-replica StatefulSet on the system pool, AOF (`everysec`) on a 10Gi PVC, behind a headless Service |
