@@ -3,8 +3,7 @@ FROM golang:1.27 AS build
 ARG BINARY
 ARG VERSION=dev
 WORKDIR /src
-COPY go.mod ./
-# go.sum joins the COPY above once the module has dependencies (Phase 1).
+COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal

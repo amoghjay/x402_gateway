@@ -47,3 +47,37 @@ jobs:
         run: |
           docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter .
           test "$(docker run --rm x402-filter -version)" = ci
+
+  # Pushes to Artifact Registry on main only, after every check above passes. Keyless:
+  # GitHub's OIDC token is exchanged for a short-lived Google token through the WIF
+  # provider (deploy/terraform/wif.tf), which itself only accepts runs on refs/heads/main.
+  # Neither value below is a secret; they are Terraform outputs.
+  push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [go, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets the job request GitHub's OIDC token
+    env:
+      REGISTRY: us-central1-docker.pkg.dev/x402-envoy/x402
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/555787229602/locations/global/workloadIdentityPools/github/providers/x402-gateway
+          service_account: x402-ci-push@x402-envoy.iam.gserviceaccount.com
+          token_format: access_token
+
+      # Tagged with the commit, so a deployed image always names the code it came from.
+      - name: Build and push the filter image
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
+          TAG="${GITHUB_SHA::12}"
+          docker build --build-arg BINARY=x402-filter --build-arg VERSION="$TAG" -t "$REGISTRY/x402-filter:$TAG" .
+          docker push "$REGISTRY/x402-filter:$TAG"
+          echo "Pushed $REGISTRY/x402-filter:$TAG" >> "$GITHUB_STEP_SUMMARY"
