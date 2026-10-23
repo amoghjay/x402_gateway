@@ -45,7 +45,7 @@ func dial(t *testing.T) (extprocv3.ExternalProcessor_ProcessClient, *bytes.Buffe
 
 func headers(kv ...string) *corev3.HeaderMap {
 	hm := &corev3.HeaderMap{}
-	for i := 0; i < len(kv); i += 2 {
+	for i := 0; i+1 < len(kv); i += 2 {
 		// RawValue, as current Envoy sends it.
 		hm.Headers = append(hm.Headers, &corev3.HeaderValue{Key: kv[i], RawValue: []byte(kv[i+1])})
 	}
