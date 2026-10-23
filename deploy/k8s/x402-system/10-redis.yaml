@@ -1,0 +1,120 @@
+# Redis holds the filter's reservations, the balance cache and the settlement stream.
+#
+# A StatefulSet, not a Deployment:
+# - It never runs two `redis-0` pods at once. A Deployment's rolling update starts the new
+#   pod before stopping the old one, which for Redis means two servers with split state.
+# - It gives the pod its own disk (`volumeClaimTemplates`) that follows it across restarts
+#   and reschedules. That field is immutable, so it is here from the start: adding it
+#   later means deleting the StatefulSet and recreating it.
+#
+# Durability: AOF with `everysec`. A crash loses at most about one second of writes; a
+# normal pod delete loses nothing, because Redis flushes the AOF on SIGTERM. One replica,
+# so a node failure is downtime until the pod reschedules, not data loss.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: x402-system
+spec:
+  serviceName: redis # the headless Service below; gives the pod the DNS name redis-0.redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # On-demand system pool: a spot preemption would lose reservations and the stream.
+      nodeSelector:
+        pool: system
+      # Run as the image's own `redis` user (uid 999, gid 1000) and let the kubelet give
+      # the volume to that group. Without fsGroup the AOF is never written: a fresh disk
+      # holds `lost+found`, so the image's entrypoint refuses to chown /data, then drops
+      # to `redis`, which can't write to the root-owned disk.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch # chown once, not on every restart
+      containers:
+        - name: redis
+          image: redis:8.10.2-alpine
+          # Arguments only: the image's entrypoint prepends `redis-server` to anything
+          # starting with `--`.
+          args:
+            - --dir
+            - /data # the PVC below
+            - --save
+            - "" # no RDB snapshots: the AOF is the only persistence
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec # fsync once a second, off the request path
+            - --maxmemory
+            # Half the 384Mi limit: an AOF rewrite forks, and copy-on-write can briefly
+            # need up to double the dataset in the worst case. Our dataset is far smaller.
+            - 192mb
+            - --maxmemory-policy
+            - noeviction # when full, writes fail loudly; never drop a reservation silently
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # Ready = answers PING. The headless Service only publishes ready pods in DNS,
+          # so clients can't reach Redis before it can serve.
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          # Alive = still answers PING within 30 s. Slower than readiness on purpose: a
+          # restart replays the AOF and drops every client connection, so only restart a
+          # Redis that is truly stuck.
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            # Memory request = limit, so the scheduler reserves exactly what Redis may use
+            # and the node can't be overcommitted under it. No CPU limit: throttling Redis
+            # would add latency to every paid request.
+            requests:
+              cpu: 50m
+              memory: 384Mi
+            limits:
+              memory: 384Mi
+  # One PVC per pod, named data-redis-0. It outlives the pod, and by default the
+  # StatefulSet itself: deleting or scaling down keeps the disk (retention policy Retain).
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # GKE's default class: a zonal pd-balanced disk, created only once the pod is
+        # scheduled (WaitForFirstConsumer), so it lands in the node's zone.
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 10Gi # Compute Engine's minimum disk size; the data is a few MB
+---
+# Headless (clusterIP: None): DNS for `redis.x402-system` returns the pod IP directly.
+# With one replica there is nothing to load-balance, and the StatefulSet needs a headless
+# Service for its per-pod name anyway.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: x402-system
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

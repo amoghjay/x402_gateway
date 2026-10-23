@@ -1,0 +1,7 @@
+# Our own platform components: Redis now; the filter, settler and controller later.
+# No `x402.dev/gateway-routes` label, so nothing here can attach a route to the public
+# Gateway by accident.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: x402-system
