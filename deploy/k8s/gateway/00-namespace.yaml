@@ -1,0 +1,6 @@
+# The Gateway lives in its own namespace, owned by the platform team. App teams attach
+# HTTPRoutes from their namespaces; the listener below decides which namespaces may.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway

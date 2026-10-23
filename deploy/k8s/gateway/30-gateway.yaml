@@ -1,0 +1,21 @@
+# The Gateway is the listening side: one public IP, one HTTP listener for now (TLS comes
+# with Phase 5). Envoy Gateway turns this into an Envoy Deployment + LoadBalancer Service.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: x402
+  namespace: gateway
+spec:
+  gatewayClassName: x402
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # Only namespaces carrying this label may attach routes. Without it, any namespace
+      # could publish a path on the public IP.
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              x402.dev/gateway-routes: allowed

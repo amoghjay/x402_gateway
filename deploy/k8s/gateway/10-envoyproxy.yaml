@@ -1,0 +1,24 @@
+# How Envoy Gateway should run the Envoy proxies it creates for Gateways of our class.
+# Referenced from the GatewayClass, so it applies to every Gateway of class `x402`.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: x402-proxy
+  namespace: envoy-gateway-system # created by the Helm install
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: LoadBalancer
+        # The reserved IP from Terraform (`terraform output gateway_ip`). GKE's L4 load
+        # balancer claims it through Service.spec.loadBalancerIP.
+        # Not Gateway.spec.addresses: in Envoy Gateway v1.9.2 those become the Service's
+        # externalIPs, which GKE ignores (internal/infrastructure/kubernetes/proxy/resource_provider.go).
+        loadBalancerIP: 34.173.224.114
+      envoyDeployment:
+        replicas: 1
+        pod:
+          # On-demand system pool: the data plane must not disappear with a spot preemption.
+          nodeSelector:
+            pool: system

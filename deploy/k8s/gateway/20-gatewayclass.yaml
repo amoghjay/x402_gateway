@@ -1,0 +1,14 @@
+# A GatewayClass names the controller that implements Gateways of this class. Ours is
+# Envoy Gateway, not GKE's built-in gateway controller (which would create a Google
+# Cloud load balancer per Gateway and can't run an ext_proc filter).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: x402
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: x402-proxy
+    namespace: envoy-gateway-system

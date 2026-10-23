@@ -1,0 +1,54 @@
+# httpbin, unmodified: the backend that proves payment needs no app changes.
+# It runs on the spot `workload` pool, so it needs both a toleration (allowed onto the
+# tainted nodes) and a nodeSelector (required to go there rather than the system pool).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpbin
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpbin
+  template:
+    metadata:
+      labels:
+        app: httpbin
+    spec:
+      nodeSelector:
+        pool: workload
+      tolerations:
+        - key: pool
+          operator: Equal
+          value: workload
+          effect: NoSchedule
+      containers:
+        - name: httpbin
+          image: mccutchen/go-httpbin:2.25.0
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /status/200
+              port: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: httpbin
+  namespace: demo
+spec:
+  selector:
+    app: httpbin
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
