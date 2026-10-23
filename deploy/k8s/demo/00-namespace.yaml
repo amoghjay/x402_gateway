@@ -1,0 +1,7 @@
+# Demo backends. The label lets HTTPRoutes here attach to the shared Gateway.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    x402.dev/gateway-routes: allowed
