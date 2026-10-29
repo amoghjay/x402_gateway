@@ -1,6 +1,6 @@
 # The request-path budget: what happens past 200 ms, and how the filter stays inside it
 
-Status: proposed design for Phase 3. Measurements taken 2026-10-16.
+Status: proposed design for Phase 3. Measurements taken 2026-10-16 (laptop) and 2026-10-28 (GKE timeout drill).
 
 ## The constraint
 
@@ -140,11 +140,53 @@ budget, and Phase 6 measures the two side by side.
 - **A balance cached for a few seconds can be stale.** The in-flight sum covers concurrent requests through this gateway. Spending elsewhere during the TTL is the remaining gap.
 - **Caches in front of the gateway.** A shared cache could resell a paid response for free. Paid responses get `Cache-Control: private, no-store`, overriding the upstream's value.
 
+## Measured on GKE: the timeout drill (2026-10-28)
+
+Envoy Gateway v1.9.2, the no-op filter with a `-delay` flag, one `HTTPRoute` behind an
+`EnvoyExtensionPolicy`. Durations are from Envoy's access log, not the client.
+
+**What Envoy Gateway configures.** It leaves `message_timeout`, `failure_mode_allow` and
+`status_on_error` at Envoy's defaults (200 ms, `false`, unset) and sets
+`grpc_service.timeout: 10s`. The 200 ms per-message timeout is the one that fires.
+
+| Filter state | `failOpen: false` | `failOpen: true` |
+|---|---|---|
+| Answers in 100 ms | 200; p50 104 ms (n=23) against 1 ms on an unpriced route. The hop costs about 4 ms. | — |
+| Answers in 1 s | **504** at 200 ms ±1, empty body, `ext_proc_error_per-message_timeout_exceeded`. The backend is not called. `statusOnError` does **not** change it. | **200, unpaid**, after 200 ms. The access log reads `via_upstream`, like any success; only `ext_proc.failure_mode_allowed` counts it. |
+| Returns a gRPC error | **`statusOnError`** (503 when set), 2–5 ms. `details` carries the code and the filter's message. | not tested |
+| No ready pods | **500** `direct_response` from Envoy Gateway, 0 ms. `statusOnError` does **not** change it. | Envoy Gateway **drops the filter from the route**: 200, unpaid, no added latency, no `ext_proc` counter. Only the policy's `Accepted=False` shows it. |
+
+What follows for the design:
+
+- **A buyer sees 504, 503 or 500 depending on how the filter failed.** Only the filter's
+  own deadline gives one answer (503 with `Retry-After`), so that deadline is required,
+  not an optimisation.
+- **`failOpen: true` is ruled out by measurement.** With no filter pods it makes the route
+  free without slowing it down or counting anything. A per-route "open" mode, if ever
+  built, lives inside the filter and covers only its dependencies.
+- **Filter availability matters as much as filter latency**: no ready pods gives the least
+  useful answer.
+- **Stat names** (per listener, `http.<listener>.ext_proc.`): `streams_started`,
+  `streams_closed`, `stream_msgs_sent`, `stream_msgs_received`, `message_timeouts`,
+  `immediate_responses_sent`, `failure_mode_allowed`. They are not per route; the access
+  log's `response_code_details` tells routes apart.
+
+## Open: serving a valid payer when our side is slow
+
+A payer who sent a valid payment should not get an error because a dependency of ours is
+slow. Today they get a 503 and are not charged (settlement happens only after a 2xx, and
+the reservation is released), but the call fails. The alternative is for the seller to
+absorb the failure inside a bounded risk budget: let the timed-out balance read finish
+and fill the cache for the retry, serve on the last known balance, refresh active payers'
+balances in the background, hedge slow RPC calls, or extend a small credit shared by all
+unknown payers. Which of these are needed depends on how often a cache miss would miss
+the deadline, so the choice waits for the in-cluster baseline. Redis being down has no
+safe fallback: without the replay guard, one signature buys unlimited calls.
+
 ## Still to measure, from GKE
 
-- Redis round trip and the ext_proc hop inside the cluster: Gate Zero.
-- RPC and facilitator latency from `us-central1`: the numbers above are from a laptop.
-- `ext_proc` stats on the Envoy admin endpoint during the timeout drill. Expect counters such as `message_timeouts` and `failure_mode_allowed`; confirm the names there.
+- Redis round trip inside the cluster.
+- RPC (`balanceOf`) latency from `us-central1`, including its tail and 429 rate over a longer window; and facilitator latency. The numbers above are from a laptop.
 
 ## Sources
 

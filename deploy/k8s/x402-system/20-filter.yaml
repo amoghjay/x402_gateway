@@ -29,7 +29,7 @@ spec:
       containers:
         - name: filter
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:4fbe84b24108
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:0b25cf901699
           ports:
             - name: grpc
               containerPort: 9002
