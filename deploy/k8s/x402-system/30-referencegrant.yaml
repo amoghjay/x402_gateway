@@ -1,0 +1,18 @@
+# Gateway API forbids cross-namespace references unless the *target* namespace allows
+# them. The EnvoyExtensionPolicy lives in `demo` (next to its route) and points at the
+# filter Service here, so this namespace has to say yes, and only for that Service.
+# Without it the policy is rejected with a ResolvedRefs=False condition.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: extension-policies-to-filter
+  namespace: x402-system
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: EnvoyExtensionPolicy
+      namespace: demo
+  to:
+    - group: ""
+      kind: Service
+      name: x402-filter
