@@ -11,10 +11,12 @@
 package extproc
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -32,12 +34,14 @@ var redacted = map[string]bool{
 // Server is the no-op ext_proc server.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	log *slog.Logger
+	log   *slog.Logger
+	delay time.Duration
 }
 
-// NewServer returns a Server that logs every phase to log.
-func NewServer(log *slog.Logger) *Server {
-	return &Server{log: log}
+// NewServer returns a Server that logs every phase to log. delay holds each request
+// phase that long before answering; it exists for the timeout drill and is 0 otherwise.
+func NewServer(log *slog.Logger, delay time.Duration) *Server {
+	return &Server{log: log, delay: delay}
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -51,7 +55,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return err
 		}
 
-		resp, err := s.handle(req)
+		resp, err := s.handle(stream.Context(), req)
 		if err != nil {
 			return err
 		}
@@ -62,12 +66,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 }
 
 // handle answers one phase. An empty CommonResponse means "continue unchanged".
-func (s *Server) handle(req *extprocv3.ProcessingRequest) (*extprocv3.ProcessingResponse, error) {
+func (s *Server) handle(ctx context.Context, req *extprocv3.ProcessingRequest) (*extprocv3.ProcessingResponse, error) {
 	switch r := req.Request.(type) {
 	case *extprocv3.ProcessingRequest_RequestHeaders:
 		h := headerMap(r.RequestHeaders.GetHeaders())
 		s.log.Info("request headers",
 			"method", h[":method"], "path", h[":path"], "authority", h[":authority"], "headers", h)
+		if err := wait(ctx, s.delay); err != nil {
+			return nil, err
+		}
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_RequestHeaders{
 				RequestHeaders: &extprocv3.HeadersResponse{Response: &extprocv3.CommonResponse{}},
@@ -87,6 +94,23 @@ func (s *Server) handle(req *extprocv3.ProcessingRequest) (*extprocv3.Processing
 		// Bodies and trailers are never requested (processingMode sends headers only).
 		// Failing loudly beats a silent hang if the policy is changed to send them.
 		return nil, status.Errorf(codes.Unimplemented, "ext_proc phase %T not handled", r)
+	}
+}
+
+// wait sleeps for d, unless Envoy gives up on the stream first (its message timeout, or
+// the client went away). Then the context is cancelled and holding on would only keep a
+// dead stream open, and delay the drain on SIGTERM.
+func wait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
 	}
 }
 

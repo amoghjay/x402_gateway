@@ -30,6 +30,7 @@ func main() {
 	version := flag.Bool("version", false, "print the version and exit")
 	listen := flag.String("listen", ":9002", "gRPC listen address (ext_proc and health)")
 	drain := flag.Duration("drain", 20*time.Second, "how long to let in-flight streams finish on SIGTERM")
+	delay := flag.Duration("delay", 0, "drills only: hold each request this long before answering")
 	flag.Parse()
 
 	if *version {
@@ -38,20 +39,20 @@ func main() {
 	}
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("version", buildinfo.Version)
-	if err := run(log, *listen, *drain); err != nil {
+	if err := run(log, *listen, *drain, *delay); err != nil {
 		log.Error("exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, listen string, drain time.Duration) error {
+func run(log *slog.Logger, listen string, drain, delay time.Duration) error {
 	lis, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
 
 	srv := grpc.NewServer()
-	extprocv3.RegisterExternalProcessorServer(srv, extproc.NewServer(log))
+	extprocv3.RegisterExternalProcessorServer(srv, extproc.NewServer(log, delay))
 	hs := health.NewServer() // "" (the whole server) reports SERVING from the start
 	healthpb.RegisterHealthServer(srv, hs)
 
@@ -61,6 +62,9 @@ func run(log *slog.Logger, listen string, drain time.Duration) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(lis) }()
 	log.Info("listening", "addr", lis.Addr().String())
+	if delay > 0 {
+		log.Warn("drill mode: every request is held before it is answered", "delay", delay.String())
+	}
 
 	select {
 	case err := <-errc:
