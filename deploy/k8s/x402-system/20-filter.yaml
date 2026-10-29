@@ -1,0 +1,71 @@
+# The x402 filter: Envoy's ext_proc server. At Gate Zero a no-op that logs and continues.
+# One replica on the system pool for now; replicas, a PodDisruptionBudget and an HPA are
+# Phase 3.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: x402-filter
+  namespace: x402-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: x402-filter
+  template:
+    metadata:
+      labels:
+        app: x402-filter
+    spec:
+      # On the request path of every priced route: never on spot.
+      nodeSelector:
+        pool: system
+      # Longer than the binary's -drain (20 s), so it finishes draining in-flight streams
+      # before the kubelet's SIGKILL.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true # the distroless :nonroot image runs as uid 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: filter
+          # Built and pushed by CI from the merge commit (the tag is the commit).
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:4fbe84b24108
+          ports:
+            - name: grpc
+              containerPort: 9002
+          # The kubelet speaks the standard gRPC health protocol natively. Ready = the
+          # server is up and not draining; on SIGTERM it reports NOT_SERVING first.
+          readinessProbe:
+            grpc:
+              port: 9002
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9002
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # a static binary that writes nothing
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: x402-filter
+  namespace: x402-system
+spec:
+  selector:
+    app: x402-filter
+  ports:
+    - name: grpc
+      port: 9002
+      targetPort: grpc
+      appProtocol: kubernetes.io/h2c # gRPC is HTTP/2 without TLS on this hop (TLS is backlog)

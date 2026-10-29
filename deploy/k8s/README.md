@@ -15,15 +15,16 @@ kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for
 # 2. Our GatewayClass, its EnvoyProxy settings, and the Gateway on the reserved IP
 kubectl apply -f gateway/
 
-# 3. The demo backend and its route
-kubectl apply -f demo/
-
-# 4. Our platform components: Redis (later the filter, settler and controller)
+# 3. Our platform components: Redis, the filter, and the grant that lets demo's
+#    extension policy reference the filter Service
 kubectl apply -f x402-system/
+
+# 4. The demo backend, its routes, and the extension policy that puts the filter on one
+kubectl apply -f demo/
 ```
 
 | Path | What |
 |---|---|
 | `gateway/` | `gateway` namespace; `EnvoyProxy` (LoadBalancer on the reserved IP, proxies on the system pool); `GatewayClass x402`; `Gateway x402` with one HTTP listener that accepts routes only from labelled namespaces |
-| `demo/` | `demo` namespace (labelled for routes); httpbin on the spot pool; an `HTTPRoute` sending `/` to it |
-| `x402-system/` | `x402-system` namespace; Redis as a one-replica StatefulSet on the system pool, AOF (`everysec`) on a 10Gi PVC, behind a headless Service |
+| `demo/` | `demo` namespace (labelled for routes); httpbin on the spot pool; `HTTPRoute httpbin` sending `/` to it, through the filter (`EnvoyExtensionPolicy`, hand-written until the controller lands); `HTTPRoute httpbin-unpriced` for `/anything/free`, which skips the filter |
+| `x402-system/` | `x402-system` namespace; Redis as a one-replica StatefulSet on the system pool, AOF (`everysec`) on a 10Gi PVC, behind a headless Service; the `x402-filter` Deployment and Service; a `ReferenceGrant` letting `demo`'s extension policy point at the filter |

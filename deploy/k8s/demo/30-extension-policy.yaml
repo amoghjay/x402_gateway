@@ -1,0 +1,27 @@
+# Gate Zero, written by hand: send every request on the `httpbin` route through the
+# filter. In Phase 4 the PaymentPolicy controller writes this object instead, and this
+# file is deleted.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: x402-filter
+  namespace: demo
+spec:
+  # Attached to one route, not the Gateway: only routes that carry a price pay the hop.
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: httpbin
+  extProc:
+    - backendRefs:
+        - name: x402-filter
+          namespace: x402-system # allowed by the ReferenceGrant in x402-system
+          port: 9002
+      # Envoy Gateway's default sends neither phase, so the filter would see nothing.
+      # `{}` means headers only: no bodies, no trailers.
+      processingMode:
+        request: {}
+        response: {}
+      # Filter unreachable or erroring → the request fails; it is never let through
+      # unpaid. The timeout drill (step 5) measures what the client sees in each case.
+      failOpen: false

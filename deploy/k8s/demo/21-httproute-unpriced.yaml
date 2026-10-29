@@ -1,0 +1,21 @@
+# A second route to the same httpbin, with no extension policy: the control case.
+# Requests under /anything/free never reach the filter, which proves the hop is paid only
+# by routes that are priced. httpbin's /anything echoes any path, so no rewrite is needed.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: httpbin-unpriced
+  namespace: demo
+spec:
+  parentRefs:
+    - name: x402
+      namespace: gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /anything/free # longer than the priced route's `/`, so it wins
+      backendRefs:
+        - name: httpbin
+          port: 8080
