@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -19,12 +20,12 @@ import (
 
 // dial starts the server on an in-memory listener and opens one stream, as Envoy would
 // for one HTTP request. It returns the stream and everything the server logged.
-func dial(t *testing.T) (extprocv3.ExternalProcessor_ProcessClient, *bytes.Buffer) {
+func dial(t *testing.T, delay time.Duration) (extprocv3.ExternalProcessor_ProcessClient, *bytes.Buffer) {
 	t.Helper()
 	var logs bytes.Buffer
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	extprocv3.RegisterExternalProcessorServer(srv, NewServer(slog.New(slog.NewJSONHandler(&logs, nil))))
+	extprocv3.RegisterExternalProcessorServer(srv, NewServer(slog.New(slog.NewJSONHandler(&logs, nil)), delay))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -53,7 +54,7 @@ func headers(kv ...string) *corev3.HeaderMap {
 }
 
 func TestBothPhasesContinueUnchanged(t *testing.T) {
-	stream, logs := dial(t)
+	stream, logs := dial(t, 0)
 
 	err := stream.Send(&extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestHeaders{
 		RequestHeaders: &extprocv3.HttpHeaders{Headers: headers(":method", "GET", ":path", "/get", "authorization", "Bearer s3cret")},
@@ -92,7 +93,7 @@ func TestBothPhasesContinueUnchanged(t *testing.T) {
 }
 
 func TestBodyPhaseFailsLoudly(t *testing.T) {
-	stream, _ := dial(t)
+	stream, _ := dial(t, 0)
 
 	err := stream.Send(&extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestBody{
 		RequestBody: &extprocv3.HttpBody{Body: []byte("x")},
@@ -102,5 +103,43 @@ func TestBodyPhaseFailsLoudly(t *testing.T) {
 	}
 	if _, err := stream.Recv(); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("want Unimplemented for a body phase, got %v", err)
+	}
+}
+
+func TestDelayHoldsTheRequestPhase(t *testing.T) {
+	const delay = 100 * time.Millisecond
+	stream, _ := dial(t, delay)
+
+	start := time.Now()
+	err := stream.Send(&extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extprocv3.HttpHeaders{Headers: headers(":path", "/get")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Since(start); got < delay {
+		t.Fatalf("answered after %v, want at least %v", got, delay)
+	}
+}
+
+// Envoy cancels the stream when its message timeout fires. The server must stop
+// waiting then, not hold a dead stream for the rest of the delay.
+func TestDelayEndsWhenEnvoyGivesUp(t *testing.T) {
+	s := NewServer(slog.New(slog.DiscardHandler), time.Hour)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := s.handle(ctx, &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extprocv3.HttpHeaders{Headers: headers(":path", "/get")},
+	}})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if got := time.Since(start); got > time.Second {
+		t.Fatalf("returned after %v: the wait ignored cancellation", got)
 	}
 }
