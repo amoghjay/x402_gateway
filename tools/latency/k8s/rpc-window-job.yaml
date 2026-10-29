@@ -1,0 +1,57 @@
+# Runs measure_rpc_window.py from the system pool, where the filter runs, so the numbers
+# include GKE's egress path (Cloud NAT) to the Radius RPC. The script comes from a
+# ConfigMap made from the file, so there is one copy of it:
+#
+#   kubectl -n x402-system create configmap rpc-window --from-file=tools/latency/measure_rpc_window.py
+#   kubectl apply -f tools/latency/k8s/rpc-window-job.yaml
+#   kubectl -n x402-system logs -f job/rpc-window
+#
+# A Job, not a Deployment: it runs once to completion and is not restarted.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rpc-window
+  namespace: x402-system
+spec:
+  backoffLimit: 0 # a failed measurement is read, not retried
+  activeDeadlineSeconds: 900 # the 600 s window plus slack; then Kubernetes stops it
+  ttlSecondsAfterFinished: 86400 # keep the pod (and its log) for a day, then clean up
+  template:
+    metadata:
+      labels:
+        app: latency-probe
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: system
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534 # nobody: the script only reads and makes HTTPS calls
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: python:3.13-alpine
+          command: ["python3", "-I", "/probe/measure_rpc_window.py", "--duration", "600", "--interval", "1"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: probe
+              mountPath: /probe
+              readOnly: true
+      volumes:
+        - name: probe
+          configMap:
+            name: rpc-window
