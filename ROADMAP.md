@@ -73,7 +73,7 @@ What this project adds is the point on the latency/risk curve and where it runs:
 | 5 | Showcase | scripted five-minute demo + SLI dashboard on GKE over TLS |
 | 6 | Testnet confidence | 7-day soak, chaos runs, reconciliation at zero diff, measurement campaign |
 | 7 | Mainnet | only after Phase 6's gate; canary first |
-| 8 | Stretch | `upto`; the same filter as a GCP Service Extensions callout |
+| 8 | Stretch | `upto`, then `auth-capture` ([what it would take](docs/design/auth-capture.md)); the same filter as a GCP Service Extensions callout |
 
 ### Phase 1 — GCP foundation and Gate Zero
 
