@@ -195,3 +195,4 @@ safe fallback: without the replay guard, one signature buys unlimited calls.
 - [x402 exact EVM scheme](https://github.com/coinbase/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md)
 - [Radius docs](https://docs.radiustech.xyz/llms-full.txt): instant finality, `eth_sendRawTransactionSync`, facilitator API, SBC transfer methods, self-verification checks
 - [Envoy JWT authn filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/jwt_authn_filter)
+
