@@ -2,9 +2,12 @@
 // the settler and the buyer need, so that mainnet is a configuration change and no
 // address or URL is hard-coded anywhere else.
 //
-// Values were checked live (eth_getCode, facilitator /supported) on 2026-10-16 and
-// 2026-10-30 and match the radius-dev skill's network table; re-verify before a mainnet
-// cutover. SBC, Permit2 and the x402 Permit2
+// Every value here is checked against both live networks by live_test.go
+// (`make verify-radius`): chain id, bytecode at the three addresses, SBC's name and
+// decimals, its EIP-712 domain through ERC-5267 and DOMAIN_SEPARATOR(), the EIP-3009
+// typehash and authorizationState, the facilitators' /health and /supported, the
+// explorers and the faucet. Last run green on 2026-10-30. Radius's docs say SBC lacks
+// EIP-3009; the chain says otherwise, so trust the test, not the docs. SBC, Permit2 and the x402 Permit2
 // proxy have identical addresses on both networks.
 package radius
 
