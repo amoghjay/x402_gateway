@@ -3,6 +3,7 @@ module github.com/amoghjay/x402_gateway
 go 1.27
 
 require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/envoyproxy/go-control-plane/envoy v1.40.0
 	golang.org/x/crypto v0.58.0
 	google.golang.org/grpc v1.84.0
