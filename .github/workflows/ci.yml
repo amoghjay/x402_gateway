@@ -1,9 +1,47 @@
 name: ci
 
-on: [push, pull_request]
+# One run per commit: pull_request covers PR branches, push covers main (and does the
+# registry push). Running both on a PR branch gave two check runs with the same name
+# per commit, and the ruleset takes the failed one when a transient job fails.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
+  # Docs-only changes skip the real jobs. The workflow itself must still run: the
+  # ruleset requires the go / terraform / image checks by name, and a skipped job counts
+  # as passed, while a workflow that never runs leaves the PR blocked on "pending".
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - "cmd/**"
+              - "internal/**"
+              - "go.mod"
+              - "go.sum"
+              - ".golangci.yml"
+              - "Dockerfile"
+              - "Makefile"
+              - ".github/workflows/ci.yml"
+            terraform:
+              - "deploy/terraform/**"
+              - ".github/workflows/ci.yml"
+
   go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +59,8 @@ jobs:
           version: v2.14.0
 
   terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,16 +79,25 @@ jobs:
       - run: terraform validate
 
   image:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Pulling the base image from gcr.io has timed out once (2026-10-29); retry the
+      # build a few times before calling the job failed.
       - name: Build the filter image and check it runs
         run: |
-          docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter .
+          for attempt in 1 2 3; do
+            docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter . && break
+            echo "build attempt $attempt failed; retrying in 15s"
+            sleep 15
+          done
           test "$(docker run --rm x402-filter -version)" = ci
 
-  # Pushes to Artifact Registry on main only, after every check above passes. Keyless:
+  # Pushes to Artifact Registry on main only, after every check above passes. A docs-only
+  # merge skips go and image, so this is skipped too: nothing changed in the image. Keyless:
   # GitHub's OIDC token is exchanged for a short-lived Google token through the WIF
   # provider (deploy/terraform/wif.tf), which itself only accepts runs on refs/heads/main.
   # Neither value below is a secret; they are Terraform outputs.
