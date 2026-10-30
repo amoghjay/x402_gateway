@@ -9,7 +9,39 @@ on:
   pull_request:
 
 jobs:
+  # Docs-only changes skip the real jobs. The workflow itself must still run: the
+  # ruleset requires the go / terraform / image checks by name, and a skipped job counts
+  # as passed, while a workflow that never runs leaves the PR blocked on "pending".
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - "cmd/**"
+              - "internal/**"
+              - "go.mod"
+              - "go.sum"
+              - ".golangci.yml"
+              - "Dockerfile"
+              - "Makefile"
+              - ".github/workflows/ci.yml"
+            terraform:
+              - "deploy/terraform/**"
+              - ".github/workflows/ci.yml"
+
   go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +59,8 @@ jobs:
           version: v2.14.0
 
   terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -45,6 +79,8 @@ jobs:
       - run: terraform validate
 
   image:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +96,8 @@ jobs:
           done
           test "$(docker run --rm x402-filter -version)" = ci
 
-  # Pushes to Artifact Registry on main only, after every check above passes. Keyless:
+  # Pushes to Artifact Registry on main only, after every check above passes. A docs-only
+  # merge skips go and image, so this is skipped too: nothing changed in the image. Keyless:
   # GitHub's OIDC token is exchanged for a short-lived Google token through the WIF
   # provider (deploy/terraform/wif.tf), which itself only accepts runs on refs/heads/main.
   # Neither value below is a secret; they are Terraform outputs.
