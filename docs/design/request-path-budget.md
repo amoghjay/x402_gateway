@@ -183,7 +183,9 @@ and fill the cache for the retry, serve on the last known balance, refresh activ
 balances in the background, hedge slow RPC calls, or extend a small credit shared by all
 unknown payers. Which of these are needed depends on how often a cache miss would miss
 the deadline, so the choice waits for the in-cluster baseline. Redis being down has no
-safe fallback: without the replay guard, one signature buys unlimited calls.
+safe fallback: without the replay guard, one signature buys unlimited calls. If the
+fallbacks do not hold, [batch-settlement.md](batch-settlement.md) removes the balance read
+from the request path with an escrow contract.
 
 ## Measured on GKE: the in-cluster baseline (2026-10-28)
 
