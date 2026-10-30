@@ -1,6 +1,12 @@
 name: ci
 
-on: [push, pull_request]
+# One run per commit: pull_request covers PR branches, push covers main (and does the
+# registry push). Running both on a PR branch gave two check runs with the same name
+# per commit, and the ruleset takes the failed one when a transient job fails.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   go:
@@ -43,9 +49,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pulling the base image from gcr.io has timed out once (2026-10-29); retry the
+      # build a few times before calling the job failed.
       - name: Build the filter image and check it runs
         run: |
-          docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter .
+          for attempt in 1 2 3; do
+            docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter . && break
+            echo "build attempt $attempt failed; retrying in 15s"
+            sleep 15
+          done
           test "$(docker run --rm x402-filter -version)" = ci
 
   # Pushes to Artifact Registry on main only, after every check above passes. Keyless:
