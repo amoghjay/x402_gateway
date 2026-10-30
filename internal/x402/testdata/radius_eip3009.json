@@ -1,0 +1,21 @@
+{
+  "note": "Deterministic Radius testnet vector made with tools/latency/measure_settle.py's signer (eth_account) on 2026-10-30. The private key is Hardhat account #1, public knowledge; on Radius testnet that address happens to hold a little SBC (0.747 on 2026-10-30, dripped by someone), so the testnet facilitator's /verify answers isValid:true for this vector, and a corrupted signature answers 'Signature verification failed'. Both are checked by make verify-radius. The key is here so the verifier can prove ecrecover against a known signer.",
+  "privateKey": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "domain": {
+    "name": "Stable Coin",
+    "version": "1",
+    "chainId": 72344,
+    "verifyingContract": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb"
+  },
+  "header": "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cHM6Ly9kZW1vLmV4YW1wbGUvZ2V0IiwiZGVzY3JpcHRpb24iOiJnb2xkZW4gdmVjdG9yIiwibWltZVR5cGUiOiJhcHBsaWNhdGlvbi9qc29uIn0sImFjY2VwdGVkIjp7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo3MjM0NCIsImFtb3VudCI6IjEwMDAiLCJwYXlUbyI6IjB4MjA5NjkzQmM2YWZjMEM1MzI4YkEzNkZhRjAzQzUxNEVGMzEyMjg3QyIsImFzc2V0IjoiMHgzM2FkOWU0QkQxNkI2OUI1QkZkRUQzN0Q4QjVEOWZGOWFiYTAxNEZiIiwibWF4VGltZW91dFNlY29uZHMiOjMwMCwiZXh0cmEiOnsiYXNzZXRUcmFuc2Zlck1ldGhvZCI6ImVpcDMwMDkiLCJuYW1lIjoiU3RhYmxlIENvaW4iLCJ2ZXJzaW9uIjoiMSJ9fSwicGF5bG9hZCI6eyJzaWduYXR1cmUiOiIweGJhYjBkMWY1YTY1OTJkZjdmODA5MTAzYWZkNGEwODFlNTczZGMxZGY3NWU4NTY0ZTY3MmMyZWYzYzQyZTlkY2MxOGRiMTk3NWU5MDRiNTNmM2E0ZmMxYmVmZTZmNzkxOGU4NzBkNDU2NmI2NDlmZWIzZmNjNmJiYzA2Y2I1ZDBmMWMiLCJhdXRob3JpemF0aW9uIjp7ImZyb20iOiIweDcwOTk3OTcwQzUxODEyZGMzQTAxMEM3ZDAxYjUwZTBkMTdkYzc5QzgiLCJ0byI6IjB4MjA5NjkzQmM2YWZjMEM1MzI4YkEzNkZhRjAzQzUxNEVGMzEyMjg3QyIsInZhbHVlIjoiMTAwMCIsInZhbGlkQWZ0ZXIiOiIwIiwidmFsaWRCZWZvcmUiOiIxOTAwMDAwMDAwIiwibm9uY2UiOiIweGFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWIifX19",
+  "signature": "0xbab0d1f5a6592df7f809103afd4a081e573dc1df75e8564e672c2ef3c42e9dcc18db1975e904b53f3a4fc1befe6f7918e870d4566b649feb3fcc6bbc06cb5d0f1c",
+  "authorization": {
+    "from": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "to": "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+    "value": "1000",
+    "validAfter": "0",
+    "validBefore": "1900000000",
+    "nonce": "0xabababababababababababababababababababababababababababababababab"
+  }
+}

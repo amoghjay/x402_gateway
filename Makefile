@@ -4,7 +4,7 @@ LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version
 BINARIES := x402-filter
 REGISTRY ?= local
 
-.PHONY: build test lint images legacy-test gke-down gke-up gke-status
+.PHONY: build test lint verify-radius images legacy-test gke-down gke-up gke-status
 
 build:
 	@mkdir -p bin
@@ -17,6 +17,11 @@ test:
 
 lint:
 	golangci-lint run ./...
+
+# Checks every constant in internal/radius against both live networks (RPC, SBC's
+# EIP-712 domain and EIP-3009, facilitators, explorers, faucet). Needs the internet.
+verify-radius:
+	go test -tags live -count=1 -run Live -v ./internal/radius
 
 # One Dockerfile, one image per binary. REGISTRY becomes the Artifact Registry path in Phase 1.
 images:
