@@ -8,8 +8,10 @@
 > (reserve-then-capture). The deliverable is what that costs to build, run, and get wrong.
 > The finding generalises past x402 to any settlement path slower than the proxy's budget.
 
-**Status.** Phase 0 is done. Phase 1 (GCP foundation) is in progress: the GKE cluster is
-in Terraform. The application-layer
+**Status.** Phase 0 and Phase 1 are done: the GKE cluster is in Terraform, Envoy Gateway
+and a no-op `ext_proc` filter serve the static IP, and the timeout drill and in-cluster
+baseline are measured and written up (`docs/design/request-path-budget.md`). Next is
+Phase 2, x402 V2. The application-layer
 gateway it grew out of — both settlement paths, five findings, 29 pytest + 9 forge
 tests — lives on, green, under [`legacy/llm-gateway/`](legacy/llm-gateway/).
 
@@ -114,6 +116,10 @@ fits ([design note](docs/design/request-path-budget.md)):
    its allowance to the same read), **reserve in Redis** (nonce `SET NX` that outlives the signature's
    deadline + per-payer in-flight sum), continue. All under a filter-owned deadline
    shorter than Envoy's timeout, so the filter, not Envoy, answers when it is slow.
+   A valid payer is not failed for our slowness where a bounded fallback exists: the
+   RPC connection stays warm, a timed-out balance read still fills the cache for the
+   retry, and a returning payer is served on a recent cached balance (decided after the
+   baseline, in the design note).
 2. Response: 2xx → enqueue capture, release immediately. 5xx → drop the reservation;
    nobody is charged.
 3. `x402-settler` workers settle off-path from a Redis Stream, idempotently.

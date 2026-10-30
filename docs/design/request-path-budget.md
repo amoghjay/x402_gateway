@@ -91,7 +91,7 @@ from.
 2. Recover the signature (~95 µs).
 3. Read the balance from the Redis cache (TTL of a few seconds). On a miss, call `balanceOf` (~80 ms) and cache the result. EIP-3009, the first transfer method, needs nothing else. Permit2 adds its `allowance` to the same JSON-RPC batch.
 4. Check that cached balance minus in-flight reservations covers the price, then reserve the nonce and amount atomically.
-5. Past the deadline, the filter itself answers 503 with `Retry-After` and releases the reservation. Envoy's 504 should only ever fire if the filter hangs.
+5. Past the deadline, the filter itself answers 503 with `Retry-After` and releases the reservation. Envoy's 504 should only ever fire if the filter hangs. What else happens at the deadline is decided below ("serving a valid payer when our side is slow").
 
 **After the response:** on a 2xx, queue the settlement; the settler calls `/settle` off the request path. On a 5xx, drop the reservation.
 
@@ -173,19 +173,49 @@ What follows for the design:
   `immediate_responses_sent`, `failure_mode_allowed`. They are not per route; the access
   log's `response_code_details` tells routes apart.
 
-## Open: serving a valid payer when our side is slow
+## Decided 2026-10-30: serving a valid payer when our side is slow
 
 A payer who sent a valid payment should not get an error because a dependency of ours is
-slow. Today they get a 503 and are not charged (settlement happens only after a 2xx, and
-the reservation is released), but the call fails. The alternative is for the seller to
-absorb the failure inside a bounded risk budget: let the timed-out balance read finish
-and fill the cache for the retry, serve on the last known balance, refresh active payers'
-balances in the background, hedge slow RPC calls, or extend a small credit shared by all
-unknown payers. Which of these are needed depends on how often a cache miss would miss
-the deadline, so the choice waits for the in-cluster baseline. Redis being down has no
-safe fallback: without the replay guard, one signature buys unlimited calls. If the
-fallbacks do not hold, [batch-settlement.md](batch-settlement.md) removes the balance read
-from the request path with an escrow contract.
+slow. Without a fallback they get a 503 and are not charged (settlement happens only after
+a 2xx, and the reservation is released), but the call fails. Instead the seller absorbs
+the failure inside a bounded risk budget. The in-cluster baseline below sizes it: a warm
+RPC connection fits the deadline 99.26% of the time, a cold one never does, and a
+returning payer is served from the cache.
+
+**In M5, the core path:**
+
+1. **Keep the RPC connection warm.** An idle connection guarantees a miss on the next
+   cache miss, so the filter sends a keepalive (an HTTP/2 ping or `eth_blockNumber`)
+   about every 20 s.
+2. **Let a timed-out balance read finish and fill the cache.** At the deadline the filter
+   answers 503 with `Retry-After: 1`, but the in-flight `balanceOf` runs to completion and
+   stores its result, so the retry is a cache hit.
+3. **Serve a returning payer on the last known balance.** When a refresh overruns the
+   deadline, a cached balance younger than about 60 s, minus in-flight reservations,
+   still counts. The risk is at most one cache window of requests per payer whose wallet
+   was drained elsewhere, the same bound the loss limit already applies.
+4. **`statusOnError: 503`** on the `EnvoyExtensionPolicy`, so a filter that errors returns
+   a retryable code. It covers filter errors only; a timeout stays Envoy's 504 (see the
+   drill above).
+5. **Two filter replicas and a PodDisruptionBudget.** Zero ready pods is the worst
+   answer: an Envoy Gateway 500, or a free route under `failOpen`.
+
+**Residual.** A first-time payer on the 0.74% path gets one 503 with `Retry-After`, is not
+charged, and the retry succeeds from the filled cache. Only a shared credit removes that,
+and it is a business-risk call.
+
+**Backlog, each with its trigger:**
+
+- Hedged RPC (a second request fired when the first is slow): if the keyed RPC still
+  spikes, or real traffic shows more than about 1% of calls over 140 ms.
+- A small credit shared by all unknown payers (one global cap, not per wallet, because
+  wallets are free to create): if first-request 503s matter to a seller.
+- Background refresh of active payers' balances: if the real cache-miss rate is high.
+- Keyed RPC A/B and an RPC load test: when an API key is in hand.
+
+Redis being down has no safe fallback: without the replay guard, one signature buys
+unlimited calls. If the fallbacks do not hold, [batch-settlement.md](batch-settlement.md)
+removes the balance read from the request path with an escrow contract.
 
 ## Measured on GKE: the in-cluster baseline (2026-10-28)
 
