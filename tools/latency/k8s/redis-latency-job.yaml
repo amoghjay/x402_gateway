@@ -1,0 +1,54 @@
+# Redis round trip from another pod on the system pool: what the filter will see. Running
+# redis-cli inside the Redis pod would measure loopback, not the network hop.
+#
+#   kubectl apply -f tools/latency/k8s/redis-latency-job.yaml
+#   kubectl -n x402-system logs -f job/redis-latency
+#
+# One client (-c 1), so each figure is a single round trip, not throughput under load.
+# The SET is the replay guard's real shape: SET key NX EX. Its keys are prefixed `probe:`
+# and expire after 60 s, so the run leaves nothing behind.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-latency
+  namespace: x402-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: latency-probe
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: system
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999 # the redis user in the image
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: redis:8.10.2-alpine # the server's own image, so client and server match
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              H=redis.x402-system
+              echo "== PING"
+              redis-benchmark -h $H -c 1 -n 20000 -t ping_mbulk --precision 3
+              echo "== SET probe:<n> 1 NX EX 60 (the replay guard)"
+              redis-benchmark -h $H -c 1 -n 20000 -r 1000000 --precision 3 SET probe:__rand_int__ 1 NX EX 60
+          resources:
+            requests:
+              cpu: 50m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

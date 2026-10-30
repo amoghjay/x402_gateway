@@ -1,6 +1,6 @@
 # The request-path budget: what happens past 200 ms, and how the filter stays inside it
 
-Status: proposed design for Phase 3. Measurements taken 2026-10-16 (laptop) and 2026-10-28 (GKE timeout drill).
+Status: proposed design for Phase 3. Measurements taken 2026-10-16 (laptop) and 2026-10-28 (GKE: timeout drill and in-cluster baseline).
 
 ## The constraint
 
@@ -73,8 +73,10 @@ Script: [`tools/latency/measure_checks.py`](../../tools/latency/measure_checks.p
 | EIP-712 Permit2 hash + `ecrecover`, go-ethereum v1.14.12 | **~95 µs** with `CGO_ENABLED=0` (as `make build` ships), ~40 µs with cgo | benchmark, Apple M4 Max |
 | `balanceOf` via `eth_call` | p50 81 ms, max 225 ms (testnet) / 168 ms (mainnet) | measured, laptop, n=20 |
 | `balanceOf` + Permit2 `allowance` in **one JSON-RPC batch** | p50 ~80 ms, p90 86–111 ms, max 166 ms | measured, both networks, n=20 |
-| Cached balance read from Redis | ~1 ms | **estimate**, measure at Gate Zero |
-| Nonce `SET NX` + in-flight sum (one Lua script) | ~1 ms | **estimate**, measure at Gate Zero |
+| `balanceOf` from GKE, kept-alive connection | p50 59–62 ms, p99 119–123 ms, max 1.4–2.0 s; **0.74% over 140 ms** | measured, system pool, 1/s for 10 min, n≈540 per network |
+| `balanceOf` from GKE, **new connection** (TCP + TLS) | p50 ~265 ms, max 518 ms; **100% over 140 ms** | measured, same run, n=19 per network |
+| Redis round trip (`PING`) from another pod | p50 0.09 ms, p99 0.81 ms, max 3.7 ms | measured, system pool, n=20,000 |
+| Nonce `SET … NX EX` (the replay guard) | p50 0.10 ms, p99 0.79 ms, max 8.3 ms, AOF on | measured, same run; the in-flight sum adds a Lua script on top |
 
 The balance check is required. Without it, an empty wallet can sign valid payments
 indefinitely. Each one passes the signature check, the response is served, and only
@@ -183,10 +185,25 @@ unknown payers. Which of these are needed depends on how often a cache miss woul
 the deadline, so the choice waits for the in-cluster baseline. Redis being down has no
 safe fallback: without the replay guard, one signature buys unlimited calls.
 
-## Still to measure, from GKE
+## Measured on GKE: the in-cluster baseline (2026-10-28)
 
-- Redis round trip inside the cluster.
-- RPC (`balanceOf`) latency from `us-central1`, including its tail and 429 rate over a longer window; and facilitator latency. The numbers above are from a laptop.
+Probes ran as Jobs on the system pool, next to the filter
+([`tools/latency/k8s/`](../../tools/latency/k8s/)). Keyless RPC; the numbers are in the
+table under "What each check costs".
+
+- **Redis is not a factor.** The replay guard's `SET … NX EX` has a p99 under 1 ms.
+- **A warm RPC connection fits the deadline 99.26% of the time.** A cache miss costs the
+  hop (~4 ms) + signature (~0.1 ms) + Redis (~1 ms) + `balanceOf` (p99 123 ms), which is
+  about 130 ms at p99, inside the filter's 150 ms. The 0.74% that does not fit includes
+  spikes up to 2 s.
+- **A new connection never fits.** TCP + TLS to the RPC's Cloudflare front pushes every
+  cold call past 140 ms (p50 ~265 ms). A filter whose RPC connection has gone idle misses
+  its deadline on the next cache miss, so the connection has to be kept warm.
+- **How often a valid payer would hit the deadline** ≈ P(cache miss) × 0.74%, provided
+  the connection is warm. A payer's first request is always a miss.
+
+Not yet measured: the RPC with an API key (rate limits and whether the tail changes), the
+RPC under load (no 429s at one call a second), and the facilitator from GKE.
 
 ## Sources
 
