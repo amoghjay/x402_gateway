@@ -133,7 +133,7 @@ func TestReconciler(t *testing.T) {
 		}
 		// What the API server stored, after the CRD's own validation and defaulting.
 		raw, _ := json.Marshal(eep.Object["spec"])
-		for _, want := range []string{`"messageTimeout":"200ms"`, `"statusOnError":503`, `"failOpen":false`, `"xds.route_name"`} {
+		for _, want := range []string{`"messageTimeout":"300ms"`, `"statusOnError":503`, `"failOpen":false`, `"xds.route_name"`} {
 			if !strings.Contains(string(raw), want) {
 				t.Errorf("EnvoyExtensionPolicy spec lacks %s: %s", want, raw)
 			}

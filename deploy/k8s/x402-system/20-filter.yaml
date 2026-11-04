@@ -52,7 +52,9 @@ spec:
             # Payments on. Without -redis every priced request gets the 402.
             - -redis=redis.x402-system.svc:6379
             - -networks=testnet
-            - -deadline=150ms
+            # Under the 300 ms messageTimeout the controller sets on every route; a
+            # balanceOf read from GKE took 130-270 ms on 2026-11-04.
+            - -deadline=250ms
           env:
             # Where the price-table ConfigMap lives: the filter's own namespace.
             - name: POD_NAMESPACE

@@ -70,7 +70,7 @@ const ReasonReplay = "payment_already_used"
 
 // Defaults for Payments.
 const (
-	DefaultDeadline       = 150 * time.Millisecond // request phase, under Envoy's 200 ms
+	DefaultDeadline       = 250 * time.Millisecond // request phase, under Envoy's 300 ms (the controller's messageTimeout)
 	responsePhaseDeadline = 50 * time.Millisecond  // one Redis call; the phase must stay trivial
 	// reserveMargin is kept back from the balance step so the reserve script, one Redis
 	// round trip, always has room: a balance read that runs to the deadline must not

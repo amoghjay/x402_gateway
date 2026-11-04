@@ -151,9 +151,15 @@ Envoy Gateway v1.9.2, the no-op filter with a `-delay` flag, one `HTTPRoute` beh
 `failOpen` or `statusOnError`, so Envoy Gateway left `message_timeout`,
 `failure_mode_allow` and `status_on_error` at Envoy's defaults (200 ms, `false`, unset)
 and set `grpc_service.timeout: 10s`. All three are `EnvoyExtensionPolicy` fields in
-v1.9.2 (`ext_proc_types.go`) and are honoured; the controller sets `messageTimeout:
-200ms` and `statusOnError: 503` (M4). The 200 ms per-message timeout is the one that
-fires.
+v1.9.2 (`ext_proc_types.go`) and are honoured; the controller sets `messageTimeout` and
+`statusOnError: 503` (M4). The per-message timeout is the one that fires.
+
+**Raised 2026-11-04, after the first live paid calls:** `messageTimeout: 300ms` and a
+filter deadline of 250 ms (from 200/150). The testnet RPC answered `balanceOf` in
+130–270 ms that day, against the 60–80 ms this note measured in October, so with the
+old budget almost every first-time payer took the one-time 503 + `Retry-After`. The
+arithmetic above (hop 4 + verify 0.1 + Redis 1 + read) still holds; only the read's
+number moved. To be re-measured under the Phase 6 soak.
 
 | Filter state | `failOpen: false` | `failOpen: true` |
 |---|---|---|
