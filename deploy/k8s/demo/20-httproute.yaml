@@ -1,6 +1,10 @@
 # Attaches httpbin to the shared Gateway. Envoy Gateway programs Envoy from this: any
-# path on the public IP goes to the httpbin Service. Delete this and the same request
-# gets a 404 from Envoy (the Phase 1 break-it drill).
+# path on the demo hostname goes to the httpbin Service. Delete this and the same
+# request gets a 404 from Envoy (the Phase 1 break-it drill).
+#
+# The hostname is the only door: a request for the bare IP matches no route and gets a
+# 404 from Envoy. nip.io resolves the name to the reserved IP (22ade072 is the IP in
+# hex); a domain of our own, with TLS, is the Phase 5 item.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -11,6 +15,8 @@ spec:
     - name: x402
       namespace: gateway
       sectionName: http
+  hostnames:
+    - x402-22ade072.nip.io
   rules:
     - matches:
         - path:
