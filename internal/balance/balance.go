@@ -5,9 +5,11 @@
 // the time, a cold one never, and a returning payer is a cache hit):
 //
 //   - a balance younger than Fresh is served as is;
-//   - between Fresh and LastKnown a refresh starts, and the request waits for it until
-//     its own deadline, then serves the last known value rather than fail a payer for
-//     our slowness (the risk is bounded by one cache window per payer);
+//   - between Fresh and LastKnown the last known value is served at once and a refresh
+//     starts in the background, rather than fail a payer for our slowness (the risk is
+//     bounded by one cache window per payer). Waiting for the refresh was tried first
+//     and measured on GKE: a read that does not fit the deadline burns the whole budget
+//     and then starves the reserve step that needed one millisecond of it;
 //   - older than that, or never seen, the request waits for the read and fails with
 //     ErrDeadline if it overruns: the caller answers 503 + Retry-After.
 //
@@ -49,8 +51,7 @@ type Source string
 
 const (
 	SourceFresh     Source = "fresh"      // cache, younger than Fresh
-	SourceRefreshed Source = "refreshed"  // stale in cache, refreshed within the deadline
-	SourceLastKnown Source = "last_known" // stale in cache, refresh overran the deadline
+	SourceLastKnown Source = "last_known" // cache, between Fresh and LastKnown; a refresh is under way
 	SourceFetched   Source = "fetched"    // not in cache, read within the deadline
 )
 
@@ -92,15 +93,7 @@ func (c *Cache) Get(ctx context.Context, payer evm.Address) (Balance, error) {
 		case age <= c.fresh():
 			return Balance{Value: v, Age: age, Source: SourceFresh}, nil
 		case age <= c.lastKnown():
-			select {
-			case r := <-c.fetch(ctx, payer):
-				if r.Err == nil {
-					return Balance{Value: r.Val.(*big.Int), Source: SourceRefreshed}, nil
-				}
-				c.log().Warn("balance refresh failed; serving last known", "payer", payer, "age", age, "err", r.Err)
-			case <-ctx.Done():
-				c.log().Info("balance refresh overran the deadline; serving last known", "payer", payer, "age", age)
-			}
+			c.fetch(ctx, payer) // in the background; the next request is a hit
 			return Balance{Value: v, Age: age, Source: SourceLastKnown}, nil
 		}
 	}
@@ -124,11 +117,12 @@ func (c *Cache) fetch(ctx context.Context, payer evm.Address) <-chan singlefligh
 		t0 := time.Now()
 		v, err := c.RPC.BalanceOf(fctx, c.Token, payer)
 		if err != nil {
+			c.log().Warn("balanceOf failed", "payer", payer.String(), "ms", time.Since(t0).Milliseconds(), "err", err)
 			return nil, err
 		}
-		c.log().Debug("balanceOf", "payer", payer, "ms", time.Since(t0).Milliseconds())
+		c.log().Debug("balanceOf", "payer", payer.String(), "ms", time.Since(t0).Milliseconds())
 		if err := c.write(fctx, payer, v, c.now()); err != nil {
-			c.log().Warn("balance cache write failed", "payer", payer, "err", err)
+			c.log().Warn("balance cache write failed", "payer", payer.String(), "err", err)
 		}
 		return v, nil
 	})

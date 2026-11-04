@@ -130,27 +130,27 @@ func TestOverrunFillsTheCache(t *testing.T) {
 	}
 }
 
-// A returning payer whose entry is stale is served the last known balance when the
-// refresh overruns, and the refresh still lands for the next request.
-func TestStaleServesLastKnownWhenRefreshOverruns(t *testing.T) {
+// A returning payer whose entry is stale is served the last known balance at once,
+// however slow the RPC is, and the refresh lands for the next request.
+func TestStaleServesLastKnownAndRefreshes(t *testing.T) {
 	f := setup(t, 7000)
 	f.seed(5000, 10*time.Second)
 	f.node.delay.Store(int64(200 * time.Millisecond))
-	b, err := f.get(30 * time.Millisecond)
+	t0 := time.Now()
+	b, err := f.get(time.Second)
 	f.want(b, err, 5000, SourceLastKnown)
+	if took := time.Since(t0); took > 50*time.Millisecond {
+		t.Errorf("stale entry took %v to serve: it must not wait for the refresh", took)
+	}
 	if b.Age < 10*time.Second {
 		t.Errorf("age = %v", b.Age)
 	}
 	time.Sleep(300 * time.Millisecond)
 	b, err = f.get(30 * time.Millisecond)
 	f.want(b, err, 7000, SourceFresh)
-}
-
-func TestStaleRefreshesInTime(t *testing.T) {
-	f := setup(t, 7000)
-	f.seed(5000, 10*time.Second)
-	b, err := f.get(time.Second)
-	f.want(b, err, 7000, SourceRefreshed)
+	if n := f.node.calls.Load(); n != 1 {
+		t.Errorf("RPC calls = %d, want 1", n)
+	}
 }
 
 // Past LastKnown an entry is no better than nothing: the read must complete.
