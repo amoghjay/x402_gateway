@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "routes": {
+    "httproute/demo/httpbin": {
+      "network": "eip155:72344",
+      "price": "1000",
+      "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+      "payTo": "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4",
+      "assetTransferMethod": "eip3009",
+      "maxTimeoutSeconds": 300,
+      "failureMode": "Closed",
+      "captureMode": "Async",
+      "description": "httpbin, one call",
+      "mimeType": "application/json",
+      "help": {
+        "message": "Demo route on Radius testnet; get test SBC from the faucet first."
+      }
+    }
+  }
+}

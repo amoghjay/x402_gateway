@@ -61,3 +61,14 @@ func TestSharedContractsAreTheSameOnBothNetworks(t *testing.T) {
 		t.Error("shared contract constants changed; re-check both networks")
 	}
 }
+
+func TestByNetwork(t *testing.T) {
+	for _, want := range []Profile{Testnet, Mainnet} {
+		if got, err := ByNetwork(want.Network()); err != nil || got != want {
+			t.Errorf("%s: %+v %v", want.Network(), got, err)
+		}
+	}
+	if _, err := ByNetwork("eip155:1"); err == nil {
+		t.Error("unknown network accepted")
+	}
+}

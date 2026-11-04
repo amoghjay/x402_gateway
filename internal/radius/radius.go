@@ -76,6 +76,16 @@ func Lookup(name string) (Profile, error) {
 	return Profile{}, fmt.Errorf("radius: unknown network %q", name)
 }
 
+// ByNetwork returns the profile for a CAIP-2 identifier ("eip155:72344").
+func ByNetwork(caip2 string) (Profile, error) {
+	for _, p := range []Profile{Testnet, Mainnet} {
+		if p.Network() == caip2 {
+			return p, nil
+		}
+	}
+	return Profile{}, fmt.Errorf("radius: unknown network %q", caip2)
+}
+
 // Network is the CAIP-2 identifier the x402 wire uses.
 func (p Profile) Network() string { return fmt.Sprintf("eip155:%d", p.ChainID) }
 
