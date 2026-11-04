@@ -5,17 +5,28 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
 
 const ns, name = "x402-system", "x402-prices"
+
+// noWatchList is the fake's CoreV1 client, marked as not supporting watch-list (the
+// streamed initial list a real API server sends). Only the fake clientset carries that
+// mark, not its typed clients.
+type noWatchList struct{ corev1client.ConfigMapsGetter }
+
+func (noWatchList) IsWatchListSemanticsUnSupported() bool { return true }
 
 func configMap(cmName string, data map[string]string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: cmName}, Data: data}
@@ -32,7 +43,25 @@ func TestWatcher(t *testing.T) {
 	b, _ := json.Marshal(tbl)
 	twoRoutes := string(b)
 
-	client := fake.NewClientset()
+	// The fake's watch does not replay history, so an object created between the
+	// informer's list and its watch would be lost. Signal when the watch is open and
+	// create nothing before (client-go's fake-client example does the same). The reactor
+	// also checks that the watch carries the name selector RBAC needs.
+	fc := fake.NewClientset()
+	watching := make(chan struct{})
+	var once sync.Once
+	fc.PrependWatchReactor("configmaps", func(a clienttesting.Action) (bool, watch.Interface, error) {
+		if got := a.(clienttesting.WatchAction).GetWatchRestrictions().Fields.String(); got != "metadata.name="+name {
+			t.Errorf("watch field selector %q", got)
+		}
+		wi, err := fc.Tracker().Watch(a.GetResource(), a.GetNamespace())
+		if err != nil {
+			return false, nil, err
+		}
+		once.Do(func() { close(watching) }) // an informer may re-watch
+		return true, wi, nil
+	})
+	client := noWatchList{fc.CoreV1()}
 	store := NewStore()
 	events := make(chan bool, 10)
 	w := &Watcher{
@@ -43,6 +72,11 @@ func TestWatcher(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() { _ = w.Run(ctx) }()
+	select {
+	case <-watching:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch never opened")
+	}
 
 	next := func(want bool) {
 		t.Helper()
@@ -55,7 +89,7 @@ func TestWatcher(t *testing.T) {
 			t.Fatal("no event")
 		}
 	}
-	cms := client.CoreV1().ConfigMaps(ns)
+	cms := client.ConfigMaps(ns)
 
 	// Another ConfigMap in the namespace is never read, whatever it holds.
 	if _, err := cms.Create(ctx, configMap("other", map[string]string{ConfigMapKey: "garbage"}), metav1.CreateOptions{}); err != nil {
@@ -115,7 +149,7 @@ func TestWatcherSelector(t *testing.T) {
 
 func TestStartsUnloadedWithoutAConfigMap(t *testing.T) {
 	store := NewStore()
-	w := &Watcher{Client: fake.NewClientset(), Namespace: ns, Name: name, Store: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	w := &Watcher{Client: noWatchList{fake.NewClientset().CoreV1()}, Namespace: ns, Name: name, Store: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	_ = w.Run(ctx)

@@ -7,8 +7,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/amoghjay/x402_gateway/internal/radius"
@@ -24,8 +25,12 @@ import (
 //
 // A table that fails to parse, or a deleted ConfigMap, leaves the last good table in
 // place: the controller being down or wrong must not make priced routes free.
+//
+// It is built from the core/v1 client and a plain ListWatch, not the clientset and its
+// informer factory: those import every API group's client and informer, which took the
+// filter binary from 14 to 58 MiB to watch one ConfigMap.
 type Watcher struct {
-	Client    kubernetes.Interface
+	Client    corev1client.ConfigMapsGetter
 	Namespace string
 	Name      string
 	Networks  []radius.Profile // networks a route may charge on; see Parse
@@ -37,10 +42,21 @@ type Watcher struct {
 
 // Run watches until ctx is done.
 func (w *Watcher) Run(ctx context.Context) error {
-	f := informers.NewSharedInformerFactoryWithOptions(w.Client, 0, // no periodic resync: events only
-		informers.WithNamespace(w.Namespace),
-		informers.WithTweakListOptions(w.selector))
-	inf := f.Core().V1().ConfigMaps().Informer()
+	cms := w.Client.ConfigMaps(w.Namespace)
+	// Wrapped as the generated informers do: the reflector then streams the initial list
+	// (watch-list) from a real API server, and skips that for a client that says it
+	// cannot, such as a test fake.
+	lw := cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+			w.selector(&o)
+			return cms.List(ctx, o)
+		},
+		WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			w.selector(&o)
+			return cms.Watch(ctx, o)
+		},
+	}, w.Client)
+	inf := cache.NewSharedIndexInformer(lw, &corev1.ConfigMap{}, 0, cache.Indexers{}) // 0: no periodic resync, events only
 	if _, err := inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { w.apply(obj) },
 		UpdateFunc: func(_, obj any) { w.apply(obj) },
@@ -51,9 +67,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	f.Start(ctx.Done())
-	<-ctx.Done()
-	f.Shutdown()
+	inf.RunWithContext(ctx) // returns when ctx is done
 	return nil
 }
 
