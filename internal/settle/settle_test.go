@@ -45,7 +45,7 @@ func (f *fakeFacilitator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeFacilitator) answer(code int, body string) {
-	f.code.Store(int32(code))
+	f.code.Store(int64(code))
 	f.body.Store(body)
 }
 
