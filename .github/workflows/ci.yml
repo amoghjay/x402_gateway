@@ -95,7 +95,9 @@ jobs:
       - run: terraform validate
 
   # One image per shipped binary (the Makefile's BINARIES), each from the same Dockerfile.
-  image:
+  # A matrix job reports as "image-build (x402-filter)" etc.; the ruleset requires a check
+  # named "image", which the aggregate job below provides.
+  image-build:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
@@ -115,6 +117,17 @@ jobs:
             sleep 15
           done
           test "$(docker run --rm ${{ matrix.binary }} -version)" = ci
+
+  # The one check the ruleset requires. Passes when every image built, and when the
+  # matrix was skipped (docs-only change); fails if any image failed or was cancelled.
+  image:
+    needs: image-build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "image-build: ${{ needs.image-build.result }}"
+          case "${{ needs.image-build.result }}" in success|skipped) exit 0 ;; *) exit 1 ;; esac
 
   # Pushes to Artifact Registry on main only, after every check above passes. A docs-only
   # merge skips go and image, so this is skipped too: nothing changed in the image. Keyless:
