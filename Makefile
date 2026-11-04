@@ -1,12 +1,12 @@
 # Go side of the repo. The legacy Python app has its own targets under legacy-*.
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version=$(VERSION)
-BINARIES := x402-filter
+BINARIES := x402-filter x402-controller
 # Built locally, never shipped as an image.
 CLIS     := x402-buyer
 REGISTRY ?= local
 
-.PHONY: build test lint verify-radius images legacy-test gke-down gke-up gke-status
+.PHONY: build generate verify-generate test test-envtest lint verify-radius images legacy-test gke-down gke-up gke-status
 
 build:
 	@mkdir -p bin
@@ -14,8 +14,27 @@ build:
 		CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$$b ./cmd/$$b || exit 1; \
 	done
 
+# DeepCopy methods and the CRD, from the markers in api/. controller-gen is pinned by the
+# `tool` directive in go.mod, so every machine and CI generate the same output.
+generate:
+	go tool controller-gen object paths=./api/...
+	go tool controller-gen crd paths=./api/... output:crd:dir=deploy/k8s/crd
+
+# CI: the committed output must match the markers.
+verify-generate: generate
+	git diff --exit-code -- api deploy/k8s/crd
+
 test:
 	go test -race ./...
+
+# The reconciler is tested against a real kube-apiserver and etcd (envtest), at the
+# Kubernetes version the cluster runs. setup-envtest downloads the binaries once; the
+# test is skipped when KUBEBUILDER_ASSETS is unset, except in CI.
+ENVTEST_K8S  ?= 1.35.0
+SETUP_ENVTEST := go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+
+test-envtest:
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S) -p path)" go test -race -count=1 -run TestReconciler -v ./internal/controller/
 
 lint:
 	golangci-lint run ./...

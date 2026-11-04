@@ -1,6 +1,7 @@
 # The x402 filter: Envoy's ext_proc server. At M3 it answers priced routes with a 402
-# built from the price table (16-price-table.yaml), which it watches through the API with
-# the x402-filter ServiceAccount (15-filter-rbac.yaml).
+# built from the price table, the x402-prices ConfigMap the controller writes
+# (40-controller.yaml), which it watches through the API with the x402-filter
+# ServiceAccount (15-filter-rbac.yaml).
 # One replica on the system pool for now; 2 replicas and a PodDisruptionBudget are M5,
 # an HPA is backlog.
 apiVersion: apps/v1
