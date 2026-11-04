@@ -11,6 +11,8 @@ spec:
     - name: x402
       namespace: gateway
       sectionName: http
+  hostnames:
+    - x402-22ade072.nip.io
   rules:
     - matches:
         - path:
