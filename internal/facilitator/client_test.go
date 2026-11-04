@@ -46,10 +46,17 @@ func TestVerify(t *testing.T) {
 }
 
 func TestSettle(t *testing.T) {
-	// A 4xx with the spec's JSON body is an answer, not a transport error.
+	// A 4xx with the spec's JSON body is a definite refusal: the body is decoded for the
+	// reason, and the Status says the settler need not retry.
 	c := echo(t, "/settle", http.StatusBadRequest, `{"success":false,"errorReason":"invalid_transaction_state","txHash":"0xfeed","network":"eip155:72344"}`)
 	got, err := c.Settle(t.Context(), pp, req)
-	if err != nil || got.Success || got.ErrorReason != x402.ReasonTransactionState || got.Transaction != "0xfeed" {
+	var st *Status
+	if !errors.As(err, &st) || !st.Definite() || got.Success || got.ErrorReason != x402.ReasonTransactionState || got.Transaction != "0xfeed" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// A 2xx with success: false is still a definite answer the caller reads from the body.
+	c = echo(t, "/settle", http.StatusOK, `{"success":false,"errorReason":"insufficient_funds","transaction":"","network":"eip155:72344"}`)
+	if got, err := c.Settle(t.Context(), pp, req); err != nil || got.Success || got.ErrorReason != x402.ReasonInsufficientFunds {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
