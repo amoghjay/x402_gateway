@@ -20,6 +20,11 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/x402/eip3009"
 )
 
+// SkewAllowance is how far ahead of ours a buyer's clock may run before the
+// accept-window cap refuses its signature. Coinbase's reference verifier has no cap at
+// all; ours exists to bound TTLs, so it is lenient by this much.
+const SkewAllowance = 30 * time.Second
+
 // Error is a refusal with a spec reason code, for the 402's error field.
 type Error struct {
 	Reason string // one of x402.Reason*
@@ -131,9 +136,13 @@ func Verify(now time.Time, route x402.Requirements, domain eip3009.Domain, pp x4
 	if auth.ValidBefore.Cmp(unix) <= 0 {
 		return Result{}, refuse(x402.ReasonValidBefore, "validBefore %s has passed (now %d)", auth.ValidBefore, unix)
 	}
-	limit := new(big.Int).Add(unix, big.NewInt(int64(route.MaxTimeoutSeconds)))
+	// Clients sign validBefore = their clock + maxTimeoutSeconds, so a buyer whose
+	// clock runs ahead of ours would be refused by the cap alone; the allowance covers
+	// that. It widens only the cap: the signature's own expiry above is the chain's
+	// rule, and every TTL is computed from validBefore, not from the cap.
+	limit := new(big.Int).Add(unix, big.NewInt(int64(route.MaxTimeoutSeconds)+int64(SkewAllowance/time.Second)))
 	if route.MaxTimeoutSeconds > 0 && auth.ValidBefore.Cmp(limit) > 0 {
-		return Result{}, refuse(x402.ReasonValidBefore, "validBefore %s is later than now + maxTimeoutSeconds (%s)", auth.ValidBefore, limit)
+		return Result{}, refuse(x402.ReasonValidBefore, "validBefore %s is later than now + maxTimeoutSeconds + %s (%s); check the client's clock", auth.ValidBefore, SkewAllowance, limit)
 	}
 	if !auth.ValidBefore.IsInt64() {
 		return Result{}, refuse(x402.ReasonValidBefore, "validBefore %s is not a timestamp", auth.ValidBefore)

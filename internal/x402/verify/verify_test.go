@@ -131,9 +131,11 @@ func TestRefusals(t *testing.T) {
 			p.Accepted = route
 			return p
 		}(), x402.ReasonRecipientMismatch},
-		"not yet valid":   {route, sign(t, k, route, 1000, now.Unix()+10, now.Unix()+60), x402.ReasonValidAfter},
-		"expired":         {route, sign(t, k, route, 1000, 0, now.Unix()), x402.ReasonValidBefore},
-		"window too long": {route, sign(t, k, route, 1000, 0, now.Unix()+301), x402.ReasonValidBefore},
+		"not yet valid": {route, sign(t, k, route, 1000, now.Unix()+10, now.Unix()+60), x402.ReasonValidAfter},
+		"expired":       {route, sign(t, k, route, 1000, 0, now.Unix()), x402.ReasonValidBefore},
+		// The cap is maxTimeoutSeconds (300) plus the clock-skew allowance (30).
+		"window too long":   {route, sign(t, k, route, 1000, 0, now.Unix()+331), x402.ReasonValidBefore},
+		"clock ahead by 30": {route, sign(t, k, route, 1000, 0, now.Unix()+330), ""},
 		"other signer": {route, func() x402.PaymentPayload {
 			// Signed by k, but claiming to be from `other`: the recovered address must
 			// equal authorization.from, so this is a signature failure.
