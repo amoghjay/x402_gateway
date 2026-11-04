@@ -243,7 +243,7 @@ func settle(args []string) error {
 	payTo := c.fs.String("pay-to", "", "recipient address (required)")
 	amount := c.fs.String("amount", "0.001", "price in SBC")
 	maxTimeout := c.fs.Int("max-timeout", 300, "the requirement's maxTimeoutSeconds")
-	validFor := c.fs.Duration("valid-for", 60*time.Second, "how long the signature stays valid")
+	validFor := c.fs.Duration("valid-for", 0, "how long the signature stays valid (0 = the offer's maxTimeoutSeconds, as radius clients sign)")
 	verifyOnly := c.fs.Bool("verify-only", false, "stop after the facilitator's /verify; nothing is spent")
 	p, err := c.parse(args)
 	if err != nil {
@@ -367,7 +367,7 @@ func pay(args []string) error {
 	method := c.fs.String("X", http.MethodGet, "HTTP method")
 	data := c.fs.String("d", "", "request body")
 	maxSBC := c.fs.String("max", "0.01", "refuse an offer above this many SBC")
-	validFor := c.fs.Duration("valid-for", 60*time.Second, "how long the signature stays valid")
+	validFor := c.fs.Duration("valid-for", 0, "how long the signature stays valid (0 = the offer's maxTimeoutSeconds, as radius clients sign)")
 	headers := headerFlag{}
 	c.fs.Var(headers, "H", "extra request header, repeatable")
 	p, err := c.parse(args)
@@ -433,7 +433,7 @@ func sign(args []string) error {
 	c := newCommon("sign")
 	method := c.fs.String("X", http.MethodGet, "HTTP method")
 	maxSBC := c.fs.String("max", "0.01", "refuse an offer above this many SBC")
-	validFor := c.fs.Duration("valid-for", 60*time.Second, "how long the signature stays valid")
+	validFor := c.fs.Duration("valid-for", 0, "how long the signature stays valid (0 = the offer's maxTimeoutSeconds, as radius clients sign)")
 	p, err := c.parse(args)
 	if err != nil {
 		return err

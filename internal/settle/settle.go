@@ -182,10 +182,6 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 		s.dead(ctx, log, msg, &job, DeadLettered, fmt.Sprintf("delivered %d times", n))
 		return
 	}
-	if s.now().Unix() >= job.ValidBefore {
-		s.dead(ctx, log, msg, &job, ExpiredUnsettled, "validBefore has passed; nothing can settle it now")
-		return
-	}
 	fac, rpc := s.Facilitators[job.Network], s.RPCs[job.Network]
 	if fac == nil || rpc == nil {
 		s.dead(ctx, log, msg, &job, DeadLettered, "no facilitator or RPC for network "+job.Network)
@@ -194,6 +190,22 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 	pp, err := x402.DecodePaymentPayload(job.Payment)
 	if err != nil {
 		s.dead(ctx, log, msg, &job, DeadLettered, "payment: "+err.Error())
+		return
+	}
+
+	// Past validBefore nothing can settle it now, but it may have settled already: a
+	// settler killed between /settle and XACK leaves exactly this job behind. Ask the
+	// chain before calling it lost (found live on 2026-11-04: the transfer had gone
+	// through and the job was dead-lettered as expired).
+	if s.now().Unix() >= job.ValidBefore {
+		if used, serr := s.usedOnChain(ctx, rpc, pp); serr == nil && used {
+			s.done(ctx, log, msg, &job, SettledOnChain, "note", "claimed after validBefore; the transfer had already happened")
+			return
+		} else if serr != nil {
+			log.Warn("authorizationState check failed; leaving the expired job pending", "err", serr)
+			return
+		}
+		s.dead(ctx, log, msg, &job, ExpiredUnsettled, "validBefore has passed; nothing can settle it now")
 		return
 	}
 

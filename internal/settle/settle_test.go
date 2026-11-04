@@ -263,6 +263,21 @@ func TestExpiredIsDeadLettered(t *testing.T) {
 	}
 }
 
+// A settler killed between /settle and XACK leaves a job that is past validBefore by
+// the time it is claimed, yet settled: the chain is asked before it is called lost.
+func TestExpiredButUsedOnChainIsSettled(t *testing.T) {
+	f := setup(t)
+	f.capture(5 * time.Minute)
+	f.chain.used.Store(true)
+	f.s.Now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.step()
+	if f.pending() != 0 || f.dead() != 0 || f.inflight() != "" || f.fac.calls.Load() != 0 {
+		t.Errorf("pending=%d dead=%d inflight=%q calls=%d, want acked, not dead-lettered, released, no settle call",
+			f.pending(), f.dead(), f.inflight(), f.fac.calls.Load())
+	}
+	f.outcome(SettledOnChain)
+}
+
 func TestMalformedIsDeadLettered(t *testing.T) {
 	f := setup(t)
 	if err := f.s.Redis.XAdd(f.ctx, &redis.XAddArgs{Stream: reserve.Stream, Values: map[string]any{"paymentId": "x"}}).Err(); err != nil {
