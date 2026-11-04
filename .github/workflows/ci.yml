@@ -60,6 +60,14 @@ jobs:
 
       - run: go vet ./...
 
+      # kube-apiserver + etcd for the reconciler test, at the cluster's Kubernetes
+      # version (GKE 1.35). Cached: the download is ~100 MB.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/kubebuilder-envtest
+          key: envtest-1.35.0-${{ runner.os }}
+      - run: echo "KUBEBUILDER_ASSETS=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2 use 1.35.0 -p path)" >> "$GITHUB_ENV"
+
       - run: go test -race ./...
 
       - uses: golangci/golangci-lint-action@v9

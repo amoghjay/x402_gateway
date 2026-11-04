@@ -6,7 +6,7 @@ BINARIES := x402-filter x402-controller
 CLIS     := x402-buyer
 REGISTRY ?= local
 
-.PHONY: build generate verify-generate test lint verify-radius images legacy-test gke-down gke-up gke-status
+.PHONY: build generate verify-generate test test-envtest lint verify-radius images legacy-test gke-down gke-up gke-status
 
 build:
 	@mkdir -p bin
@@ -26,6 +26,15 @@ verify-generate: generate
 
 test:
 	go test -race ./...
+
+# The reconciler is tested against a real kube-apiserver and etcd (envtest), at the
+# Kubernetes version the cluster runs. setup-envtest downloads the binaries once; the
+# test is skipped when KUBEBUILDER_ASSETS is unset, except in CI.
+ENVTEST_K8S  ?= 1.35.0
+SETUP_ENVTEST := go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+
+test-envtest:
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S) -p path)" go test -race -count=1 -run TestReconciler -v ./internal/controller/
 
 lint:
 	golangci-lint run ./...
