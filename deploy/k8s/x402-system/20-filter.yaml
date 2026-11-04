@@ -32,7 +32,7 @@ spec:
       containers:
         - name: filter
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:07f704977d8c
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:d1094b1f1956
           env:
             # Where the price-table ConfigMap lives: the filter's own namespace.
             - name: POD_NAMESPACE
