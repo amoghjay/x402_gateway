@@ -53,13 +53,13 @@ const (
 type Outcome string
 
 const (
-	Settled          Outcome = "settled"            // on chain, through /settle
-	SettledOnChain   Outcome = "settled_on_chain"   // /settle was uncertain, but the chain says the nonce is used
-	SettleFailed     Outcome = "settle_failed"      // refused for good: the seller is not paid
-	SettleUncertain  Outcome = "settle_uncertain"   // left pending for a retry
-	ExpiredUnsettled Outcome = "expired_unsettled"  // past validBefore: dead-lettered
-	DeadLettered     Outcome = "dead_lettered"      // malformed or over the delivery limit
-	Claimed          Outcome = "claimed"            // taken over from an idle consumer
+	Settled          Outcome = "settled"           // on chain, through /settle
+	SettledOnChain   Outcome = "settled_on_chain"  // /settle was uncertain, but the chain says the nonce is used
+	SettleFailed     Outcome = "settle_failed"     // refused for good: the seller is not paid
+	SettleUncertain  Outcome = "settle_uncertain"  // left pending for a retry
+	ExpiredUnsettled Outcome = "expired_unsettled" // past validBefore: dead-lettered
+	DeadLettered     Outcome = "dead_lettered"     // malformed or over the delivery limit
+	Claimed          Outcome = "claimed"           // taken over from an idle consumer
 )
 
 // Settler is one consumer of the settle stream.

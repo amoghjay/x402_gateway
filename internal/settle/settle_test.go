@@ -29,7 +29,7 @@ import (
 
 // fakeFacilitator answers /settle with whatever the test set.
 type fakeFacilitator struct {
-	code  atomic.Int32
+	code  atomic.Int64
 	body  atomic.Value // string
 	calls atomic.Int32
 }
@@ -44,7 +44,10 @@ func (f *fakeFacilitator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, f.body.Load().(string))
 }
 
-func (f *fakeFacilitator) answer(code int, body string) { f.code.Store(int32(code)); f.body.Store(body) }
+func (f *fakeFacilitator) answer(code int, body string) {
+	f.code.Store(int32(code))
+	f.body.Store(body)
+}
 
 // fakeChain answers authorizationState with used or not.
 type fakeChain struct{ used atomic.Bool }
