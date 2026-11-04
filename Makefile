@@ -2,13 +2,15 @@
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version=$(VERSION)
 BINARIES := x402-filter
+# Built locally, never shipped as an image.
+CLIS     := x402-buyer
 REGISTRY ?= local
 
 .PHONY: build test lint verify-radius images legacy-test gke-down gke-up gke-status
 
 build:
 	@mkdir -p bin
-	@for b in $(BINARIES); do \
+	@for b in $(BINARIES) $(CLIS); do \
 		CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$$b ./cmd/$$b || exit 1; \
 	done
 
