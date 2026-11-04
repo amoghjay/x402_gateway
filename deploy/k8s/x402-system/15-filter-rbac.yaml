@@ -1,0 +1,35 @@
+# The filter's identity and the one thing it may read: the price-table ConfigMap.
+# Least privilege: list and watch are granted on that one name. The API server only
+# authorizes a list/watch limited by resourceNames when the request carries a matching
+# metadata.name field selector, which the filter's watch always sends
+# (internal/pricing/watch.go). No get, no other ConfigMap, nothing cluster-wide.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: x402-filter
+  namespace: x402-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: x402-filter-prices
+  namespace: x402-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["x402-prices"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: x402-filter-prices
+  namespace: x402-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: x402-filter-prices
+subjects:
+  - kind: ServiceAccount
+    name: x402-filter
+    namespace: x402-system

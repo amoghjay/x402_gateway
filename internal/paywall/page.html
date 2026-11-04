@@ -17,6 +17,7 @@
   dt { color: var(--muted); }
   dd { margin: 0; overflow-wrap: anywhere; }
   h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+  ol { padding-left: 1.25rem; } li { margin: .5rem 0; } li .muted { font-size: .875rem; }
   pre { background: var(--code); border-radius: 8px; padding: .75rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; margin: .25rem 0; }
   a { color: inherit; }
 </style>
@@ -35,15 +36,13 @@
     {{if .Message}}<p>{{.Message}}</p>{{end}}
 
     <h2>Pay from a terminal or an agent</h2>
-    <pre>{{.CLI.Install}}</pre>
-    <pre>{{.CLI.Command}}</pre>
+    <ol>
+      {{range .Steps}}<li><pre>{{.Run}}</pre>{{if .Note}}<span class="muted">{{.Note}}</span>{{end}}</li>
+      {{end}}
+    </ol>
 
     <h2>Pay from code</h2>
-    <p>Use <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (package <code>{{.SDK.Package}}</code>). It reads this 402, signs the payment and retries.</p>
-    {{if .Faucet}}
-    <h2>Need test funds?</h2>
-    <p>This is a test network. The faucet API is <code>{{.Faucet}}</code>.</p>
-    {{end}}
+    <p>Use <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (package <code>{{.SDK.Package}}</code>): {{.SDK.Note}}.</p>
     <p><a href="{{.Docs}}">x402 on Radius: documentation</a></p>
   </div>
 </main>
