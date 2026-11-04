@@ -1,0 +1,85 @@
+# The settler (cmd/x402-settler): drains the settle stream the filter captures into and
+# settles each payment through the Radius facilitator, after the response has gone out.
+# The only process that talks to the facilitator. No Kubernetes API access: it needs
+# only Redis, the facilitator and the RPC, so it has a ServiceAccount with no bindings
+# and no token mounted.
+#
+# One replica: the facilitator, not this, is the settle ceiling. Every replica would be
+# a consumer in one group, and a job an idle consumer left behind is claimed by whichever
+# runs, so more replicas need no change here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: x402-settler
+  namespace: x402-system
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: x402-settler
+  namespace: x402-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: x402-settler
+  template:
+    metadata:
+      labels:
+        app: x402-settler
+    spec:
+      serviceAccountName: x402-settler
+      # Settlement must not stall on a preemption: system pool, like Redis.
+      nodeSelector:
+        pool: system
+      # Longer than a settle call (5 s) so SIGTERM lets the current job finish.
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true # the distroless :nonroot image runs as uid 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: settler
+          # Built and pushed by CI from the merge commit (the tag is the commit). The
+          # first settler image exists only once this manifest's PR has merged; the
+          # tag-bump PR sets it.
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:set-after-merge
+          args:
+            - -redis=redis.x402-system.svc:6379
+            - -networks=testnet
+          env:
+            # The consumer name in the group: the pod's, so a claimed job's log says who.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # A keyed RPC URL would come from a Secret here (RADIUS_RPC_URL); keyless
+            # for now, so the network's public endpoint is used.
+            - name: GOMEMLIMIT
+              value: 48MiB
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
