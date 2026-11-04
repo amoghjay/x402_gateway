@@ -48,7 +48,8 @@ func (w *Wallet) Domain() eip3009.Domain {
 
 // Sign builds the PaymentPayload for one `exact` EIP-3009 requirement: a fresh random
 // nonce, validAfter 0 (the seller may sit behind a slow clock), validBefore now +
-// validFor, capped at the requirement's maxTimeoutSeconds. The payload echoes the
+// validFor, capped at the requirement's maxTimeoutSeconds, which is also the default
+// when validFor is 0. The payload echoes the
 // requirement as `accepted`, including its transfer method, as the scheme spec asks.
 func (w *Wallet) Sign(req x402.Requirements, resource *x402.Resource, now time.Time, validFor time.Duration) (x402.PaymentPayload, error) {
 	if req.Scheme != x402.SchemeExact || req.TransferMethod() != x402.TransferEIP3009 {
@@ -68,8 +69,14 @@ func (w *Wallet) Sign(req x402.Requirements, resource *x402.Resource, now time.T
 	if err != nil {
 		return x402.PaymentPayload{}, fmt.Errorf("buyer: offer amount: %w", err)
 	}
-	if req.MaxTimeoutSeconds > 0 && validFor > time.Duration(req.MaxTimeoutSeconds)*time.Second {
-		validFor = time.Duration(req.MaxTimeoutSeconds) * time.Second
+	// validFor <= 0 means the offer's own window, which is what radius-sdk and radius-cli
+	// sign; a shorter window only shortens the time the settler has to recover a job.
+	window := time.Duration(req.MaxTimeoutSeconds) * time.Second
+	if window <= 0 {
+		window = time.Minute
+	}
+	if validFor <= 0 || validFor > window {
+		validFor = window
 	}
 	auth := eip3009.Authorization{
 		From:        w.Address(),
