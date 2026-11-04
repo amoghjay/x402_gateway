@@ -1,7 +1,7 @@
 # Go side of the repo. The legacy Python app has its own targets under legacy-*.
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version=$(VERSION)
-BINARIES := x402-filter
+BINARIES := x402-filter x402-controller
 # Built locally, never shipped as an image.
 CLIS     := x402-buyer
 REGISTRY ?= local
