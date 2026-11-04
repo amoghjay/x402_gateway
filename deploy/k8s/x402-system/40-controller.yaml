@@ -123,10 +123,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          # Built and pushed by CI from the merge commit (the tag is the commit). The
-          # first controller image exists only once this manifest's PR has merged, so
-          # the tag is set by the follow-up tag-bump PR.
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:set-after-merge
+          # Built and pushed by CI from the merge commit (the tag is the commit).
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:d4035d6d681a
           env:
             # Where the price table, the grant and the Lease live: this namespace.
             - name: POD_NAMESPACE
