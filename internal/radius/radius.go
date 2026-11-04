@@ -36,6 +36,18 @@ const (
 	ExactPermit2Proxy = "0x402085c248EeA27D92E8b30b2C58ed07f9E20001"
 )
 
+// How a buyer pays, for the 402's how-to-pay hints (checked 2026-11-04: npm radius-cli
+// 0.7.1 from radiustechsystems/tools; the docs URL is where the old
+// /developer-resources/x402-integration redirects).
+const (
+	X402Docs     = "https://docs.radiustech.xyz/build/x402/"
+	CLIInstall   = "npm i -g radius-cli"
+	SDKPackage   = "radius-sdk"
+	SDKImport    = "radius-sdk/client"
+	SDKEntry     = "createRadiusFetch"
+	DisplayAsset = "SBC"
+)
+
 // Profile is one Radius network.
 type Profile struct {
 	Name        string
