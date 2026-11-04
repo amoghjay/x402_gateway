@@ -138,8 +138,11 @@ func desiredEEP(pp *v1alpha1.PaymentPolicy, filter Backend) *unstructured.Unstru
 					"request":  map[string]any{"attributes": []any{"xds.route_name"}},
 					"response": map[string]any{},
 				},
-				"failOpen":       false,
-				"messageTimeout": "200ms",
+				"failOpen": false,
+				// Envoy's per-message budget. Raised from the 200 ms default on 2026-11-04:
+				// the testnet RPC answered in 130-270 ms on the first live run, and the
+				// filter's own deadline (250 ms) must fit under this with the hop to spare.
+				"messageTimeout": "300ms",
 				"statusOnError":  int64(503),
 			}},
 		},

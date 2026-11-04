@@ -135,7 +135,7 @@ func TestDesiredEEP(t *testing.T) {
 	ep := ext[0].(map[string]any)
 	checks := map[string]any{
 		"failOpen":       false,
-		"messageTimeout": "200ms",
+		"messageTimeout": "300ms",
 		"statusOnError":  int64(503),
 	}
 	for k, want := range checks {

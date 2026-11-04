@@ -70,8 +70,12 @@ const ReasonReplay = "payment_already_used"
 
 // Defaults for Payments.
 const (
-	DefaultDeadline       = 150 * time.Millisecond // request phase, under Envoy's 200 ms
+	DefaultDeadline       = 250 * time.Millisecond // request phase, under Envoy's 300 ms (the controller's messageTimeout)
 	responsePhaseDeadline = 50 * time.Millisecond  // one Redis call; the phase must stay trivial
+	// reserveMargin is kept back from the balance step so the reserve script, one Redis
+	// round trip, always has room: a balance read that runs to the deadline must not
+	// starve the step after it (seen on GKE: "reserve: context deadline exceeded").
+	reserveMargin = 25 * time.Millisecond
 )
 
 // Decision is what the filter did with a request: one per request phase, logged, and
@@ -279,7 +283,9 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 		return retryLater(DependencyUnavailable)
 	}
 	t0 := time.Now()
-	bal, err := cache.Get(ctx, res.Payer)
+	bctx, bcancel := context.WithTimeout(ctx, max(s.pay.deadline()-reserveMargin, reserveMargin))
+	bal, err := cache.Get(bctx, res.Payer)
+	bcancel()
 	switch {
 	case errors.Is(err, balance.ErrDeadline):
 		// The read goes on and fills the cache; the client's retry is a hit.

@@ -42,6 +42,7 @@ commands:
   balance [ADDR]    SBC balance of the wallet, or of ADDR
   settle            pay -pay-to through the facilitator directly (the M2 done-check)
   pay URL           request URL, pay its 402, print the answer
+  sign URL          request URL and print the PAYMENT-SIGNATURE that pays its 402 (for replay tests)
   version           print the version
 
 Run "x402-buyer <command> -h" for the flags of one command.
@@ -54,7 +55,7 @@ func main() {
 	}
 	cmds := map[string]func([]string) error{
 		"keygen": keygen, "address": address, "drip": drip, "balance": balance,
-		"settle": settle, "pay": pay,
+		"settle": settle, "pay": pay, "sign": sign,
 		"version": func([]string) error { fmt.Println(buildinfo.Version); return nil },
 	}
 	run, ok := cmds[os.Args[1]]
@@ -422,5 +423,66 @@ func pay(args []string) error {
 	if out.Status >= 400 {
 		return fmt.Errorf("HTTP %d", out.Status)
 	}
+	return nil
+}
+
+// sign fetches a URL's 402 and prints the PAYMENT-SIGNATURE value that would pay it,
+// without sending it. The gateway's replay guard is tested by sending that one value
+// twice: the second must be refused.
+func sign(args []string) error {
+	c := newCommon("sign")
+	method := c.fs.String("X", http.MethodGet, "HTTP method")
+	maxSBC := c.fs.String("max", "0.01", "refuse an offer above this many SBC")
+	validFor := c.fs.Duration("valid-for", 60*time.Second, "how long the signature stays valid")
+	p, err := c.parse(args)
+	if err != nil {
+		return err
+	}
+	if c.fs.NArg() != 1 {
+		return errors.New("sign: want exactly one URL")
+	}
+	if err := c.spends(p); err != nil {
+		return err
+	}
+	limit, err := radius.ParseSBC(*maxSBC)
+	if err != nil {
+		return err
+	}
+	w, err := c.wallet(p)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := c.context()
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, *method, c.fs.Arg(0), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		return fmt.Errorf("HTTP %d, want a 402", resp.StatusCode)
+	}
+	pr, err := x402.DecodePaymentRequired(resp.Header.Get(x402.HeaderPaymentRequired))
+	if err != nil {
+		return err
+	}
+	offer, err := w.Choose(pr, limit)
+	if err != nil {
+		return err
+	}
+	pp, err := w.Sign(offer, &pr.Resource, time.Now(), *validFor)
+	if err != nil {
+		return err
+	}
+	hdr, err := pp.Encode()
+	if err != nil {
+		return err
+	}
+	fmt.Println(hdr)
 	return nil
 }
