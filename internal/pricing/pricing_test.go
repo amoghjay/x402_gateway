@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
+
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
 
@@ -159,5 +162,28 @@ func TestStore(t *testing.T) {
 	var none *Prices
 	if _, ok := none.Lookup("x"); ok || none.Len() != 0 {
 		t.Error("nil table found something")
+	}
+}
+
+// The hand-written table in the deploy manifests must pass the filter's own validation,
+// so a bad edit fails CI instead of being rejected in the cluster.
+func TestDeployedTableParses(t *testing.T) {
+	b, err := os.ReadFile("../../deploy/k8s/x402-system/16-price-table.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cm corev1.ConfigMap
+	if err := yaml.UnmarshalStrict(b, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Name != "x402-prices" || cm.Namespace != "x402-system" {
+		t.Errorf("ConfigMap %s/%s, the filter watches x402-system/x402-prices", cm.Namespace, cm.Name)
+	}
+	p, err := Parse([]byte(cm.Data[ConfigMapKey]), radius.Testnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.Lookup("httproute/demo/httpbin"); !ok {
+		t.Error("the demo route is not priced")
 	}
 }

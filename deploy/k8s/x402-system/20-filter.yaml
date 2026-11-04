@@ -1,6 +1,8 @@
-# The x402 filter: Envoy's ext_proc server. At Gate Zero a no-op that logs and continues.
-# One replica on the system pool for now; replicas, a PodDisruptionBudget and an HPA are
-# Phase 3.
+# The x402 filter: Envoy's ext_proc server. At M3 it answers priced routes with a 402
+# built from the price table (16-price-table.yaml), which it watches through the API with
+# the x402-filter ServiceAccount (15-filter-rbac.yaml).
+# One replica on the system pool for now; 2 replicas and a PodDisruptionBudget are M5,
+# an HPA is backlog.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,6 +18,7 @@ spec:
       labels:
         app: x402-filter
     spec:
+      serviceAccountName: x402-filter
       # On the request path of every priced route: never on spot.
       nodeSelector:
         pool: system
@@ -29,15 +32,30 @@ spec:
       containers:
         - name: filter
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:0b25cf901699
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:07f704977d8c
+          env:
+            # Where the price-table ConfigMap lives: the filter's own namespace.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Go's GC aims to stay under this, well inside the 128Mi limit. client-go's
+            # cost was measured at 2.1 MiB of heap after init; lower the limit once the
+            # live RSS is known.
+            - name: GOMEMLIMIT
+              value: 100MiB
           ports:
             - name: grpc
               containerPort: 9002
-          # The kubelet speaks the standard gRPC health protocol natively. Ready = the
-          # server is up and not draining; on SIGTERM it reports NOT_SERVING first.
+          # The kubelet speaks the standard gRPC health protocol natively.
+          # Readiness asks for the "readiness" service: SERVING once the first price table
+          # has loaded, NOT_SERVING before that and while draining on SIGTERM.
+          # Liveness asks for the whole server (""), which a missing price table does not
+          # fail: the pod stays alive and unready instead of restarting in a loop.
           readinessProbe:
             grpc:
               port: 9002
+              service: readiness
             periodSeconds: 5
           livenessProbe:
             grpc:
@@ -47,9 +65,9 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 32Mi
-            limits:
               memory: 64Mi
+            limits:
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true # a static binary that writes nothing

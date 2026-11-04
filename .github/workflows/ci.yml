@@ -35,6 +35,8 @@ jobs:
               - "Dockerfile"
               - "Makefile"
               - ".github/workflows/ci.yml"
+              # Hand-written price table: TestDeployedTableParses validates it.
+              - "deploy/k8s/x402-system/16-price-table.yaml"
             terraform:
               - "deploy/terraform/**"
               - ".github/workflows/ci.yml"
