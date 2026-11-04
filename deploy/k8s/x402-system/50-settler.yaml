@@ -42,7 +42,7 @@ spec:
       containers:
         - name: settler
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:9d5ab2f75639
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:868e2697c7af
           args:
             - -redis=redis.x402-system.svc:6379
             - -networks=testnet
