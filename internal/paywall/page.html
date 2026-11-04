@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment required</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafafa; --card: #ffffff; --line: #e2e2e2; --code: #f1f1f1; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ececec; --muted: #a3a3a3; --bg: #141414; --card: #1d1d1d; --line: #2f2f2f; --code: #262626; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, sans-serif; }
+  main { max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .price { font-size: 2rem; font-weight: 600; margin: .75rem 0; }
+  .muted { color: var(--muted); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 1rem 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+  pre { background: var(--code); border-radius: 8px; padding: .75rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; margin: .25rem 0; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Payment required</h1>
+    <p class="muted">This resource is paid per request with x402.{{if .Description}} {{.Description}}{{end}}</p>
+    <div class="price">{{.Price}} {{.Asset}}</div>
+    <dl>
+      <dt>Network</dt><dd>{{.Network}}</dd>
+      <dt>Pay to</dt><dd><code>{{.PayTo}}</code></dd>
+      <dt>Resource</dt><dd><code>{{.URL}}</code></dd>
+    </dl>
+    {{if .Message}}<p>{{.Message}}</p>{{end}}
+
+    <h2>Pay from a terminal or an agent</h2>
+    <pre>{{.CLI.Install}}</pre>
+    <pre>{{.CLI.Command}}</pre>
+
+    <h2>Pay from code</h2>
+    <p>Use <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (package <code>{{.SDK.Package}}</code>). It reads this 402, signs the payment and retries.</p>
+    {{if .Faucet}}
+    <h2>Need test funds?</h2>
+    <p>This is a test network. The faucet API is <code>{{.Faucet}}</code>.</p>
+    {{end}}
+    <p><a href="{{.Docs}}">x402 on Radius: documentation</a></p>
+  </div>
+</main>
+</body>
+</html>
