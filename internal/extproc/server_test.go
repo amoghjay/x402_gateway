@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,13 +52,39 @@ func loaded(t *testing.T) *pricing.Store {
 
 // dial starts the server on an in-memory listener and opens one stream, as Envoy would
 // for one HTTP request. It returns the stream and everything the server logged.
-func dial(t *testing.T, delay time.Duration, prices *pricing.Store, level slog.Level) (extprocv3.ExternalProcessor_ProcessClient, *bytes.Buffer) {
+func dial(t *testing.T, delay time.Duration, prices *pricing.Store, level slog.Level) (extprocv3.ExternalProcessor_ProcessClient, *logBuf) {
 	t.Helper()
-	var logs bytes.Buffer
+	logs := &logBuf{}
+	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: level}))
+	return open(t, serve(t, NewServer(log, delay, prices))), logs
+}
+
+// logBuf collects the server's log for assertions. The server logs from its own
+// goroutines (a release on stream end runs after the test's last Recv), so the buffer
+// is locked.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// serve starts a server on an in-memory listener and returns a connection to it.
+func serve(t *testing.T, s *Server) *grpc.ClientConn {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: level}))
-	extprocv3.RegisterExternalProcessorServer(srv, NewServer(log, delay, prices))
+	extprocv3.RegisterExternalProcessorServer(srv, s)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -68,12 +95,17 @@ func dial(t *testing.T, delay time.Duration, prices *pricing.Store, level slog.L
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
 
+// open starts one stream, as Envoy does for one HTTP request.
+func open(t *testing.T, conn *grpc.ClientConn) extprocv3.ExternalProcessor_ProcessClient {
+	t.Helper()
 	stream, err := extprocv3.NewExternalProcessorClient(conn).Process(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return stream, &logs
+	return stream
 }
 
 func headers(kv ...string) *corev3.HeaderMap {
@@ -269,7 +301,7 @@ func TestDelayEndsWhenEnvoyGivesUp(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err := s.handle(ctx, requestHeaders(priced))
+	_, err := s.handle(ctx, requestHeaders(priced), &request{log: s.log})
 	if status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("want DeadlineExceeded, got %v", err)
 	}

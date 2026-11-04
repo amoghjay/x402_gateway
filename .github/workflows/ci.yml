@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        binary: [x402-filter, x402-controller]
+        binary: [x402-filter, x402-controller, x402-settler]
     steps:
       - uses: actions/checkout@v4
 
@@ -160,7 +160,7 @@ jobs:
         run: |
           echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
           TAG="${GITHUB_SHA::12}"
-          for binary in x402-filter x402-controller; do
+          for binary in x402-filter x402-controller x402-settler; do
             docker build --build-arg BINARY="$binary" --build-arg VERSION="$TAG" -t "$REGISTRY/$binary:$TAG" .
             docker push "$REGISTRY/$binary:$TAG"
             echo "Pushed $REGISTRY/$binary:$TAG" >> "$GITHUB_STEP_SUMMARY"

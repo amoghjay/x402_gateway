@@ -52,6 +52,10 @@ type Request struct {
 	URL       string // the public URL the caller asked for
 	Accept    string
 	UserAgent string
+	// Refused is set when a payment was sent and turned down: the reason code (spec
+	// §9 where one exists) leads the `error` line, so a client that prints the 402's
+	// error says why, and the how-to-pay hint still follows for the retry.
+	Refused string
 }
 
 // Response is the 402 to send.
@@ -207,7 +211,11 @@ func hint(h HowToPay, req Request) string {
 	if len(req.URL) > maxURLInHint {
 		pay = strings.Replace(pay, shellQuote(req.URL), "'<this URL>'", 1)
 	}
-	return fmt.Sprintf("Payment required: %s %s on %s. Pay with: %s", h.Price, h.Asset, h.Network, pay)
+	line := fmt.Sprintf("Payment required: %s %s on %s. Pay with: %s", h.Price, h.Asset, h.Network, pay)
+	if req.Refused != "" {
+		return req.Refused + ": payment refused. " + line
+	}
+	return line
 }
 
 func orGET(method string) string {

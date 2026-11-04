@@ -45,6 +45,11 @@ const (
 	CaptureAsync  = "Async"
 )
 
+// MaxPrice is 2^53 - 1 atomic units (about 9e9 SBC): the filter's in-flight sums are
+// compared in Redis Lua, whose numbers are doubles, exact only up to there. The CRD
+// caps price at 15 digits for the same reason.
+var MaxPrice = new(big.Int).SetUint64(1<<53 - 1)
+
 // Bounds on maxTimeoutSeconds. Buyers clamp it to 600 (radius-sdk) and `radius-cli sell
 // check` warns below 30; it also bounds how long a signature, and so a reservation, lives.
 const (
@@ -216,6 +221,9 @@ func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
 	price, err := evm.ParseUint256(r.Price)
 	if err != nil || price.Sign() == 0 {
 		return nil, fmt.Errorf("price %q: want a positive integer of atomic units (\"1000\" = 0.001 SBC)", r.Price)
+	}
+	if price.Cmp(MaxPrice) > 0 {
+		return nil, fmt.Errorf("price %q: above %s (2^53 - 1), the limit of exact arithmetic in the filter's Redis scripts", r.Price, MaxPrice)
 	}
 	payTo, err := evm.ParseAddress(r.PayTo)
 	if err != nil {
