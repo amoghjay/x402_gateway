@@ -46,9 +46,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: filter
-          # Built and pushed by CI from the merge commit (the tag is the commit). The
-          # args below need the M5 image; the tag-bump PR after this merges sets it.
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:d1094b1f1956
+          # Built and pushed by CI from the merge commit (the tag is the commit).
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-filter:9d5ab2f75639
           args:
             # Payments on. Without -redis every priced request gets the 402.
             - -redis=redis.x402-system.svc:6379

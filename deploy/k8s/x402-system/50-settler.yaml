@@ -41,10 +41,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: settler
-          # Built and pushed by CI from the merge commit (the tag is the commit). The
-          # first settler image exists only once this manifest's PR has merged; the
-          # tag-bump PR sets it.
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:set-after-merge
+          # Built and pushed by CI from the merge commit (the tag is the commit).
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:9d5ab2f75639
           args:
             - -redis=redis.x402-system.svc:6379
             - -networks=testnet
