@@ -1,0 +1,162 @@
+# The PaymentPolicy controller (cmd/x402-controller). It watches PaymentPolicy objects
+# in every namespace and writes what the data plane reads: one EnvoyExtensionPolicy per
+# priced route, the ReferenceGrant that lets those policies reach the filter Service,
+# and the x402-prices ConfigMap the filter watches. Needs the CRD (../crd) first.
+#
+# The filter does not depend on this process. If it is down, the last price table and
+# the existing EnvoyExtensionPolicies keep working; new or deleted policies wait.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: x402-controller
+  namespace: x402-system
+---
+# Cluster-wide: PaymentPolicies live in app teams' namespaces, HTTPRoutes next to them,
+# and the EnvoyExtensionPolicy goes in the route's namespace. Read-only on routes: the
+# controller only needs to know one exists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: x402-controller
+rules:
+  - apiGroups: ["x402.dev"]
+    resources: ["paymentpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["x402.dev"]
+    resources: ["paymentpolicies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["envoyextensionpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: x402-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: x402-controller
+subjects:
+  - kind: ServiceAccount
+    name: x402-controller
+    namespace: x402-system
+---
+# In its own namespace only: the price table, the grant, and the leader-election Lease,
+# each by name. A create cannot be limited by resourceNames (the name is not known to
+# RBAC until the object exists), so create is granted on the resource and everything
+# else on the one name. Server-Side Apply is a PATCH, and creating through it needs
+# both patch and create.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: x402-controller
+  namespace: x402-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["x402-prices"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["create"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    resourceNames: ["extension-policies-to-filter"]
+    verbs: ["get", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["x402-controller"]
+    verbs: ["get", "update", "patch"]
+  # Leader election records an Event when the lease changes hands.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: x402-controller
+  namespace: x402-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: x402-controller
+subjects:
+  - kind: ServiceAccount
+    name: x402-controller
+    namespace: x402-system
+---
+# One replica. Leader election is still on: during a rolling update two pods overlap for
+# a moment, and only the lease holder writes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: x402-controller
+  namespace: x402-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: x402-controller
+  template:
+    metadata:
+      labels:
+        app: x402-controller
+    spec:
+      serviceAccountName: x402-controller
+      # Not on the request path, but a preemption would stall policy changes: system pool.
+      nodeSelector:
+        pool: system
+      securityContext:
+        runAsNonRoot: true # the distroless :nonroot image runs as uid 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          # Built and pushed by CI from the merge commit (the tag is the commit). The
+          # first controller image exists only once this manifest's PR has merged, so
+          # the tag is set by the follow-up tag-bump PR.
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:set-after-merge
+          env:
+            # Where the price table, the grant and the Lease live: this namespace.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GOMEMLIMIT
+              value: 100MiB
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -147,9 +147,13 @@ budget, and Phase 6 measures the two side by side.
 Envoy Gateway v1.9.2, the no-op filter with a `-delay` flag, one `HTTPRoute` behind an
 `EnvoyExtensionPolicy`. Durations are from Envoy's access log, not the client.
 
-**What Envoy Gateway configures.** It leaves `message_timeout`, `failure_mode_allow` and
-`status_on_error` at Envoy's defaults (200 ms, `false`, unset) and sets
-`grpc_service.timeout: 10s`. The 200 ms per-message timeout is the one that fires.
+**What Envoy Gateway configures.** The Gate Zero policy set none of `messageTimeout`,
+`failOpen` or `statusOnError`, so Envoy Gateway left `message_timeout`,
+`failure_mode_allow` and `status_on_error` at Envoy's defaults (200 ms, `false`, unset)
+and set `grpc_service.timeout: 10s`. All three are `EnvoyExtensionPolicy` fields in
+v1.9.2 (`ext_proc_types.go`) and are honoured; the controller sets `messageTimeout:
+200ms` and `statusOnError: 503` (M4). The 200 ms per-message timeout is the one that
+fires.
 
 | Filter state | `failOpen: false` | `failOpen: true` |
 |---|---|---|

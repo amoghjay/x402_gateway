@@ -31,14 +31,14 @@ jobs:
               - "cmd/**"
               - "internal/**"
               - "deploy/k8s/crd/**"
+              # The envtest suite applies this sample policy.
+              - "deploy/k8s/demo/40-paymentpolicy.yaml"
               - "go.mod"
               - "go.sum"
               - ".golangci.yml"
               - "Dockerfile"
               - "Makefile"
               - ".github/workflows/ci.yml"
-              # Hand-written price table: TestDeployedTableParses validates it.
-              - "deploy/k8s/x402-system/16-price-table.yaml"
             terraform:
               - "deploy/terraform/**"
               - ".github/workflows/ci.yml"
@@ -94,23 +94,27 @@ jobs:
       - run: terraform init -backend=false -input=false
       - run: terraform validate
 
+  # One image per shipped binary (the Makefile's BINARIES), each from the same Dockerfile.
   image:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        binary: [x402-filter, x402-controller]
     steps:
       - uses: actions/checkout@v4
 
       # Pulling the base image from gcr.io has timed out once (2026-10-29); retry the
       # build a few times before calling the job failed.
-      - name: Build the filter image and check it runs
+      - name: Build the ${{ matrix.binary }} image and check it runs
         run: |
           for attempt in 1 2 3; do
-            docker build --build-arg BINARY=x402-filter --build-arg VERSION=ci -t x402-filter . && break
+            docker build --build-arg BINARY=${{ matrix.binary }} --build-arg VERSION=ci -t ${{ matrix.binary }} . && break
             echo "build attempt $attempt failed; retrying in 15s"
             sleep 15
           done
-          test "$(docker run --rm x402-filter -version)" = ci
+          test "$(docker run --rm ${{ matrix.binary }} -version)" = ci
 
   # Pushes to Artifact Registry on main only, after every check above passes. A docs-only
   # merge skips go and image, so this is skipped too: nothing changed in the image. Keyless:
@@ -137,12 +141,14 @@ jobs:
           token_format: access_token
 
       # Tagged with the commit, so a deployed image always names the code it came from.
-      - name: Build and push the filter image
+      - name: Build and push the images
         env:
           TOKEN: ${{ steps.auth.outputs.access_token }}
         run: |
           echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
           TAG="${GITHUB_SHA::12}"
-          docker build --build-arg BINARY=x402-filter --build-arg VERSION="$TAG" -t "$REGISTRY/x402-filter:$TAG" .
-          docker push "$REGISTRY/x402-filter:$TAG"
-          echo "Pushed $REGISTRY/x402-filter:$TAG" >> "$GITHUB_STEP_SUMMARY"
+          for binary in x402-filter x402-controller; do
+            docker build --build-arg BINARY="$binary" --build-arg VERSION="$TAG" -t "$REGISTRY/$binary:$TAG" .
+            docker push "$REGISTRY/$binary:$TAG"
+            echo "Pushed $REGISTRY/$binary:$TAG" >> "$GITHUB_STEP_SUMMARY"
+          done

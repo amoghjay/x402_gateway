@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/yaml"
 
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
@@ -120,7 +121,8 @@ func TestReconciler(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		h.t = t
 		h.create(h.httpRoute("demo", "httpbin"))
-		h.create(policy("demo", "httpbin", "httpbin", "1000"))
+		// The deployed sample, as applied: a bad edit to it fails here, not on the cluster.
+		h.create(h.fromFile(filepath.Join("..", "..", "deploy", "k8s", "demo", "40-paymentpolicy.yaml")))
 
 		h.eventually("policy accepted", func() error { return h.accepted("demo", "httpbin", metav1.ConditionTrue, v1alpha1.ReasonAccepted) })
 
@@ -294,6 +296,15 @@ func (h *harness) obj(apiVersion, kind, ns, name string, spec map[string]any) *u
 	if spec != nil {
 		u.Object["spec"] = spec
 	}
+	return u
+}
+
+func (h *harness) fromFile(path string) *unstructured.Unstructured {
+	h.t.Helper()
+	raw, err := os.ReadFile(path)
+	h.must(err)
+	u := &unstructured.Unstructured{}
+	h.must(yaml.Unmarshal(raw, &u.Object))
 	return u
 }
 
