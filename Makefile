@@ -6,13 +6,23 @@ BINARIES := x402-filter
 CLIS     := x402-buyer
 REGISTRY ?= local
 
-.PHONY: build test lint verify-radius images legacy-test gke-down gke-up gke-status
+.PHONY: build generate verify-generate test lint verify-radius images legacy-test gke-down gke-up gke-status
 
 build:
 	@mkdir -p bin
 	@for b in $(BINARIES) $(CLIS); do \
 		CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$$b ./cmd/$$b || exit 1; \
 	done
+
+# DeepCopy methods and the CRD, from the markers in api/. controller-gen is pinned by the
+# `tool` directive in go.mod, so every machine and CI generate the same output.
+generate:
+	go tool controller-gen object paths=./api/...
+	go tool controller-gen crd paths=./api/... output:crd:dir=deploy/k8s/crd
+
+# CI: the committed output must match the markers.
+verify-generate: generate
+	git diff --exit-code -- api deploy/k8s/crd
 
 test:
 	go test -race ./...

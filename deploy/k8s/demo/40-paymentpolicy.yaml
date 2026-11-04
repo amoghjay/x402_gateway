@@ -1,0 +1,22 @@
+# Prices the httpbin route at 0.001 SBC per call on Radius testnet. This is all an app
+# team writes: no Envoy objects, no filter address, no timeouts. The controller (M4)
+# turns it into the EnvoyExtensionPolicy on the route and the entry in the price table;
+# until the controller runs, applying it only stores the object and validates the schema.
+#
+# Try it: kubectl apply --dry-run=server -f this file, then change price to "0.001" or
+# payTo to a short string and watch the API server refuse it.
+apiVersion: x402.dev/v1alpha1
+kind: PaymentPolicy
+metadata:
+  name: httpbin
+  namespace: demo
+spec:
+  targetRef:
+    name: httpbin # an HTTPRoute in this namespace
+  network: testnet
+  price: "1000" # atomic units: 0.001 SBC
+  payTo: "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4" # seller-testnet
+  description: "httpbin, one call"
+  mimeType: application/json
+  help:
+    message: "Demo route on Radius testnet; get test SBC from the faucet first."
