@@ -60,6 +60,7 @@ func TestParseRejects(t *testing.T) {
 	}{
 		"price in display units": {mutate(t, func(r map[string]any) { r["price"] = "0.001" }), "atomic units"},
 		"zero price":             {mutate(t, func(r map[string]any) { r["price"] = "0" }), "positive integer"},
+		"price above 2^53":       {mutate(t, func(r map[string]any) { r["price"] = "9007199254740992" }), "2^53"},
 		"price as a number":      {mutate(t, func(r map[string]any) { r["price"] = 1000 }), "decode"},
 		"other asset":            {mutate(t, func(r map[string]any) { r["asset"] = radius.Permit2 }), "only SBC"},
 		"permit2":                {mutate(t, func(r map[string]any) { r["assetTransferMethod"] = "permit2" }), "only \"eip3009\""},
