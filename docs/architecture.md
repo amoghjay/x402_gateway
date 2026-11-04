@@ -95,7 +95,7 @@ filter.
 ```
 request phase (budget 150 ms, under Envoy's 200 ms)
   PAYMENT-SIGNATURE ─► decode ─► verify locally (EIP-712 recover, route's terms, window)
-      ─► balance: Redis bal:{payer} (≤5 s fresh; 5-60 s serve last-known if a refresh overruns; else RPC)
+      ─► balance: Redis bal:{payer} (≤5 s fresh; 5-60 s serve last-known and refresh in the background; else RPC)
       ─► reserve (one Lua script): nonce already claimed? → 402 payment_already_used
                                    balance − in-flight < price? → 402 insufficient_funds
                                    else claim nonce (TTL validBefore+60 s), in-flight += price (TTL 30 s)
@@ -223,10 +223,27 @@ is the demo.
 
 ## Status
 
-Live on GKE against Radius testnet: the controller (apply → 402, delete → 200, measured
-above) and the 402 paywall. The paid path and the settler are built and tested
-(miniredis, a fake RPC and facilitator, payments signed by our own buyer) and are being
-deployed; the live done-check — pay → 200 + settlement on chain, replay → 402, an
-over-balance burst bounded, delete → free — is what closes M5. After that: the hardening
-backlog (loss limit, metrics, Permit2, TLS on the hop, a receipts endpoint), the
-showcase, and the testnet soak that gates mainnet.
+**Live on GKE against Radius testnet, checked 2026-11-04:**
+
+| Check | Result |
+|---|---|
+| `kubectl apply` a PaymentPolicy → 402 | 0.13–0.39 s |
+| pay with EIP-3009 → 200 | yes; httpbin echoes `x-x402-payer`; `PAYMENT-RESPONSE` pending receipt |
+| settlement on chain | the settler logged the explorer link ~1 s after the response; the wallet moved 0.001 per call |
+| replay the same signature | 402 `payment_already_used`, every time after the first |
+| an unfunded wallet | 402 `insufficient_funds` |
+| 10 concurrent payments against a balance worth 5 | exactly 5 served and settled, 5 refused; the wallet ended at 0 |
+| `kubectl delete` the policy → 200 | ≤ 0.14 s |
+| controller pod deleted | nothing changes; policies applied in the next ~19 s wait for the Lease |
+
+Two findings from the first live run, fixed the same day: the testnet RPC answered in
+130–270 ms (the October baseline was 60–80 ms), so a first-time payer gets the one-time
+503 + `Retry-After` more often than the 0.74% the budget assumed; and the filter had
+waited for a stale entry's refresh until its deadline, starving the reserve step —
+a stale entry is now served at once and refreshed in the background. Whether to raise
+Envoy's `messageTimeout` and the filter deadline (300/250 ms) is open.
+
+Not yet: a settler killed mid-queue (the `XAUTOCLAIM` re-drive, tested on miniredis
+only), a second buyer through `radius-cli`, metrics. After M5: the hardening backlog
+(loss limit, metrics, Permit2, TLS on the hop, a receipts endpoint), the showcase, and
+the testnet soak that gates mainnet.
