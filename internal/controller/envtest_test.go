@@ -301,7 +301,7 @@ func (h *harness) obj(apiVersion, kind, ns, name string, spec map[string]any) *u
 
 func (h *harness) fromFile(path string) *unstructured.Unstructured {
 	h.t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(filepath.Clean(path)) // a fixture in the repo, not user input
 	h.must(err)
 	u := &unstructured.Unstructured{}
 	h.must(yaml.Unmarshal(raw, &u.Object))
