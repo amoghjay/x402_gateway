@@ -193,7 +193,8 @@ atomically, and the layout survives a move to Redis Cluster.
 | facilitator `/verify` (not on the path) | ~390 ms | M2 |
 | facilitator `/settle` (the settler) | 0.6–1.1 s | M2 |
 
-Filter deadline 150 ms under Envoy's 200 ms. A cache hit costs two Redis round trips; a
+Filter deadline 250 ms under Envoy's `messageTimeout` of 300 ms (raised from 150/200 ms
+after the first live run, when the testnet RPC answered in 130–270 ms). A cache hit costs two Redis round trips; a
 miss adds one RPC read; a returning payer is a hit.
 
 ## What a backend sees
@@ -240,10 +241,16 @@ Two findings from the first live run, fixed the same day: the testnet RPC answer
 130–270 ms (the October baseline was 60–80 ms), so a first-time payer gets the one-time
 503 + `Retry-After` more often than the 0.74% the budget assumed; and the filter had
 waited for a stale entry's refresh until its deadline, starving the reserve step —
-a stale entry is now served at once and refreshed in the background. Whether to raise
-Envoy's `messageTimeout` and the filter deadline (300/250 ms) is open.
+a stale entry is now served at once and refreshed in the background. Envoy's
+`messageTimeout` and the filter deadline were raised to 300/250 ms; a returning payer
+after a 20 s gap is served from the last-known balance in 4 ms.
 
-Not yet: a settler killed mid-queue (the `XAUTOCLAIM` re-drive, tested on miniredis
-only), a second buyer through `radius-cli`, metrics. After M5: the hardening backlog
+**Settler killed mid-queue** (2026-11-04): the replacement pod settled the 4 queued jobs
+and claimed the orphan (the one the old pod had sent to `/settle` before dying) after
+66 s. It filed that one as `expired_unsettled` although it had settled on chain, because
+expiry was checked before asking the chain. Fixed in #50: a job past `validBefore` is
+checked with `authorizationState` first.
+
+Not yet: a second buyer through `radius-cli`, metrics. After M5: the hardening backlog
 (loss limit, metrics, Permit2, TLS on the hop, a receipts endpoint), the showcase, and
 the testnet soak that gates mainnet.
