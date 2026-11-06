@@ -25,6 +25,11 @@ kubectl apply -f x402-system/
 kubectl apply -f demo/
 ```
 
+**Image tags.** Our images are tagged with the 12-character commit they were built from,
+pushed by CI on every merge to main that changes code. The same CI run then opens a
+`deploy: images <tag>` PR that moves the three tags in `x402-system/` and merges itself
+when its checks pass. Rolling it out is still `kubectl apply -f x402-system/`.
+
 Applying a `PaymentPolicy` is the whole act of pricing a route. The controller writes
 the `EnvoyExtensionPolicy` that sends the route through the filter, the entry in the
 `x402-prices` ConfigMap the filter watches, and the `ReferenceGrant` in `x402-system`

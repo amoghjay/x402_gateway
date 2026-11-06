@@ -3,10 +3,15 @@ name: ci
 # One run per commit: pull_request covers PR branches, push covers main (and does the
 # registry push). Running both on a PR branch gave two check runs with the same name
 # per commit, and the ruleset takes the failed one when a transient job fails.
+#
+# workflow_dispatch exists for the image-bump job below: a PR opened with GITHUB_TOKEN
+# triggers no workflows, so the bump job starts this one on its branch to make the
+# required checks report.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   # Docs-only changes skip the real jobs. The workflow itself must still run: the
@@ -165,3 +170,63 @@ jobs:
             docker push "$REGISTRY/$binary:$TAG"
             echo "Pushed $REGISTRY/$binary:$TAG" >> "$GITHUB_STEP_SUMMARY"
           done
+
+  # After a push, open a PR that points deploy/k8s/x402-system at the new tag and let it
+  # auto-merge once its checks pass. A tag only exists after merge, so code and its tag
+  # bump can't share a PR; this is the second PR, written by CI. Applying it to the
+  # cluster stays manual (kubectl apply). The merge is made with GITHUB_TOKEN, so it
+  # starts no workflow on main: no images are built for it and no further bump follows.
+  bump:
+    needs: push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: image-bump
+      cancel-in-progress: false
+    permissions:
+      contents: write # push the bot/images-* branch
+      pull-requests: write # open, close and auto-merge the PR
+      actions: write # start ci on the branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0 # the ancestry check below needs history
+
+      - name: Open the bump PR and queue it to merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_SHA::12}"
+          BRANCH="bot/images-$TAG"
+          FILES="deploy/k8s/x402-system/20-filter.yaml deploy/k8s/x402-system/40-controller.yaml deploy/k8s/x402-system/50-settler.yaml"
+
+          # Runs can finish out of order; never move a manifest back to an older commit.
+          CURRENT=$(grep -ohE 'x402-settler:[0-9a-f]{12}' deploy/k8s/x402-system/50-settler.yaml | cut -d: -f2)
+          if [ -n "$CURRENT" ] && ! git merge-base --is-ancestor "$CURRENT" "$GITHUB_SHA"; then
+            echo "main already runs $CURRENT, which is not an ancestor of $TAG; nothing to do" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          sed -i -E "s#(/x402-(filter|controller|settler)):[0-9a-f]{12}\b#\1:$TAG#" $FILES
+          if git diff --quiet; then
+            echo "manifests already at $TAG" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -q -m "deploy: images $TAG" $FILES
+          git push -q origin "$BRANCH"
+
+          # An older bump still waiting is superseded by this one.
+          gh pr list --state open --json number,headRefName \
+            -q '.[] | select(.headRefName | startswith("bot/images-")) | .number' |
+            while read -r n; do
+              gh pr close "$n" --delete-branch --comment "Superseded by images $TAG."
+            done
+
+          gh pr create --base main --head "$BRANCH" --title "deploy: images $TAG" --body "Images built from $GITHUB_SHA for x402-filter, x402-controller and x402-settler. Opened by ci; it merges itself when the checks pass. Then apply: \`kubectl apply -f deploy/k8s/x402-system/\`."
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh pr merge "$BRANCH" --auto --merge --delete-branch
+          echo "opened the bump to $TAG" >> "$GITHUB_STEP_SUMMARY"
