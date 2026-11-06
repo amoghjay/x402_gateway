@@ -124,7 +124,7 @@ spec:
       containers:
         - name: controller
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:96279f23dd8c
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:75df160c3f72
           env:
             # Where the price table, the grant and the Lease live: this namespace.
             - name: POD_NAMESPACE
