@@ -8,10 +8,14 @@
 > (reserve-then-capture). The deliverable is what that costs to build, run, and get wrong.
 > The finding generalises past x402 to any settlement path slower than the proxy's budget.
 
-**Status.** Phase 0 and Phase 1 are done: the GKE cluster is in Terraform, Envoy Gateway
-and a no-op `ext_proc` filter serve the static IP, and the timeout drill and in-cluster
-baseline are measured and written up (`docs/design/request-path-budget.md`). Next is
-Phase 2, x402 V2. The application-layer
+**Status (2026-11-05).** The core path is live on GKE against Radius testnet: Phases 1
+and 2, stage 3.1 (the 402 from the price table), Phase 4's controller, and stages
+3.2–3.4 (verify, reserve, settle). Applying a `PaymentPolicy` prices a route, a buyer
+pays with an EIP-3009 signature and gets a 200, the settler settles on chain about a
+second later, replays and over-balance bursts are refused, and deleting the policy
+frees the route. Results are in [docs/architecture.md](docs/architecture.md#status).
+Next: the hardening backlog (metrics, a loss limit, Permit2, TLS), then Phase 5's
+showcase and Phase 6's soak. The application-layer
 gateway it grew out of — both settlement paths, five findings, 29 pytest + 9 forge
 tests — lives on, green, under [`legacy/llm-gateway/`](legacy/llm-gateway/).
 
