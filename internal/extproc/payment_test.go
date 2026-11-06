@@ -117,6 +117,17 @@ func (p *paid) decided(d Decision) {
 	}
 }
 
+// waitDecided is decided for an effect that happens after the stream closes, on the
+// server's own goroutine: it polls the log until the decision appears or the wait ends.
+func (p *paid) waitDecided(d Decision, wait time.Duration) {
+	p.t.Helper()
+	deadline := time.Now().Add(wait)
+	for !strings.Contains(p.logs.String(), `"decision":"`+string(d)+`"`) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	p.decided(d)
+}
+
 // mutations returns a CommonResponse's header mutation as maps, asserting overwrite.
 func mutations(t *testing.T, cr *extprocv3.CommonResponse) (set map[string]string, removed []string) {
 	t.Helper()
@@ -300,14 +311,12 @@ func TestStreamEndReleases(t *testing.T) {
 	if err := stream.CloseSend(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for p.inflight() != "" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// The release deletes the reservation, then logs. Wait for the log line, the last
+	// effect, so the assertion never runs in the gap between the two.
+	p.waitDecided(ReleasedStreamEnd, 2*time.Second)
 	if p.inflight() != "" {
 		t.Errorf("in-flight = %q after the stream ended, want released", p.inflight())
 	}
-	p.decided(ReleasedStreamEnd)
 }
 
 // A slow balance read gets the buyer a 503 + Retry-After, not a charge; the read
