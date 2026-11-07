@@ -84,13 +84,36 @@ func redact(err error) error {
 	return err
 }
 
-// RPCError is a JSON-RPC error object returned by the node.
+// RPCError is a JSON-RPC error object returned by the node. Data is whatever the node
+// attached: revert bytes for eth_call, a transaction hash or a nonce for the sync
+// submit errors.
 type RPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-func (e *RPCError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
+func (e *RPCError) Error() string {
+	if reason := e.Reason(); reason != "" {
+		return fmt.Sprintf("rpc error %d: %s: %s", e.Code, e.Message, reason)
+	}
+	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
+}
+
+// DataString is Data when it is a JSON string (a hash, a nonce, revert bytes), else "".
+func (e *RPCError) DataString() string {
+	var s string
+	if json.Unmarshal(e.Data, &s) == nil {
+		return s
+	}
+	return ""
+}
+
+// Reason is the decoded revert message when Data carries one.
+func (e *RPCError) Reason() string {
+	reason, _ := evm.RevertReason(e.DataString())
+	return reason
+}
 
 // Call performs one JSON-RPC call and unmarshals its result into out.
 func (r *RPC) Call(ctx context.Context, out any, method string, params ...any) error {

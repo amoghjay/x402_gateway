@@ -3,7 +3,7 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev
 LDFLAGS  := -s -w -X github.com/amoghjay/x402_gateway/internal/buildinfo.Version=$(VERSION)
 BINARIES := x402-filter x402-controller x402-settler
 # Built locally, never shipped as an image.
-CLIS     := x402-buyer
+CLIS     := x402-buyer x402-settlebench
 REGISTRY ?= local
 
 .PHONY: build generate verify-generate test test-envtest lint verify-radius images legacy-test gke-down gke-up gke-status

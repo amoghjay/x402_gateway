@@ -1,0 +1,104 @@
+# Runs x402-settlebench from the system pool, where the filter runs, so the numbers
+# include GKE's egress path to the Radius RPC. The pod builds the bench from a branch
+# with the Go toolchain image (the repo is public), so nothing has to be merged or
+# pushed to the registry first.
+#
+# Once, the keys (never in the repo):
+#
+#   kubectl -n x402-system create secret generic settlebench \
+#     --from-file=submitter-key=$HOME/.x402/submitter-testnet.key \
+#     --from-file=payer-key=$HOME/.x402/buyer-testnet.key \
+#     --from-literal=rpc-url='https://rpc.testnet.radiustech.xyz/<api-key>'
+#
+# Each run: pick the mode by editing BENCH_ARGS, then
+#
+#   kubectl apply -f tools/latency/k8s/settlebench-job.yaml
+#   kubectl -n x402-system logs -f job/settlebench      # one JSON line per sample; the last line is the summary
+#   kubectl -n x402-system delete job settlebench
+#
+# To run keyless for the A/B, drop RADIUS_RPC_URL from env below.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: settlebench
+  namespace: x402-system
+spec:
+  backoffLimit: 0 # a failed measurement is read, not retried (a retry would re-spend)
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: latency-probe
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        pool: system
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bench
+          image: golang:1.27
+          command: ["sh", "-ec"]
+          args:
+            - |
+              git clone --quiet --depth 1 --branch "$BRANCH" https://github.com/amoghjay/x402_gateway /work/src
+              cd /work/src
+              go build -o /work/bench ./cmd/x402-settlebench
+              exec /work/bench $BENCH_ARGS
+          env:
+            - name: BRANCH
+              value: m6-settlebench
+            - name: BENCH_ARGS
+              value: "-mode serial -n 500 -interval 500ms -preflight"
+            - name: HOME
+              value: /work
+            - name: GOPATH
+              value: /work/go
+            - name: GOCACHE
+              value: /work/cache
+            - name: GOFLAGS
+              value: -mod=mod
+            - name: SUBMITTER_KEY_FILE
+              value: /keys/submitter-key
+            - name: PAYER_KEY_FILE
+              value: /keys/payer-key
+            - name: RADIUS_RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: settlebench
+                  key: rpc-url
+                  optional: true
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir: {}
+        - name: keys
+          secret:
+            secretName: settlebench
+            defaultMode: 0400
