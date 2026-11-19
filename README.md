@@ -65,8 +65,8 @@ locally in milliseconds and settles after the response**
 request_headers   no payment  → 402 + PAYMENT-REQUIRED          (backend never sees it)
                   payment     → verify the signature locally (~0.1 ms),
                                 check the cached balance, RESERVE in Redis
-response          2xx         → release now, enqueue settlement
-                  not 2xx     → drop the reservation             (nobody is charged)
+response          2xx or 3xx  → release now, enqueue settlement  (304 excepted: nothing new)
+                  otherwise   → drop the reservation             (nobody is charged)
 x402-settler      off-path    → settle through the facilitator   (~1 s)
 ```
 

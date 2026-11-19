@@ -13,9 +13,10 @@
 // add to the payer's in-flight sum), strip the payment header, tell the backend who
 // paid, and CONTINUE. All of it under the filter's own deadline, well inside Envoy's
 // per-message timeout, so a slow dependency gets a retryable 503 from us rather than
-// Envoy's 504. Response phase: anything but a 2xx releases the reservation. A 2xx on an
+// Envoy's 504. Response phase: a response that delivers nothing (1xx, 4xx, 5xx, 304) releases the
+// reservation; a 2xx or a redirect is charged (chargeable). One on an
 // Async route is captured (the settlement job goes on the stream and the receipt header
-// goes to the client, before the money has moved). A 2xx on a Sync route is settled
+// goes to the client, before the money has moved). One on a Sync route is settled
 // through the facilitator while Envoy holds the response: Envoy sends nothing to the
 // client until this phase is answered, so the response is released only once the
 // transfer is on chain, and replaced with a 402 or a 503 otherwise (sync.go).
@@ -94,11 +95,11 @@ const (
 	Replay                   Decision = "replay"                     // 402: this signature was already served (Redis), or already spent on chain (Sync)
 	InsufficientFunds        Decision = "insufficient_funds"         // 402: balance minus in-flight is below the price
 	PaymentAccepted          Decision = "payment_accepted"           // continue: verified and reserved; the response phase decides the rest
-	Paid                     Decision = "paid"                       // response 2xx: captured for settlement, receipt sent
-	ReleasedNon2xx           Decision = "released_non_2xx"           // response not 2xx: nothing served, reservation released
+	Paid                     Decision = "paid"                       // Async, response chargeable: captured for settlement, receipt sent
+	ReleasedNotServed        Decision = "released_not_served"        // response delivers nothing (1xx, 4xx, 5xx, 304): reservation released
 	ReleasedStreamEnd        Decision = "released_stream_end"        // stream ended without a response phase: reservation released
-	CaptureFailed            Decision = "capture_failed"             // response 2xx but the job could not be queued: served unpaid
-	Settled                  Decision = "settled"                    // Sync, response 2xx: settled through the facilitator, then released
+	CaptureFailed            Decision = "capture_failed"             // Async, response chargeable but the job could not be queued: served unpaid
+	Settled                  Decision = "settled"                    // Sync, response chargeable: settled through the facilitator, then released
 	SettledOnChain           Decision = "settled_on_chain"           // Sync: /settle failed or was unclear, but the chain says the transfer happened; released
 	SettleRefused            Decision = "settle_refused"             // Sync: 402 in place of the response; the settlement was refused, nothing charged
 	SettlementUnknown        Decision = "settlement_unknown"         // Sync: 503 in place of the response; the settlement's outcome is not known
@@ -347,8 +348,15 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	})
 }
 
-// responseHeaders settles the request phase's reservation: anything but a 2xx is
-// released; a 2xx is captured (Async) or settled while the response is held (Sync). The
+// chargeable reports whether a response delivers what was paid for. A 2xx does, and so
+// does a redirect: its Location can be the content itself (a presigned download URL),
+// so releasing a 3xx unpaid would give the content away. 304 Not Modified does not: it
+// delivers nothing the client does not already hold. 1xx, 4xx and 5xx serve nothing.
+func chargeable(code int) bool { return code >= 200 && code <= 399 && code != http.StatusNotModified }
+
+// responseHeaders settles the request phase's reservation: a response that is not
+// chargeable is released; one that is gets captured (Async) or settled while the
+// response is held (Sync). The
 // Async path is kept to one Redis call so it cannot approach Envoy's per-message
 // timeout, which after a served response would turn a 200 into a 504.
 func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
@@ -356,11 +364,11 @@ func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *r
 		return continueResponse(nil) // unpriced, or nothing was reserved
 	}
 	code, _ := strconv.Atoi(h[":status"])
-	if code < 200 || code > 299 {
+	if !chargeable(code) {
 		// Nothing was served (a backend error, or Envoy's own 502/503/504 after we
 		// continued): nobody is charged.
-		s.release(st, ReleasedNon2xx)
-		st.log.Info("not served; released", "decision", ReleasedNon2xx, "status", code)
+		s.release(st, ReleasedNotServed)
+		st.log.Info("not served; released", "decision", ReleasedNotServed, "status", code)
 		return continueResponse(nil)
 	}
 	if st.entry.Sync() {

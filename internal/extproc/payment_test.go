@@ -328,7 +328,46 @@ func TestNon2xxReleases(t *testing.T) {
 	if n := p.store.Redis.XLen(t.Context(), reserve.Stream).Val(); n != 0 {
 		t.Errorf("stream has %d jobs, want none", n)
 	}
-	p.decided(ReleasedNon2xx)
+	p.decided(ReleasedNotServed)
+}
+
+// A redirect is charged like a 2xx: its Location can be the content (a presigned
+// download URL). 304 and the 1xx/4xx/5xx statuses deliver nothing and are released.
+func TestChargeable(t *testing.T) {
+	for code, want := range map[int]bool{
+		100: false, 199: false, 200: true, 204: true, 299: true,
+		301: true, 302: true, 303: true, 304: false, 307: true, 308: true, 399: true,
+		400: false, 404: false, 429: false, 500: false, 503: false, 504: false,
+	} {
+		if got := chargeable(code); got != want {
+			t.Errorf("chargeable(%d) = %v, want %v", code, got, want)
+		}
+	}
+}
+
+// Async: a 302 is captured for settlement with a receipt; a 304 is released.
+func TestAsyncRedirectIsCapturedNotModifiedIsReleased(t *testing.T) {
+	p := setupPaid(t, 5000, 0)
+	stream, _ := p.request(p.payment())
+	set, _ := mutations(t, p.respond(stream, "302").GetResponseHeaders().GetResponse())
+	if set["payment-response"] == "" {
+		t.Error("no receipt on a captured 302")
+	}
+	if n := p.store.Redis.XLen(t.Context(), reserve.Stream).Val(); n != 1 {
+		t.Errorf("stream has %d jobs after a 302, want 1", n)
+	}
+	p.decided(Paid)
+
+	q := setupPaid(t, 5000, 0)
+	stream, _ = q.request(q.payment())
+	set, _ = mutations(t, q.respond(stream, "304").GetResponseHeaders().GetResponse())
+	if set["payment-response"] != "" || q.inflight() != "" {
+		t.Errorf("304: receipt %q, in-flight %q; want neither", set["payment-response"], q.inflight())
+	}
+	if n := q.store.Redis.XLen(t.Context(), reserve.Stream).Val(); n != 0 {
+		t.Errorf("stream has %d jobs after a 304, want none", n)
+	}
+	q.decided(ReleasedNotServed)
 }
 
 // The client goes away (or Envoy resets) between the phases: the stream closes with
