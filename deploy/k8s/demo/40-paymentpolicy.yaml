@@ -16,6 +16,10 @@ spec:
   network: testnet
   price: "1000" # atomic units: 0.001 SBC
   payTo: "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4" # seller-testnet
+  # Sync is the default since 2026-11-19 (settle while the response is held; nothing is
+  # served unpaid). Written out because the API server stored Async in the existing
+  # object when it was created, and apply keeps a field the manifest leaves out.
+  captureMode: Sync
   description: "httpbin, one call"
   mimeType: application/json
   help:

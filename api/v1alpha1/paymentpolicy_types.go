@@ -78,13 +78,14 @@ type PaymentPolicySpec struct {
 	// +optional
 	FailureMode string `json:"failureMode,omitempty"`
 
-	// When the payment is settled, relative to releasing the response. Async releases
-	// first and settles about a second later: fastest, but the seller carries what a
-	// payer cancels or spends in that gap. Sync settles while Envoy holds the response
-	// and releases it only if the settlement succeeded: nothing is served unpaid, and
-	// each paid request waits for the facilitator.
+	// When the payment is settled, relative to releasing the response. Sync (the
+	// default) settles while Envoy holds the response and releases it only if the
+	// settlement succeeded: nothing is served unpaid, and each paid request waits for the
+	// facilitator (about 0.55 s at the median on Radius testnet and Base Sepolia). Async
+	// releases first and settles about a second later: fastest, but not money-safe, as
+	// the seller carries what a payer cancels or spends in that gap.
 	// +kubebuilder:validation:Enum=Async;Sync
-	// +kubebuilder:default=Async
+	// +kubebuilder:default=Sync
 	// +optional
 	CaptureMode string `json:"captureMode,omitempty"`
 
