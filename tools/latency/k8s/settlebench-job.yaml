@@ -75,7 +75,7 @@ spec:
                   optional: true
           resources:
             requests:
-              cpu: 500m
+              cpu: 250m # fits beside the filter on one system node; the build just takes a minute longer
               memory: 1Gi
             limits:
               memory: 2Gi
