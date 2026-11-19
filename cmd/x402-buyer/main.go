@@ -227,11 +227,11 @@ func balance(args []string) error {
 	}
 	ctx, cancel := c.context()
 	defer cancel()
-	bal, err := rpcFor(p).BalanceOf(ctx, radius.SBCAddress, who)
+	bal, err := rpcFor(p).BalanceOf(ctx, p.TokenAddress(), who)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s SBC  %s on %s\n", radius.FormatSBC(bal), who, p.Name)
+	fmt.Printf("%s %s  %s on %s\n", p.Token.Format(bal), p.Token.Symbol, who, p.Name)
 	return nil
 }
 
@@ -286,11 +286,11 @@ func settle(args []string) error {
 	fmt.Printf("local verify         ok, payer %s, %s\n", res.Payer, time.Since(t0).Round(time.Microsecond))
 
 	rpc := rpcFor(p)
-	payerBefore, err := rpc.BalanceOf(ctx, radius.SBCAddress, w.Address())
+	payerBefore, err := rpc.BalanceOf(ctx, p.TokenAddress(), w.Address())
 	if err != nil {
 		return err
 	}
-	toBefore, err := rpc.BalanceOf(ctx, radius.SBCAddress, to)
+	toBefore, err := rpc.BalanceOf(ctx, p.TokenAddress(), to)
 	if err != nil {
 		return err
 	}
@@ -326,12 +326,12 @@ func settle(args []string) error {
 	// until the transfer shows, so the check rests on the chain and not on its word.
 	want := new(big.Int).Sub(payerBefore, atomic)
 	for {
-		payerAfter, err := rpc.BalanceOf(ctx, radius.SBCAddress, w.Address())
+		payerAfter, err := rpc.BalanceOf(ctx, p.TokenAddress(), w.Address())
 		if err != nil {
 			return err
 		}
 		if payerAfter.Cmp(want) <= 0 {
-			toAfter, err := rpc.BalanceOf(ctx, radius.SBCAddress, to)
+			toAfter, err := rpc.BalanceOf(ctx, p.TokenAddress(), to)
 			if err != nil {
 				return err
 			}

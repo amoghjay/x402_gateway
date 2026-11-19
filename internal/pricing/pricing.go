@@ -31,6 +31,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/x402"
+	"github.com/amoghjay/x402_gateway/internal/x402/eip3009"
 )
 
 // SchemaVersion is the only version this filter reads.
@@ -77,7 +78,7 @@ type Table struct {
 // Route is the price of one HTTPRoute. Keys in Table.Routes are "httproute/<ns>/<name>".
 type Route struct {
 	Network             string `json:"network"` // CAIP-2, e.g. "eip155:72344"
-	Price               string `json:"price"`   // atomic units, decimal string: "1000" = 0.001 SBC
+	Price               string `json:"price"`   // atomic units of the network's token, decimal string: "1000" = 0.001 at 6 decimals
 	Asset               string `json:"asset"`
 	PayTo               string `json:"payTo"`
 	AssetTransferMethod string `json:"assetTransferMethod"`
@@ -102,6 +103,7 @@ type Entry struct {
 	Network      radius.Profile
 	Price        *big.Int
 	Requirements x402.Requirements // the one `accepts` offer for this route
+	Domain       eip3009.Domain    // the token's EIP-712 domain, which signatures are recovered against
 }
 
 // Prices is a validated, immutable table.
@@ -225,8 +227,8 @@ func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
 		return nil, fmt.Errorf("network %q is not one this filter charges on", r.Network)
 	}
 	network := networks[i]
-	if !strings.EqualFold(r.Asset, radius.SBC) {
-		return nil, fmt.Errorf("asset %s: only SBC (%s) is supported", r.Asset, radius.SBC)
+	if !strings.EqualFold(r.Asset, network.Token.Address) {
+		return nil, fmt.Errorf("asset %s: only %s (%s) is supported on %s", r.Asset, network.Token.Symbol, network.Token.Address, network.Name)
 	}
 	if r.AssetTransferMethod != x402.TransferEIP3009 {
 		return nil, fmt.Errorf("assetTransferMethod %q: only %q is built", r.AssetTransferMethod, x402.TransferEIP3009)
@@ -234,7 +236,7 @@ func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
 	// "price" is atomic units, so "0.001" is a unit mistake, not a small price.
 	price, err := evm.ParseUint256(r.Price)
 	if err != nil || price.Sign() == 0 {
-		return nil, fmt.Errorf("price %q: want a positive integer of atomic units (\"1000\" = 0.001 SBC)", r.Price)
+		return nil, fmt.Errorf("price %q: want a positive integer of atomic units (\"1000\" = 0.001 %s)", r.Price, network.Token.Symbol)
 	}
 	if price.Cmp(MaxPrice) > 0 {
 		return nil, fmt.Errorf("price %q: above %s (2^53 - 1), the limit of exact arithmetic in the filter's Redis scripts", r.Price, MaxPrice)
@@ -277,6 +279,7 @@ func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
 		Network:      network,
 		Price:        price,
 		Requirements: network.ExactRequirements(price.String(), payTo.String(), r.MaxTimeoutSeconds),
+		Domain:       eip3009.Domain{Name: network.Token.Name, Version: network.Token.Version, ChainID: network.ChainID, VerifyingContract: network.TokenAddress()},
 	}, nil
 }
 

@@ -34,13 +34,16 @@ type PaymentPolicySpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="targetRef is immutable"
 	TargetRef TargetRef `json:"targetRef"`
 
-	// The Radius network to charge on. The controller resolves the chain ID, the SBC
-	// contract and the facilitator from this name, so a policy never carries addresses
-	// that could be mistyped. Only testnet until the Phase 6 soak gate passes.
-	// +kubebuilder:validation:Enum=testnet
+	// The network to charge on: testnet is Radius testnet (priced in SBC), base-sepolia is
+	// Base's testnet (priced in test USDC). The controller resolves the chain ID, the
+	// token contract and the facilitator from this name, so a policy never carries
+	// addresses that could be mistyped. Testnets only until the Phase 6 soak gate passes,
+	// and only the networks the filter was started with (-networks).
+	// +kubebuilder:validation:Enum=testnet;base-sepolia
 	Network string `json:"network"`
 
-	// Price per request in atomic units of SBC (6 decimals): "1000" is 0.001 SBC. A
+	// Price per request in atomic units of the network's token (6 decimals on both
+	// networks): "1000" is 0.001 SBC or 0.001 USDC. A
 	// decimal string, so "0.001" is refused as a unit mistake, not read as a small price.
 	// At most 15 digits: the filter's Redis arithmetic is exact below 2^53.
 	// +kubebuilder:validation:Pattern=`^[0-9]+$`
