@@ -1,0 +1,39 @@
+# Sync capture: the filter settles through the facilitator while Envoy holds httpbin's
+# response, and releases it only once the transfer is on chain. A refused settlement is
+# a 402 in place of the response, an unclear one a 503. The controller gives these
+# routes a 5 s Envoy messageTimeout (300 ms on the Async demo route).
+#
+# Same price and seller as the demo route, so the only difference under test is when
+# the money moves, and on which chain.
+apiVersion: x402.dev/v1alpha1
+kind: PaymentPolicy
+metadata:
+  name: httpbin-sync
+  namespace: demo
+spec:
+  targetRef:
+    name: httpbin-sync
+  network: testnet
+  price: "1000" # atomic units: 0.001 SBC
+  payTo: "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4" # seller-testnet
+  captureMode: Sync
+  description: "httpbin, one call, settled before the response is released"
+  mimeType: application/json
+---
+# The same on Base Sepolia: priced in Circle's test USDC, settled through the x402
+# Foundation's public test facilitator. The seller address is the same key on a
+# different chain; test USDC comes from https://faucet.circle.com.
+apiVersion: x402.dev/v1alpha1
+kind: PaymentPolicy
+metadata:
+  name: httpbin-base
+  namespace: demo
+spec:
+  targetRef:
+    name: httpbin-base
+  network: base-sepolia
+  price: "1000" # atomic units: 0.001 USDC
+  payTo: "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4"
+  captureMode: Sync
+  description: "httpbin, one call, paid in test USDC on Base Sepolia"
+  mimeType: application/json
