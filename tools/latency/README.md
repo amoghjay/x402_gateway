@@ -12,6 +12,7 @@ laptop numbers.
 | `measure_rpc_window.py` | `balanceOf` once a second per network for 10 minutes: p50/p90/p99/max, the share over 100/140/200 ms, and errors (429s, timeouts), for kept-alive and new connections. Standard library only. | Read-only |
 | `k8s/rpc-window-job.yaml` | Runs `measure_rpc_window.py` as a Job on the system pool | A Job and a ConfigMap in `x402-system` |
 | `k8s/redis-latency-job.yaml` | Redis `PING` and the replay guard's `SET … NX EX` round trip from another pod on the system pool | Writes `probe:*` keys that expire after 60 s |
+| `cmd/x402-settlebench` (Go, repo root) + `k8s/settlebench-job.yaml` | Settling EIP-3009 ourselves with `eth_sendRawTransactionSync`: latency to the final receipt, fee per settle, `eth_call` pre-flight, a burst on one key, and every revert the settler must classify (expired, not yet valid, bad signature, unfunded payer, reused nonce, cancelled). Behind the M6 decision on settle-before-release. | **Testnet only.** Spends the payer's SBC (1 atomic unit per transfer) and the submitter's gas (~0.00014 RUSD per settle, the Turnstile converts SBC when RUSD runs out). The `cancelled` case sends one transaction from the payer. Keys come from a Secret; see the manifest. |
 
 **In the cluster** (from the repo root, with direnv's identity):
 

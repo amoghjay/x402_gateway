@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/radius"
@@ -38,11 +39,21 @@ const SchemaVersion = 1
 // ConfigMapKey is the ConfigMap data key that holds the table.
 const ConfigMapKey = "prices.json"
 
-// The modes that are built. Open and Sync are in the schema already (backlog) and are
-// refused until they exist, rather than silently treated as the defaults.
+// The modes that are built. Open is in the schema already (backlog) and is refused
+// until it exists, rather than silently treated as the default.
 const (
 	FailureClosed = "Closed"
-	CaptureAsync  = "Async"
+	CaptureAsync  = "Async" // release the response, then settle
+	CaptureSync   = "Sync"  // settle while the response is held, then release
+)
+
+// Envoy's per-message timeout for a route, by capture mode: how long Envoy waits for
+// the filter's answer to one phase before it fails the request. An Async route never
+// leaves the cluster on the response phase. A Sync route calls the facilitator there, so
+// the filter's settle budget (internal/extproc) has to fit under SyncMessageTimeout.
+const (
+	AsyncMessageTimeout = 300 * time.Millisecond
+	SyncMessageTimeout  = 5 * time.Second
 )
 
 // MaxPrice is 2^53 - 1 atomic units (about 9e9 SBC): the filter's in-flight sums are
@@ -97,6 +108,9 @@ type Entry struct {
 type Prices struct {
 	entries map[string]*Entry
 }
+
+// Sync reports whether the route settles before its response is released.
+func (e *Entry) Sync() bool { return e.Route.CaptureMode == CaptureSync }
 
 // Lookup returns the entry for a route key. It is safe on a nil *Prices.
 func (p *Prices) Lookup(key string) (*Entry, bool) {
@@ -238,8 +252,8 @@ func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
 	if r.FailureMode != FailureClosed {
 		return nil, fmt.Errorf("failureMode %q: only %q is built", r.FailureMode, FailureClosed)
 	}
-	if r.CaptureMode != CaptureAsync {
-		return nil, fmt.Errorf("captureMode %q: only %q is built", r.CaptureMode, CaptureAsync)
+	if r.CaptureMode != CaptureAsync && r.CaptureMode != CaptureSync {
+		return nil, fmt.Errorf("captureMode %q: want %q or %q", r.CaptureMode, CaptureAsync, CaptureSync)
 	}
 	if len(r.Description) > 256 {
 		return nil, errors.New("description is longer than 256 bytes")

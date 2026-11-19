@@ -2,15 +2,16 @@
 // data plane. It prices requests from the table it watches in one ConfigMap
 // (internal/pricing), answers unpaid ones with the paywall (internal/paywall), and
 // serves paid ones after verifying the signature locally, reading the payer's balance
-// through a Redis cache (internal/balance) and reserving in Redis (internal/reserve);
-// the settlement is queued for the settler (internal/extproc).
+// through a Redis cache (internal/balance) and reserving in Redis (internal/reserve).
+// An Async route's settlement is queued for the settler; a Sync route's is made here,
+// through the facilitator, while Envoy holds the response (internal/extproc).
 //
 // One gRPC port serves two services: ext_proc for Envoy, and the standard gRPC health
 // service for the kubelet's probes. Liveness asks for the whole server (""), readiness
 // for "readiness", which is SERVING only while the price table is loaded and Redis
 // answers. Two names, so a missing ConfigMap or a Redis outage leaves the pod alive and
-// unready instead of restarting it. Never the facilitator or the RPC: the filter does
-// not call the first, and the second has a cache in front of it.
+// unready instead of restarting it. Never the facilitator or the RPC: only Sync routes
+// call the first, and the second has a cache in front of it.
 //
 // Without -redis the paid path is off and every priced request gets the 402 (the M3
 // shape), which is also the safe answer if the flag is dropped by mistake.
@@ -39,6 +40,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/balance"
 	"github.com/amoghjay/x402_gateway/internal/buildinfo"
 	"github.com/amoghjay/x402_gateway/internal/extproc"
+	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/rdb"
@@ -53,7 +55,9 @@ type config struct {
 	drain, delay                           time.Duration
 	redis                                  string // "" = payments off
 	rpcURL                                 string // "" = the network's public endpoint
+	facilitatorURL                         string // "" = the network's facilitator
 	deadline, fresh, lastKnown, keepalive  time.Duration
+	settleTimeout                          time.Duration
 }
 
 func main() {
@@ -67,6 +71,8 @@ func main() {
 	flag.StringVar(&c.networks, "networks", "testnet", "comma-separated networks routes may charge on (testnet, mainnet)")
 	flag.StringVar(&c.redis, "redis", "", "Redis address for the replay guard, in-flight sums, balance cache and settle stream; empty = payments off, every priced request gets the 402")
 	flag.StringVar(&c.rpcURL, "rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for balance reads (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
+	flag.StringVar(&c.facilitatorURL, "facilitator-url", os.Getenv("X402_FACILITATOR_URL"), "x402 facilitator base URL for Sync routes (default $X402_FACILITATOR_URL, then the network's)")
+	flag.DurationVar(&c.settleTimeout, "settle-timeout", extproc.DefaultSettleTimeout, "Sync routes: how long a response is held for the facilitator's /settle; must stay under the route's Envoy messageTimeout")
 	flag.DurationVar(&c.deadline, "deadline", extproc.DefaultDeadline, "request-phase budget; past it a valid payer gets 503 + Retry-After, not a charge")
 	flag.DurationVar(&c.fresh, "balance-fresh", balance.DefaultFresh, "a cached balance younger than this is served as is")
 	flag.DurationVar(&c.lastKnown, "balance-last-known", balance.DefaultLastKnown, "a cached balance up to this old is served when a refresh overruns the deadline")
@@ -102,8 +108,11 @@ func run(log *slog.Logger, c config) error {
 	if c.namespace == "" {
 		return fmt.Errorf("no namespace for the price table: set -prices-namespace or POD_NAMESPACE")
 	}
-	if c.rpcURL != "" && len(nets) != 1 {
-		return fmt.Errorf("-rpc-url names one endpoint, but %d networks are configured", len(nets))
+	if (c.rpcURL != "" || c.facilitatorURL != "") && len(nets) != 1 {
+		return fmt.Errorf("-rpc-url and -facilitator-url name one endpoint, but %d networks are configured", len(nets))
+	}
+	if c.settleTimeout >= pricing.SyncMessageTimeout {
+		return fmt.Errorf("-settle-timeout %s must be under Envoy's messageTimeout for Sync routes (%s)", c.settleTimeout, pricing.SyncMessageTimeout)
 	}
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -136,6 +145,8 @@ func run(log *slog.Logger, c config) error {
 		redisClient = rdb.RequestPath(c.redis)
 		httpClient := radius.NewHTTPClient()
 		balances := map[string]*balance.Cache{}
+		facs := map[string]*facilitator.Client{}
+		rpcs := map[string]*radius.RPC{}
 		for _, p := range nets {
 			url := p.RPC
 			if c.rpcURL != "" {
@@ -147,11 +158,18 @@ func run(log *slog.Logger, c config) error {
 				Redis: redisClient, RPC: rpc, Token: radius.SBCAddress, Log: log,
 				Fresh: c.fresh, LastKnown: c.lastKnown,
 			}
+			fu := p.Facilitator
+			if c.facilitatorURL != "" {
+				fu = c.facilitatorURL
+			}
+			facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: httpClient}
+			rpcs[p.Network()] = rpc
 		}
 		server.WithPayments(&extproc.Payments{
-			Balances: balances,
-			Reserve:  &reserve.Store{Redis: redisClient},
-			Deadline: c.deadline,
+			Balances:     balances,
+			Reserve:      &reserve.Store{Redis: redisClient},
+			Deadline:     c.deadline,
+			Facilitators: facs, RPCs: rpcs, SettleTimeout: c.settleTimeout,
 		})
 	} else {
 		log.Warn("payments are off (-redis is empty): every priced request gets the 402")

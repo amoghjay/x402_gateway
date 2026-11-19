@@ -2,6 +2,7 @@ package extproc
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/balance"
 	"github.com/amoghjay/x402_gateway/internal/buyer"
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/rdb"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
@@ -32,6 +34,7 @@ type node struct {
 	balance atomic.Int64
 	delay   atomic.Int64
 	calls   atomic.Int32
+	used    atomic.Bool // what authorizationState answers
 }
 
 type paid struct {
@@ -46,13 +49,27 @@ type paid struct {
 
 func setupPaid(t *testing.T, balanceAtomic int64, deadline time.Duration) *paid {
 	t.Helper()
+	return setupWith(t, balanceAtomic, deadline, loaded(t), nil)
+}
+
+// setupWith is setupPaid with a chosen price table, and a hook to change the Payments
+// before the server starts (the hook gets the fake node's RPC client).
+func setupWith(t *testing.T, balanceAtomic int64, deadline time.Duration, prices *pricing.Store, mod func(*Payments, *radius.RPC)) *paid {
+	t.Helper()
 	mr := miniredis.RunT(t)
 	n := &node{}
 	n.balance.Store(balanceAtomic)
 	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.calls.Add(1)
 		time.Sleep(time.Duration(n.delay.Load()))
+		body, _ := io.ReadAll(r.Body)
 		word := evm.Uint256Word(big.NewInt(n.balance.Load()))
+		if !strings.Contains(string(body), "0x70a08231") { // not balanceOf: authorizationState
+			word = evm.Uint256Word(big.NewInt(0))
+			if n.used.Load() {
+				word = evm.Uint256Word(big.NewInt(1))
+			}
+		}
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"` + evm.Hex(word[:]) + `"}`))
 	}))
 	t.Cleanup(rpc.Close)
@@ -62,13 +79,18 @@ func setupPaid(t *testing.T, balanceAtomic int64, deadline time.Duration) *paid 
 	logs := &logBuf{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	store := &reserve.Store{Redis: client}
-	s := NewServer(log, 0, loaded(t)).WithPayments(&Payments{
+	nodeRPC := &radius.RPC{URL: rpc.URL, HTTP: rpc.Client()}
+	pay := &Payments{
 		Balances: map[string]*balance.Cache{radius.Testnet.Network(): {
-			Redis: client, RPC: &radius.RPC{URL: rpc.URL, HTTP: rpc.Client()}, Token: radius.SBCAddress, Log: log,
+			Redis: client, RPC: nodeRPC, Token: radius.SBCAddress, Log: log,
 		}},
 		Reserve:  store,
 		Deadline: deadline,
-	})
+	}
+	if mod != nil {
+		mod(pay, nodeRPC)
+	}
+	s := NewServer(log, 0, prices).WithPayments(pay)
 	key, err := evm.GeneratePrivateKey()
 	if err != nil {
 		t.Fatal(err)

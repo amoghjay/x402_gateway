@@ -138,17 +138,28 @@ func desiredEEP(pp *v1alpha1.PaymentPolicy, filter Backend) *unstructured.Unstru
 					"request":  map[string]any{"attributes": []any{"xds.route_name"}},
 					"response": map[string]any{},
 				},
-				"failOpen": false,
-				// Envoy's per-message budget. Raised from the 200 ms default on 2026-11-04:
-				// the testnet RPC answered in 130-270 ms on the first live run, and the
-				// filter's own deadline (250 ms) must fit under this with the hop to spare.
-				"messageTimeout": "300ms",
+				"failOpen":       false,
+				"messageTimeout": messageTimeout(pp),
 				"statusOnError":  int64(503),
 			}},
 		},
 	}}
 	u.SetGroupVersionKind(eepGVK)
 	return u
+}
+
+// messageTimeout is Envoy's per-message budget for the route. Async: 300 ms, raised from
+// the 200 ms default on 2026-11-04 (the testnet RPC answered in 130-270 ms on the first
+// live run, and the filter's own request deadline, 250 ms, must fit under it with the hop
+// to spare). Sync: long enough for the facilitator's /settle on the response phase.
+// Envoy Gateway has one value for both phases, so on a Sync route a hung filter on the
+// request phase is a 504 after seconds, not 300 ms; the filter's own request deadline
+// is unchanged.
+func messageTimeout(pp *v1alpha1.PaymentPolicy) string {
+	if pp.Spec.CaptureMode == pricing.CaptureSync {
+		return pricing.SyncMessageTimeout.String()
+	}
+	return pricing.AsyncMessageTimeout.String()
 }
 
 // desiredGrant lets EnvoyExtensionPolicies in the listed namespaces name the filter's

@@ -102,7 +102,7 @@ from.
 | `captureMode` | `messageTimeout` | Filter deadline | Why |
 |---|---|---|---|
 | `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (225 ms, laptop) fits Envoy's timeout; the filter deadline is re-set from the in-cluster baseline at Gate Zero |
-| `Sync` (opt-in) | 2 s | 1.5 s | measured settle max was 1.13 s |
+| `Sync` (opt-in) | 5 s | request 250 ms; held response 3 s for `/settle` + 1 s for one chain read | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
 
 `failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
 
@@ -133,8 +133,21 @@ only costs duplicate upstream work, because its settlement fails before the body
 settle-after, that replay would be a free response, so the nonce must be claimed somewhere
 every replica sees.
 
-Both models stay available: settle-before-release is `captureMode: Sync`, with its own 2 s
-budget, and Phase 6 measures the two side by side.
+Both models stay available: settle-before-release is `captureMode: Sync` (built 2026-11-20,
+unit-tested, not yet run on the cluster). The filter calls `/settle` on the response phase
+while Envoy holds the backend's 2xx: settled releases it, a refusal becomes a 402 and an
+unclear outcome a 503 in its place. Phase 6 measures the two side by side.
+
+**Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
+payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or
+move the wallet's funds in one transaction, and every response served in that window goes
+unpaid. The balance check and the in-flight sum cap what one wallet can take per window;
+the loss limit marks that wallet afterwards. None of them caps the total, because wallets
+are free to create. Every reference x402 implementation, traefik-x402 and radius-sdk settle
+before the body leaves; the x402 spec, its issue #1169 and two 2026 papers name this race
+and offer no remedy for `exact`. What changes the picture is the speed of settling
+ourselves, measured below: the gap can be closed by settling first without paying the
+facilitator's ~1 s. The design that follows from it is the M6 plan.
 
 ## Risks we accept
 
@@ -247,8 +260,83 @@ table under "What each check costs".
 Not yet measured: the RPC with an API key (rate limits and whether the tail changes), the
 RPC under load (no 429s at one call a second), and the facilitator from GKE.
 
+## Measured on GKE: settling ourselves (2026-11-19)
+
+Can the filter submit the EIP-3009 `transferWithAuthorization` itself, with
+`eth_sendRawTransactionSync`, fast enough to settle *before* releasing the response?
+[`cmd/x402-settlebench`](../../cmd/x402-settlebench) ran as a Job on the system pool
+([manifest](../../tools/latency/k8s/settlebench-job.yaml)), testnet, a keyed RPC URL
+unless stated, one submitter key paying gas, one payer signing 1-unit transfers to the
+demo seller. Latency is submit to final receipt, measured in the pod.
+
+**Latency, one at a time** (500 settles at 2/s, each preceded by an `eth_call` of the same
+calldata): **500/500 settled.**
+
+| | p50 | p90 | p99 | max | > 150 ms | > 250 ms | > 400 ms |
+|---|---|---|---|---|---|---|---|
+| settle (submit → final receipt) | 91 ms | 98 ms | 156 ms | 296 ms | 1.2% | 0.2% | 0% |
+| `eth_call` pre-flight, same calldata | 72 ms | 78 ms | 114 ms | 1,584 ms | 0.4% | 0.4% | 0.2% |
+
+So the chain executes and finalises the transfer in ~20 ms on top of the RPC round trip;
+a settle costs about what the `balanceOf` read on today's request path costs (p50 60–270
+ms across days, [above](#measured-on-gke-the-in-cluster-baseline-2026-10-28)). The
+October laptop figure (100–179 ms) was the same thing seen through a slower network.
+
+**Keyless, same shape** (200 settles at 4/s): **200/200**, p50 89 ms, p90 102 ms, p99
+131 ms, max 135 ms; pre-flight p50 71 ms. No different from the keyed run, so the API
+key buys quota (10 MGas/s), not latency. The 130–270 ms `balanceOf` days in November
+were the endpoint, not the lack of a key.
+
+**One key, back to back** (100 settles, each submitted as soon as the previous receipt
+arrived, no pre-flight): **98 settled**, p50 138 ms, p90 148 ms, max 221 ms, which is
+about **7 settles per second per key**. Latency is ~45 ms higher than at 2/s, so the node
+serialises something per sender. The two misses were one event: a submit that got no
+response within the client's 2 s header timeout, then the next nonce rejected as a gap
+(code 6) because the stalled transaction had not executed; a nonce resync recovered the
+run. A stall like that is the uncertain case the settler must handle: check the nonce or
+`authorizationState` before resubmitting, never re-sign.
+
+**Burst** (100 transactions signed with consecutive nonces, submitted at once from one
+key): **1 settled, 99 rejected** with code 6 "nonce gap", each in 86–198 ms, the whole
+burst in 1.7 s. The rejections cost nothing and leave the nonce where it was. Radius's
+sync submit does not queue a future nonce; one key is a strictly serial pipe, so
+throughput comes from a pool of keys. That is what the facilitator's 100-wallet pool is
+for, and a self-settling filter needs the same.
+
+**What a failed settle costs.** Each case: `eth_call` first (free, 70–90 ms, returns the
+exact reason), then the real submit. **Every revert consumed the submitter's nonce and
+paid gas**; the sync method returns a receipt with `status: 0x0`, not an error.
+
+| Case | On-chain reason (`Error(string)`) | Fee |
+|---|---|---|
+| expired | `EIP3009: authorization is expired` | 0.00003 RUSD |
+| not yet valid | `EIP3009: authorization is not yet valid` | 0.00003 |
+| bad signature | `EIP3009: invalid signature` | 0.00005 |
+| unfunded payer | `ERC20: transfer amount exceeds balance` | 0.00013 |
+| reused nonce | `EIP3009: authorization is used` | 0.00003 |
+| cancelled by the payer | `EIP3009: authorization is used` (same string; only the `AuthorizationCanceled` log tells them apart) | 0.00003 |
+| success | — | 0.00014 (141,104 gas × 0.986 gwei) |
+
+The payer's cancel transaction used 63,077 gas (~$0.00006): the attack on settle-after is
+as cheap as the research said. For settle-first the consequence is different: a signature
+from an unfunded wallet costs *us* 0.00013 if submitted blind, so the local verifier (which
+already refuses expired, invalid and replayed signatures) has to be followed by a balance
+check (the cached `balanceOf`, or the free `eth_call` at +70 ms) before the submit.
+
+**Fees.** 141,104 gas at the fixed 0.986 gwei is 0.000139 RUSD per settle; the submitter
+pays it in the native token, and the faucet funds RUSD as well as SBC. One thing is
+unexplained: across every run the submitter's **SBC also fell in 0.01 steps, one step per
+0.01 RUSD of cumulative gas** (500 settles: 0.07 SBC and 0.0696 RUSD; 98: 0.02 and
+0.0136; 200: 0.03 and 0.0278), with no SBC `Transfer` from the submitter on chain and
+nothing moved by `eth_call`s, keyed or keyless, successful or reverting. That is the
+Turnstile's 0.01 SBC conversion step, but the converted value does not show up as native
+balance, so as measured a settle costs about **2 × 0.00014**. Open question for the Radius
+chain team; until answered, budget 0.0003 per settle.
+
 ## Sources
 
+- [Radius docs](https://docs.radiustech.xyz/llms-full.txt): `eth_sendRawTransactionSync` error codes (4 timed out, accepted; 5 not admitted; 6 nonce gap), the Turnstile
+- [EIP-155](https://eips.ethereum.org/EIPS/eip-155), [EIP-3009](https://eips.ethereum.org/EIPS/eip-3009)
 - [Envoy ext_proc API](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto)
 - [Envoy Gateway `ExtProc` types](https://github.com/envoyproxy/gateway/blob/main/api/v1alpha1/ext_proc_types.go)
 - [x402 exact EVM scheme](https://github.com/coinbase/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md)

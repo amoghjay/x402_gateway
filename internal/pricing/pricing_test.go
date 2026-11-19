@@ -71,7 +71,7 @@ func TestParseRejects(t *testing.T) {
 		"timeout too short":      {mutate(t, func(r map[string]any) { r["maxTimeoutSeconds"] = 5 }), "maxTimeoutSeconds"},
 		"timeout too long":       {mutate(t, func(r map[string]any) { r["maxTimeoutSeconds"] = 3600 }), "maxTimeoutSeconds"},
 		"failure open":           {mutate(t, func(r map[string]any) { r["failureMode"] = "Open" }), "failureMode"},
-		"capture sync":           {mutate(t, func(r map[string]any) { r["captureMode"] = "Sync" }), "captureMode"},
+		"capture unknown":        {mutate(t, func(r map[string]any) { r["captureMode"] = "Later" }), "captureMode"},
 		"typo in a key":          {mutate(t, func(r map[string]any) { r["payto"] = r["payTo"] }), "unknown field"},
 		"http docs":              {mutate(t, func(r map[string]any) { r["help"] = map[string]any{"docsURL": "http://x.example"} }), "https"},
 		"newline in message":     {mutate(t, func(r map[string]any) { r["help"] = map[string]any{"message": "a\r\nSet-Cookie: x"} }), "printable ASCII"},

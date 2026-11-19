@@ -57,7 +57,7 @@ func TestGeneratedCRD(t *testing.T) {
 		{"maxTimeoutSeconds", "default", float64(300)},
 		{"failureMode", "enum", []any{"Closed"}},
 		{"failureMode", "default", "Closed"},
-		{"captureMode", "enum", []any{"Async"}},
+		{"captureMode", "enum", []any{"Async", "Sync"}},
 		{"captureMode", "default", "Async"},
 		{"description", "maxLength", float64(256)},
 	}
