@@ -3,6 +3,7 @@ package extproc
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -44,16 +45,24 @@ import (
 // budget is generous, and after an unclear answer the filter keeps asking the chain for
 // a while before it gives up. A slow paid response is better than a paid 503.
 //
-// Budget: the chain read, the settle call (with a retry gap if the facilitator's wallet
+// The chain read before settling is asked twice if the first read fails or is slow: one
+// slow eth_call (seen under four concurrent buyers on 2026-11-19) otherwise gives a valid
+// payer a 503. And a settle that never reached the facilitator (no address, no
+// connection) has a known outcome, not settled, so it is answered at once instead of
+// waiting on the chain.
+//
+// Budget: the chain reads, the settle call (with a retry gap if the facilitator's wallet
 // pool is busy), and the wait for the chain after an unclear settle must all fit under
 // Envoy's per-message timeout for a Sync route (pricing.SyncMessageTimeout). Past that
 // Envoy answers 504 itself and closes the stream, and the outcome is logged as unknown.
 const (
-	DefaultSettleTimeout = 6 * time.Second
+	DefaultSettleTimeout = 5500 * time.Millisecond
 	// DefaultConfirmWait is how long the chain is asked whether an unclear settle landed.
 	DefaultConfirmWait = 2500 * time.Millisecond
 	confirmEvery       = 250 * time.Millisecond
 	chainCheckTimeout  = 500 * time.Millisecond
+	// preSettleReads is how many times authorizationState is asked before settling.
+	preSettleReads = 2
 	// walletRetry is the gap before asking again when the facilitator has no wallet free
 	// (its documented answer is "retry in 1-2 s"; the settle budget bounds the retries).
 	walletRetry = 500 * time.Millisecond
@@ -70,7 +79,7 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 
 	// Already used on chain: this signature paid for something once, somewhere, and is
 	// not paying for this response.
-	switch used, cerr := s.usedOnChain(ctx, st); {
+	switch used, cerr := s.usedBeforeSettle(ctx, st); {
 	case cerr != nil:
 		s.release(st, DependencyUnavailable)
 		st.log.Error("could not read authorizationState before settling: response withheld, not charged", "decision", DependencyUnavailable, "paymentId", id, "err", cerr)
@@ -94,6 +103,13 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	// this payment settled in the meantime; that copy's request is the one that paid.)
 	if refused, reason := refusal(resp, err); refused {
 		return s.withhold(st, reason, SettleRefused, err, ms)
+	}
+	// Nothing reached the facilitator, so nothing can settle later: not charged.
+	if neverSent(err) {
+		s.release(st, DependencyUnavailable)
+		st.log.Error("facilitator unreachable: response withheld, not charged", "decision", DependencyUnavailable, "paymentId", id,
+			"status", code, "settleErr", errText(err), "ms", ms)
+		return retryLater(DependencyUnavailable)
 	}
 	// No clear answer: ask the chain, for a while. The nonce was unused a moment ago, so
 	// if it is used now, this settle went through and only its answer was lost or late.
@@ -199,6 +215,28 @@ func (s *Server) usedOnChain(ctx context.Context, st *request) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chainCheckTimeout)
 	defer cancel()
 	return rpc.AuthorizationState(ctx, st.entry.Network.TokenAddress(), st.res.Payer, st.res.Authorization.Nonce)
+}
+
+// usedBeforeSettle is usedOnChain, asked again if the first read fails or times out.
+func (s *Server) usedBeforeSettle(ctx context.Context, st *request) (used bool, err error) {
+	for i := range preSettleReads {
+		if used, err = s.usedOnChain(ctx, st); err == nil {
+			return used, nil
+		}
+		if i+1 < preSettleReads {
+			st.log.Warn("authorizationState read failed before settling; asking again", "err", err)
+		}
+	}
+	return false, err
+}
+
+// neverSent reports whether a settle call failed before any byte reached the
+// facilitator: its name did not resolve, or no connection opened. (Only a noWalletFree
+// answer is retried before this, and that one says nothing was submitted.)
+func neverSent(err error) bool {
+	var dns *net.DNSError
+	var op *net.OpError
+	return errors.As(err, &dns) || (errors.As(err, &op) && op.Op == "dial")
 }
 
 // confirmOnChain asks whether the nonce is used until it is, or until ConfirmWait is up.

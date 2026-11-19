@@ -339,6 +339,48 @@ func TestSyncChainReadFailureBeforeSettleFailsClosed(t *testing.T) {
 	}
 }
 
+// One slow authorizationState read before settling is asked again, not turned into a
+// 503 for a valid payer (seen once in 100 requests from four concurrent buyers).
+func TestSyncSlowChainReadBeforeSettleIsAskedAgain(t *testing.T) {
+	p, f := setupSync(t, 0)
+	p.node.stall.Store(int64(chainCheckTimeout + 200*time.Millisecond))
+	stream, _ := p.request(p.payment())
+	resp := p.respond(stream, "200")
+	if ir := resp.GetImmediateResponse(); ir != nil {
+		t.Fatalf("response phase = %v %q, want the response released", ir.GetStatus().GetCode(), ir.GetDetails())
+	}
+	if f.calls.Load() != 1 {
+		t.Errorf("/settle calls = %d, want 1", f.calls.Load())
+	}
+	p.decided(Settled)
+}
+
+// A facilitator nobody is listening on: the settle never left, so the buyer is not
+// charged, and the 503 comes at once instead of after the wait for the chain.
+func TestSyncUnreachableFacilitatorAnswersAtOnce(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	url := gone.URL
+	gone.Close() // nothing listens on this port now: connection refused
+	p := setupWith(t, 5000, 0, syncPrices(t), func(pay *Payments, node *radius.RPC) {
+		pay.Facilitators = map[string]*facilitator.Client{radius.Testnet.Network(): {URL: url, HTTP: &http.Client{}}}
+		pay.RPCs = map[string]*radius.RPC{radius.Testnet.Network(): node}
+		pay.ConfirmWait = 5 * time.Second // would show up in the elapsed time if it were used
+	})
+	stream, _ := p.request(p.payment())
+	t0 := time.Now()
+	ir := p.respond(stream, "200").GetImmediateResponse()
+	if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
+		t.Fatalf("response phase = %v %q, want a 503", ir.GetStatus().GetCode(), ir.GetDetails())
+	}
+	if el := time.Since(t0); el > time.Second {
+		t.Errorf("answered after %s, want at once (no wait for the chain)", el)
+	}
+	if p.inflight() != "" {
+		t.Errorf("in-flight = %q, want released: nothing was charged", p.inflight())
+	}
+	p.decided(DependencyUnavailable)
+}
+
 // A definite refusal is believed even if the nonce turns out used: another copy of the
 // payment settled in the meantime, and that copy's request is the one that paid.
 func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {
@@ -355,7 +397,8 @@ func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {
 // The held response has to be answered before Envoy's per-message timeout for a Sync
 // route, in the worst case: a settle that runs to its limit, then the chain read.
 func TestSyncBudgetFitsUnderEnvoysTimeout(t *testing.T) {
-	if worst := chainCheckTimeout + DefaultSettleTimeout + DefaultConfirmWait + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
-		t.Errorf("chain read %s + settle %s + confirm %s + one last read = %s, not under messageTimeout %s", chainCheckTimeout, DefaultSettleTimeout, DefaultConfirmWait, worst, pricing.SyncMessageTimeout)
+	before := preSettleReads * chainCheckTimeout
+	if worst := before + DefaultSettleTimeout + DefaultConfirmWait + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
+		t.Errorf("chain reads %s + settle %s + confirm %s + one last read = %s, not under messageTimeout %s", before, DefaultSettleTimeout, DefaultConfirmWait, worst, pricing.SyncMessageTimeout)
 	}
 }
