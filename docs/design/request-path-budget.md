@@ -224,19 +224,41 @@ was not charged (balance checked). A retry when the nonce is still unused would 
 served it; not built.
 
 **Facilitator unreachable, a detail:** a connection that never opened means `/settle`
-never reached the facilitator, so the outcome is known (not settled), yet the filter polls
-the chain for 2.5 s and calls it `settlement_unknown`. Harmless; it could answer at once.
+never reached the facilitator, so the outcome is known (not settled), yet the filter
+polled the chain for 2.5 s and called it `settlement_unknown`. Fixed in #70 (below).
 
 **Price table, found while setting up the drills:** a filter started with
-`-networks=testnet` rejects the whole price table when one entry is on a network it does
-not serve (`httpbin-base`), so a new pod never becomes ready. The old pods kept serving, so
-nothing broke, but one stray policy can block every rollout of the filter.
+`-networks=testnet` rejected the whole price table when one entry was on a network it
+did not serve (`httpbin-base`), so a new pod never became ready. Fixed in #74: a broken
+route is blocked (503 `policy_invalid`) and the rest of the table loads.
+
+**Second round, images `811c9b1cc3ab` (#69, #70), 2026-11-19, Radius testnet.** Radius
+testnet's `/settle` went through `tools/drills/fac-shim` (`-facilitator-url
+testnet=…`); Base Sepolia kept its own facilitator. Every request is one paid request
+from the laptop; "charged" is read from the buyer's balance.
+
+| Drill | Client got | Charged | Filter decision |
+|---|---|---|---|
+| Proxy forwarding (baseline) | 200 in 1.2 s | once | `settled`, 902 ms |
+| Facilitator answers 3 s late (the case behind the two charged 503s) | 200 in 4.2 s, twice | once each | `settled`, 4,027 / 4,073 ms |
+| Facilitator answers 8 s late (past the 5.5 s settle budget) | 200 in 5.8 s | once | `settled_on_chain`, 5,612 ms: the chain showed the transfer |
+| Facilitator hangs, never forwards | 503 `settlement_unknown` in 8.0 s | no | under Envoy's 10 s |
+| Both filter pods deleted (graceful) 2 s into an 8 s settle | 200 in 5.8 s | once | the 20 s drain finished the request |
+| Both filter pods **force-killed** 2 s into an 8 s settle | **503 in 3.0 s, empty body** (Envoy's `statusOnError`) | **once** | none: the pod died, no log line |
+| Facilitator unreachable (dead IP) | 503 `dependency_unavailable` in 2.2 s, twice | no | dial timeout, answered at once (was ~5 s) |
+| 4 buyers × 25 at once, after a warm-up request | 100 × 200 | exactly 100 prices | `settled` p50 556 ms, p90 835, p99 993, max 1,059; the pre-settle read never needed its retry this run |
+
+The force kill is the one case left where a buyer pays and gets nothing. No log records
+it, because the process that knew is gone; only the chain does. So the record of unknown
+outcomes has to be written **before** `/settle` is called (a claim in Redis), and resolved
+afterwards by reading `authorizationState`, not reconstructed from logs.
+
+On the first paid request after the rollout, Radius answered 503 `deadline` once: the
+payer's balance was not cached on a 20 s-old pod and the read took longer than the 250 ms
+request budget. Not charged; a known request-phase limit, not new.
 
 **Not run:** cancelAuthorization mid-request (needs gas in the payer wallet; the chain
-read treats a cancelled nonce as used), a kill that lands mid-settle, and a facilitator
-slower than 2 s (the case the 6 s settle budget fixes). The last two need a facilitator
-the drill can slow down: `-facilitator-url` overrides one endpoint and is refused with two
-networks, so it cannot point only Radius testnet at a delaying proxy.
+read treats a cancelled nonce as used, which the replay drill covers).
 
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or
