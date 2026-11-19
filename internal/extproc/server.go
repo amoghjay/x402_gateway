@@ -91,7 +91,7 @@ const (
 	PaymentRequired          Decision = "payment_required"           // 402, no payment sent
 	PaymentPresentUnverified Decision = "payment_present_unverified" // 402: a payment was sent, but this filter runs without payments wired
 	PaymentInvalid           Decision = "payment_invalid"            // 402: the payment failed verification (reason in the 402)
-	Replay                   Decision = "replay"                     // 402: this signature was already served
+	Replay                   Decision = "replay"                     // 402: this signature was already served (Redis), or already spent on chain (Sync)
 	InsufficientFunds        Decision = "insufficient_funds"         // 402: balance minus in-flight is below the price
 	PaymentAccepted          Decision = "payment_accepted"           // continue: verified and reserved; the response phase decides the rest
 	Paid                     Decision = "paid"                       // response 2xx: captured for settlement, receipt sent
@@ -130,8 +130,8 @@ type Payments struct {
 	// facilitator. A Sync route on a network without one is refused at the door: it
 	// could be forwarded, but never released.
 	Facilitators map[string]*facilitator.Client // by CAIP-2 network
-	// RPCs answer authorizationState after a settle that failed or gave no clear answer.
-	// Optional: without one, an unclear settle is always "unknown".
+	// RPCs answer authorizationState: before a settle (a nonce already used is a replay),
+	// and after one that gave no clear answer. Required for Sync routes, like Facilitators.
 	RPCs          map[string]*radius.RPC // by CAIP-2 network
 	SettleTimeout time.Duration          // per held response; default DefaultSettleTimeout
 }
@@ -296,10 +296,10 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	}
 	log = log.With("payer", res.Payer.String())
 	st.log = log
-	if entry.Sync() && s.pay.Facilitators[entry.Network.Network()] == nil {
-		// Checked before the backend is called: without a facilitator the response could
-		// never be released, so the request would only cost the seller the work.
-		log.Error("the route settles before release, but no facilitator is configured for its network", "decision", DependencyUnavailable, "network", entry.Network.Network())
+	if n := entry.Network.Network(); entry.Sync() && (s.pay.Facilitators[n] == nil || s.pay.RPCs[n] == nil) {
+		// Checked before the backend is called: without both the response could never be
+		// released, so the request would only cost the seller the work.
+		log.Error("the route settles before release, but its network has no facilitator or no RPC configured", "decision", DependencyUnavailable, "network", n)
 		return retryLater(DependencyUnavailable)
 	}
 

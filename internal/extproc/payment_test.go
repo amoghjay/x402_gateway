@@ -35,6 +35,7 @@ type node struct {
 	delay   atomic.Int64
 	calls   atomic.Int32
 	used    atomic.Bool // what authorizationState answers
+	down    atomic.Bool // authorizationState fails (balanceOf still answers)
 }
 
 type paid struct {
@@ -65,6 +66,10 @@ func setupWith(t *testing.T, balanceAtomic int64, deadline time.Duration, prices
 		body, _ := io.ReadAll(r.Body)
 		word := evm.Uint256Word(big.NewInt(n.balance.Load()))
 		if !strings.Contains(string(body), "0x70a08231") { // not balanceOf: authorizationState
+			if n.down.Load() {
+				http.Error(w, "node unavailable", http.StatusBadGateway)
+				return
+			}
 			word = evm.Uint256Word(big.NewInt(0))
 			if n.used.Load() {
 				word = evm.Uint256Word(big.NewInt(1))
