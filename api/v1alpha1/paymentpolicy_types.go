@@ -75,8 +75,12 @@ type PaymentPolicySpec struct {
 	// +optional
 	FailureMode string `json:"failureMode,omitempty"`
 
-	// Async settles after the response is released; Sync (backlog) would settle before.
-	// +kubebuilder:validation:Enum=Async
+	// When the payment is settled, relative to releasing the response. Async releases
+	// first and settles about a second later: fastest, but the seller carries what a
+	// payer cancels or spends in that gap. Sync settles while Envoy holds the response
+	// and releases it only if the settlement succeeded: nothing is served unpaid, and
+	// each paid request waits for the facilitator.
+	// +kubebuilder:validation:Enum=Async;Sync
 	// +kubebuilder:default=Async
 	// +optional
 	CaptureMode string `json:"captureMode,omitempty"`

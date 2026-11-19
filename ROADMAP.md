@@ -61,9 +61,10 @@ What this project adds is the point on the latency/risk curve and where it runs:
 - **In the cluster's own Envoy data plane,** not a CDN.
 - **No facilitator call on the request path.** It verifies locally, reserves in Redis shared by
   every replica, and settles after the response. That moves roughly a second of facilitator
-  latency (measured on Radius) off each paid request, and in exchange accepts a bounded window of
-  unsettled revenue. The settle-before-release model the others use is kept as
-  `captureMode: Sync`, so both can be measured side by side.
+  latency (measured on Radius) off each paid request, and in exchange the seller carries what a
+  payer cancels or spends before the settlement lands (capped per wallet, not in total). The
+  settle-before-release model the others use is `captureMode: Sync`: built and unit-tested, not
+  yet run on the cluster, so the two are not yet measured side by side.
 - **Self-service through a `PaymentPolicy` with status conditions,** so app teams price their own
   routes.
 
@@ -128,8 +129,9 @@ fits ([design note](docs/design/request-path-budget.md)):
    nobody is charged.
 3. `x402-settler` workers settle off-path from a Redis Stream, idempotently.
 
-The synchronous capture mode is built too, with a 2 s budget, to measure whether
-settle-then-respond can fit from inside the cluster.
+The synchronous capture mode (`captureMode: Sync`) settles through the facilitator while
+Envoy holds the response, under a 5 s Envoy timeout. It is built and unit-tested; whether
+settle-then-respond is fast enough from inside the cluster is still to be measured.
 
 ### Phase 4 — The platform layer
 

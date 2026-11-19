@@ -102,7 +102,7 @@ from.
 | `captureMode` | `messageTimeout` | Filter deadline | Why |
 |---|---|---|---|
 | `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (225 ms, laptop) fits Envoy's timeout; the filter deadline is re-set from the in-cluster baseline at Gate Zero |
-| `Sync` (opt-in) | 2 s | 1.5 s | measured settle max was 1.13 s |
+| `Sync` (opt-in) | 5 s | request 250 ms; held response 3 s for `/settle` + 1 s for one chain read | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
 
 `failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
 
@@ -133,8 +133,10 @@ only costs duplicate upstream work, because its settlement fails before the body
 settle-after, that replay would be a free response, so the nonce must be claimed somewhere
 every replica sees.
 
-Both models stay available: settle-before-release is `captureMode: Sync`, with its own 2 s
-budget, and Phase 6 measures the two side by side.
+Both models stay available: settle-before-release is `captureMode: Sync` (built 2026-11-20,
+unit-tested, not yet run on the cluster). The filter calls `/settle` on the response phase
+while Envoy holds the backend's 2xx: settled releases it, a refusal becomes a 402 and an
+unclear outcome a 503 in its place. Phase 6 measures the two side by side.
 
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or

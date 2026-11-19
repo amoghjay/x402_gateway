@@ -192,3 +192,18 @@ func TestEEPAccepted(t *testing.T) {
 		t.Errorf("got %v %q %q %v", status, reason, msg, found)
 	}
 }
+
+// A Sync route settles while Envoy holds the response, so Envoy has to wait for the
+// facilitator there; an Async route keeps the short budget. failOpen stays false on both.
+func TestDesiredEEPMessageTimeoutFollowsCaptureMode(t *testing.T) {
+	for mode, want := range map[string]string{"Async": "300ms", "Sync": "5s"} {
+		pp := sample()
+		pp.Spec.CaptureMode = mode
+		u := desiredEEP(pp, Backend{Namespace: "x402-system", Name: "x402-filter", Port: 9002})
+		ext, _, _ := unstructured.NestedSlice(u.Object, "spec", "extProc")
+		ep := ext[0].(map[string]any)
+		if ep["messageTimeout"] != want || ep["failOpen"] != false {
+			t.Errorf("%s: messageTimeout = %v, failOpen = %v; want %s, false", mode, ep["messageTimeout"], ep["failOpen"], want)
+		}
+	}
+}

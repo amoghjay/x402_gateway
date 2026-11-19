@@ -72,8 +72,16 @@ x402-settler      off-path    → settle through the facilitator   (~1 s)
 
 The shared Redis reservation closes two flaws that an app-level gateway can't: a
 payment replayed against another replica, and concurrent requests overdrawing one
-balance. The cost is a bounded window of unsettled revenue, which the seller carries
-and the rail decides the width of.
+balance. The cost of settling after the response is that a payer can cancel the
+authorization or move the funds in the gap, and the seller carries that loss. It is
+capped per wallet but not in total, since wallets are free to create
+([design note](docs/design/request-path-budget.md)).
+
+A route that cannot accept that sets `captureMode: Sync`. The filter then settles
+through the facilitator while Envoy holds the backend's response, and releases it only
+once the transfer is on chain; a refused settlement becomes a 402 and an unclear one a
+503, in place of the response. Nothing is served unpaid, and each paid request waits
+for the facilitator. Sync is built and unit-tested; it has not yet run on the cluster.
 
 ## Architecture
 

@@ -13,8 +13,12 @@
 // add to the payer's in-flight sum), strip the payment header, tell the backend who
 // paid, and CONTINUE. All of it under the filter's own deadline, well inside Envoy's
 // per-message timeout, so a slow dependency gets a retryable 503 from us rather than
-// Envoy's 504. Response phase: a 2xx is captured (the settlement job goes on the stream
-// and the receipt header goes to the client); anything else releases the reservation.
+// Envoy's 504. Response phase: anything but a 2xx releases the reservation. A 2xx on an
+// Async route is captured (the settlement job goes on the stream and the receipt header
+// goes to the client, before the money has moved). A 2xx on a Sync route is settled
+// through the facilitator while Envoy holds the response: Envoy sends nothing to the
+// client until this phase is answered, so the response is released only once the
+// transfer is on chain, and replaced with a 402 or a 503 otherwise (sync.go).
 // If the stream ends with a reservation neither captured nor released (the client went
 // away, the upstream reset), it is released on the way out.
 package extproc
@@ -38,6 +42,7 @@ import (
 
 	"github.com/amoghjay/x402_gateway/internal/balance"
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
@@ -94,6 +99,10 @@ const (
 	ReleasedNon2xx           Decision = "released_non_2xx"           // response not 2xx: nothing served, reservation released
 	ReleasedStreamEnd        Decision = "released_stream_end"        // stream ended without a response phase: reservation released
 	CaptureFailed            Decision = "capture_failed"             // response 2xx but the job could not be queued: served unpaid
+	Settled                  Decision = "settled"                    // Sync, response 2xx: settled through the facilitator, then released
+	SettledOnChain           Decision = "settled_on_chain"           // Sync: /settle failed or was unclear, but the chain says the transfer happened; released
+	SettleRefused            Decision = "settle_refused"             // Sync: 402 in place of the response; the settlement was refused, nothing charged
+	SettlementUnknown        Decision = "settlement_unknown"         // Sync: 503 in place of the response; the settlement's outcome is not known
 	Deadline                 Decision = "deadline"                   // 503 + Retry-After: the balance read overran the filter's deadline
 	DependencyUnavailable    Decision = "dependency_unavailable"     // 503 + Retry-After: Redis or the RPC failed
 	Unpriced                 Decision = "unpriced"                   // continue: the route has no price (a policy being removed)
@@ -117,6 +126,15 @@ type Payments struct {
 	Reserve  *reserve.Store
 	Deadline time.Duration    // request-phase budget; default DefaultDeadline
 	Now      func() time.Time // tests
+
+	// Sync routes settle on the response phase, through the route's network's
+	// facilitator. A Sync route on a network without one is refused at the door: it
+	// could be forwarded, but never released.
+	Facilitators map[string]*facilitator.Client // by CAIP-2 network
+	// RPCs answer authorizationState after a settle that failed or gave no clear answer.
+	// Optional: without one, an unclear settle is always "unknown".
+	RPCs          map[string]*radius.RPC // by CAIP-2 network
+	SettleTimeout time.Duration          // per held response; default DefaultSettleTimeout
 }
 
 // SBCDomain is SBC's EIP-712 domain on a network, which the verifier recovers
@@ -152,11 +170,15 @@ func (s *Server) WithPayments(p *Payments) *Server {
 type request struct {
 	log      *slog.Logger
 	entry    *pricing.Entry
-	payment  string // the PAYMENT-SIGNATURE value, as received, for the settlement job
+	payment  string              // the PAYMENT-SIGNATURE value, as received, for the settlement job
+	pp       x402.PaymentPayload // the same, decoded, for a Sync route's /settle
+	pw       paywall.Request     // for a 402 sent in place of the response (Sync, settle refused)
 	res      verify.Result
 	rsv      *reserve.Reservation
 	captured bool // the settler owns the in-flight amount now
 	released bool
+	settled  bool // Sync: the transfer is on chain
+	unknown  bool // Sync: the settle's outcome is not known; the in-flight amount stays until its TTL
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -177,6 +199,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return err
 		}
 		if err := stream.Send(resp); err != nil {
+			if st.settled {
+				// Paid for and not delivered: Envoy (or the client) went away while the
+				// response was held. Rare, and the seller should hear about it.
+				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", paymentID(st.res), "err", err)
+			}
 			return err
 		}
 	}
@@ -185,7 +212,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 // finish releases a reservation the response phase never settled: the client went
 // away, the upstream reset, Envoy gave up. Nothing was served, so nothing is charged.
 func (s *Server) finish(st *request) {
-	if st.rsv != nil && !st.captured && !st.released {
+	if st.rsv != nil && !st.captured && !st.released && !st.unknown {
 		s.release(st, ReleasedStreamEnd)
 	}
 }
@@ -276,6 +303,12 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	}
 	log = log.With("payer", res.Payer.String())
 	st.log = log
+	if entry.Sync() && s.pay.Facilitators[entry.Network.Network()] == nil {
+		// Checked before the backend is called: without a facilitator the response could
+		// never be released, so the request would only cost the seller the work.
+		log.Error("the route settles before release, but no facilitator is configured for its network", "decision", DependencyUnavailable, "network", entry.Network.Network())
+		return retryLater(DependencyUnavailable)
+	}
 
 	cache := s.pay.Balances[entry.Network.Network()]
 	if cache == nil {
@@ -308,7 +341,7 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 		return s.refuse(st, pw, x402.ReasonInsufficientFunds, InsufficientFunds,
 			fmt.Errorf("balance %s (%s, %s old) minus in-flight is below the price %s", bal.Value, bal.Source, bal.Age.Round(time.Millisecond), entry.Price))
 	}
-	st.res, st.rsv, st.payment = res, rsv, hdr
+	st.res, st.rsv, st.payment, st.pp, st.pw = res, rsv, hdr, pp, pw
 
 	log.Info("payment accepted", "decision", PaymentAccepted, "paymentId", paymentID(res), "amount", entry.Price.String(),
 		"balance", bal.Value.String(), "balanceSource", bal.Source, "inflight", rsv.Inflight.String(), "ms", time.Since(t0).Milliseconds())
@@ -320,8 +353,9 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	})
 }
 
-// responseHeaders settles the request phase's reservation: a 2xx is captured, anything
-// else released. It is kept to one Redis call so it cannot approach Envoy's per-message
+// responseHeaders settles the request phase's reservation: anything but a 2xx is
+// released; a 2xx is captured (Async) or settled while the response is held (Sync). The
+// Async path is kept to one Redis call so it cannot approach Envoy's per-message
 // timeout, which after a served response would turn a 200 into a 504.
 func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
 	if st.rsv == nil {
@@ -334,6 +368,9 @@ func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *r
 		s.release(st, ReleasedNon2xx)
 		st.log.Info("not served; released", "decision", ReleasedNon2xx, "status", code)
 		return continueResponse(nil)
+	}
+	if st.entry.Sync() {
+		return s.settleHeld(ctx, code, st)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, responsePhaseDeadline)
@@ -562,6 +599,13 @@ func (p *Payments) deadline() time.Duration {
 		return p.Deadline
 	}
 	return DefaultDeadline
+}
+
+func (p *Payments) settleTimeout() time.Duration {
+	if p.SettleTimeout > 0 {
+		return p.SettleTimeout
+	}
+	return DefaultSettleTimeout
 }
 
 func (p *Payments) now() time.Time {
