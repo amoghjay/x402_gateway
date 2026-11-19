@@ -198,7 +198,7 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 	// chain before calling it lost (found live on 2026-11-04: the transfer had gone
 	// through and the job was dead-lettered as expired).
 	if s.now().Unix() >= job.ValidBefore {
-		if used, serr := s.usedOnChain(ctx, rpc, pp); serr == nil && used {
+		if used, serr := s.usedOnChain(ctx, rpc, job.Network, pp); serr == nil && used {
 			s.done(ctx, log, msg, &job, SettledOnChain, "note", "claimed after validBefore; the transfer had already happened")
 			return
 		} else if serr != nil {
@@ -232,7 +232,7 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 			return
 		}
 	}
-	if used, serr := s.usedOnChain(ctx, rpc, pp); serr == nil && used {
+	if used, serr := s.usedOnChain(ctx, rpc, job.Network, pp); serr == nil && used {
 		s.done(ctx, log, msg, &job, SettledOnChain, "settleErr", errString(err))
 		return
 	} else if serr != nil {
@@ -251,7 +251,11 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 }
 
 // usedOnChain reads authorizationState for the job's payer and nonce.
-func (s *Settler) usedOnChain(ctx context.Context, rpc *radius.RPC, pp x402.PaymentPayload) (bool, error) {
+func (s *Settler) usedOnChain(ctx context.Context, rpc *radius.RPC, network string, pp x402.PaymentPayload) (bool, error) {
+	prof, err := radius.ByNetwork(network)
+	if err != nil {
+		return false, err
+	}
 	raw, err := pp.EIP3009()
 	if err != nil {
 		return false, err
@@ -262,7 +266,7 @@ func (s *Settler) usedOnChain(ctx context.Context, rpc *radius.RPC, pp x402.Paym
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.settleTimeout())
 	defer cancel()
-	return rpc.AuthorizationState(ctx, radius.SBCAddress, auth.From, auth.Nonce)
+	return rpc.AuthorizationState(ctx, prof.TokenAddress(), auth.From, auth.Nonce)
 }
 
 // done releases the in-flight amount and acknowledges the job: its outcome is known.

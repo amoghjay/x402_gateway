@@ -48,7 +48,6 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
 	"github.com/amoghjay/x402_gateway/internal/x402"
-	"github.com/amoghjay/x402_gateway/internal/x402/eip3009"
 	"github.com/amoghjay/x402_gateway/internal/x402/verify"
 )
 
@@ -135,12 +134,6 @@ type Payments struct {
 	// Optional: without one, an unclear settle is always "unknown".
 	RPCs          map[string]*radius.RPC // by CAIP-2 network
 	SettleTimeout time.Duration          // per held response; default DefaultSettleTimeout
-}
-
-// SBCDomain is SBC's EIP-712 domain on a network, which the verifier recovers
-// signatures against.
-func SBCDomain(p radius.Profile) eip3009.Domain {
-	return eip3009.Domain{Name: radius.SBCName, Version: radius.SBCVersion, ChainID: p.ChainID, VerifyingContract: radius.SBCAddress}
 }
 
 // Server is the ext_proc server.
@@ -297,7 +290,7 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	if err != nil {
 		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, err)
 	}
-	res, err := verify.Verify(s.pay.now(), entry.Requirements, SBCDomain(entry.Network), pp)
+	res, err := verify.Verify(s.pay.now(), entry.Requirements, entry.Domain, pp)
 	if err != nil {
 		return s.refuse(st, pw, verify.Reason(err), PaymentInvalid, err)
 	}

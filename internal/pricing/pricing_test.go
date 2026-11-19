@@ -162,3 +162,30 @@ func TestStore(t *testing.T) {
 		t.Error("nil table found something")
 	}
 }
+
+// A route is priced in its own network's token: USDC's address on a Radius route, or
+// SBC's on a Base route, rejects the table.
+func TestAssetMustBeTheNetworksToken(t *testing.T) {
+	base := mutate(t, func(r map[string]any) {
+		r["network"], r["asset"] = radius.BaseSepolia.Network(), radius.BaseSepolia.Token.Address
+	})
+	p, err := Parse(base, radius.Testnet, radius.BaseSepolia)
+	if err != nil {
+		t.Fatalf("a Base Sepolia route in USDC was refused: %v", err)
+	}
+	e, _ := p.Lookup("httproute/demo/httpbin")
+	if e.Requirements.Extra.Name != "USDC" || e.Requirements.Extra.Version != "2" || e.Domain.ChainID != 84532 || e.Domain.Name != "USDC" {
+		t.Errorf("entry = %+v, domain %+v", e.Requirements, e.Domain)
+	}
+	if _, err := Parse(base, radius.Testnet); err == nil || !strings.Contains(err.Error(), "not one this filter charges on") {
+		t.Errorf("a network the filter was not started with was accepted: %v", err)
+	}
+	for name, data := range map[string][]byte{
+		"USDC on Radius": mutate(t, func(r map[string]any) { r["asset"] = radius.BaseSepolia.Token.Address }),
+		"SBC on Base":    mutate(t, func(r map[string]any) { r["network"] = radius.BaseSepolia.Network() }),
+	} {
+		if _, err := Parse(data, radius.Testnet, radius.BaseSepolia); err == nil || !strings.Contains(err.Error(), "is supported on") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}

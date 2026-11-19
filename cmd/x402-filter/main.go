@@ -155,7 +155,7 @@ func run(log *slog.Logger, c config) error {
 			rpc := &radius.RPC{URL: url, HTTP: httpClient}
 			go rpc.KeepWarm(ctx, c.keepalive, log.With("network", p.Name))
 			balances[p.Network()] = &balance.Cache{
-				Redis: redisClient, RPC: rpc, Token: radius.SBCAddress, Log: log,
+				Redis: redisClient, RPC: rpc, Token: p.TokenAddress(), Log: log,
 				Fresh: c.fresh, LastKnown: c.lastKnown,
 			}
 			fu := p.Facilitator

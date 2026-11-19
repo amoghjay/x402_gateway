@@ -49,7 +49,7 @@ func TestGeneratedCRD(t *testing.T) {
 		{"price", "pattern", "^[0-9]+$"},
 		{"price", "maxLength", float64(15)},
 		{"payTo", "pattern", "^0x[0-9a-fA-F]{40}$"},
-		{"network", "enum", []any{"testnet"}},
+		{"network", "enum", []any{"testnet", "base-sepolia"}},
 		{"assetTransferMethod", "enum", []any{"eip3009"}},
 		{"assetTransferMethod", "default", "eip3009"},
 		{"maxTimeoutSeconds", "minimum", float64(30)},

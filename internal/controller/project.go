@@ -53,7 +53,7 @@ func routeKey(pp *v1alpha1.PaymentPolicy) string {
 func eepName(pp *v1alpha1.PaymentPolicy) string { return "x402-" + pp.Name }
 
 // routeOf projects a policy into its price-table entry. The network name becomes the
-// chain ID and the SBC contract: a policy never carries an address that could be mistyped.
+// chain ID and its token's contract: a policy never carries an address that could be mistyped.
 // The fields the schema defaults (assetTransferMethod, maxTimeoutSeconds, failureMode,
 // captureMode) are copied as they are; the API server has filled them in by the time the
 // controller sees the object.
@@ -65,7 +65,7 @@ func routeOf(pp *v1alpha1.PaymentPolicy) (pricing.Route, error) {
 	r := pricing.Route{
 		Network:             p.Network(),
 		Price:               pp.Spec.Price,
-		Asset:               radius.SBC,
+		Asset:               p.Token.Address,
 		PayTo:               pp.Spec.PayTo,
 		AssetTransferMethod: pp.Spec.AssetTransferMethod,
 		MaxTimeoutSeconds:   int(pp.Spec.MaxTimeoutSeconds),

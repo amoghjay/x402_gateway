@@ -41,9 +41,10 @@ func (w *Wallet) client() *http.Client {
 // Address of the wallet.
 func (w *Wallet) Address() evm.Address { return w.Key.Address() }
 
-// Domain is SBC's EIP-712 domain on the wallet's network.
+// Domain is the EIP-712 domain of the wallet's network's token.
 func (w *Wallet) Domain() eip3009.Domain {
-	return eip3009.Domain{Name: radius.SBCName, Version: radius.SBCVersion, ChainID: w.Network.ChainID, VerifyingContract: radius.SBCAddress}
+	n := w.Network
+	return eip3009.Domain{Name: n.Token.Name, Version: n.Token.Version, ChainID: n.ChainID, VerifyingContract: n.TokenAddress()}
 }
 
 // Sign builds the PaymentPayload for one `exact` EIP-3009 requirement: a fresh random
@@ -58,8 +59,8 @@ func (w *Wallet) Sign(req x402.Requirements, resource *x402.Resource, now time.T
 	if req.Network != w.Network.Network() {
 		return x402.PaymentPayload{}, fmt.Errorf("buyer: offer is on %s, wallet is on %s", req.Network, w.Network.Network())
 	}
-	if !strings.EqualFold(req.Asset, radius.SBC) {
-		return x402.PaymentPayload{}, fmt.Errorf("buyer: offer asset %s is not SBC", req.Asset)
+	if !strings.EqualFold(req.Asset, w.Network.Token.Address) {
+		return x402.PaymentPayload{}, fmt.Errorf("buyer: offer asset %s is not %s on %s", req.Asset, w.Network.Token.Symbol, w.Network.Name)
 	}
 	to, err := evm.ParseAddress(req.PayTo)
 	if err != nil {
@@ -103,7 +104,7 @@ func (w *Wallet) Choose(pr x402.PaymentRequired, maxAmount *big.Int) (x402.Requi
 	for _, req := range pr.Accepts {
 		seen = append(seen, fmt.Sprintf("%s/%s on %s for %s", req.Scheme, req.TransferMethod(), req.Network, req.Amount))
 		if req.Scheme != x402.SchemeExact || req.TransferMethod() != x402.TransferEIP3009 ||
-			req.Network != w.Network.Network() || !strings.EqualFold(req.Asset, radius.SBC) {
+			req.Network != w.Network.Network() || !strings.EqualFold(req.Asset, w.Network.Token.Address) {
 			continue
 		}
 		amount, err := evm.ParseUint256(req.Amount)
@@ -111,7 +112,7 @@ func (w *Wallet) Choose(pr x402.PaymentRequired, maxAmount *big.Int) (x402.Requi
 			continue
 		}
 		if maxAmount != nil && amount.Cmp(maxAmount) > 0 {
-			return x402.Requirements{}, fmt.Errorf("buyer: offer asks %s SBC, above the threshold %s SBC", radius.FormatSBC(amount), radius.FormatSBC(maxAmount))
+			return x402.Requirements{}, fmt.Errorf("buyer: offer asks %s %s, above the threshold %s", w.Network.Token.Format(amount), w.Network.Token.Symbol, w.Network.Token.Format(maxAmount))
 		}
 		return req, nil
 	}

@@ -153,7 +153,7 @@ func Render(e *pricing.Entry, req Request) (Response, error) {
 }
 
 func howToPay(e *pricing.Entry, req Request) HowToPay {
-	docs := radius.X402Docs
+	docs := e.Network.Docs
 	var message string
 	if e.Route.Help != nil {
 		if e.Route.Help.DocsURL != "" {
@@ -161,8 +161,25 @@ func howToPay(e *pricing.Entry, req Request) HowToPay {
 		}
 		message = e.Route.Help.Message
 	}
-	price := radius.FormatSBC(e.Price)
-	network := "Radius " + e.Network.Name
+	tok := e.Network.Token
+	price := tok.Format(e.Price)
+	network := e.Network.Display
+	summary := fmt.Sprintf("%s %s costs %s %s on %s.", strings.ToUpper(orGET(req.Method)), req.URL, price, tok.Symbol, network)
+	if !e.Network.RadiusCLI {
+		// No one command pays here, so the steps say what any x402 client has to do. They
+		// are shell comments: pasted into a terminal, they do nothing.
+		return HowToPay{
+			Summary: summary, Price: price, Asset: tok.Symbol, Network: network, PayTo: e.Requirements.PayTo,
+			Steps: []Step{
+				{Do: "fund", Run: "# the paying wallet needs " + price + " " + tok.Symbol + " on " + network, Note: "token contract " + tok.Address},
+				{Do: "pay", Run: genericPay, Note: "the terms are in this response's PAYMENT-REQUIRED header (base64 JSON)"},
+			},
+			SDK:         SDK{Package: "@x402/fetch", Import: "@x402/fetch", Entry: "wrapFetchWithPayment", Note: "a fetch that reads this 402, signs the payment and retries"},
+			Docs:        docs,
+			Description: e.Route.Description,
+			Message:     message,
+		}
+	}
 	// radius-cli takes the network from RADIUS_NETWORK and defaults to mainnet.
 	env := ""
 	if e.Network.Name != radius.Mainnet.Name {
@@ -173,9 +190,9 @@ func howToPay(e *pricing.Entry, req Request) HowToPay {
 		{Do: "create-wallet", Run: "radius-cli wallet new", Note: "once; the key stays in ~/.radius (set RADIUS_HOME to keep it per project)"},
 	}
 	if e.Network.Faucet != "" {
-		steps = append(steps, Step{Do: "fund", Run: env + "radius-cli wallet faucet", Note: "test SBC from the faucet; the payment needs " + price + " " + radius.DisplayAsset})
+		steps = append(steps, Step{Do: "fund", Run: env + "radius-cli wallet faucet", Note: "test " + tok.Symbol + " from the faucet; the payment needs " + price + " " + tok.Symbol})
 	} else {
-		steps = append(steps, Step{Do: "fund", Run: env + "radius-cli wallet balance", Note: "the wallet needs at least " + price + " " + radius.DisplayAsset})
+		steps = append(steps, Step{Do: "fund", Run: env + "radius-cli wallet balance", Note: "the wallet needs at least " + price + " " + tok.Symbol})
 	}
 	steps = append(steps, Step{
 		Do:   "pay",
@@ -183,9 +200,9 @@ func howToPay(e *pricing.Entry, req Request) HowToPay {
 		Note: "signs the payment, retries the request and prints the response; --threshold refuses any higher price",
 	})
 	return HowToPay{
-		Summary:     fmt.Sprintf("%s %s costs %s %s on %s.", strings.ToUpper(orGET(req.Method)), req.URL, price, radius.DisplayAsset, network),
+		Summary:     summary,
 		Price:       price,
-		Asset:       radius.DisplayAsset,
+		Asset:       tok.Symbol,
 		Network:     network,
 		PayTo:       e.Requirements.PayTo,
 		Steps:       steps,
@@ -195,6 +212,9 @@ func howToPay(e *pricing.Entry, req Request) HowToPay {
 		Message:     message,
 	}
 }
+
+// genericPay is the pay step on a network with no single paying command.
+const genericPay = "# any x402 v2 client: sign the exact (EIP-3009) terms and retry with a PAYMENT-SIGNATURE header"
 
 // cliCommand is the radius-cli line that pays this request. --threshold is the price in
 // display units, so the CLI refuses anything dearer than what this 402 asked. The URL is
@@ -212,6 +232,9 @@ func hint(h HowToPay, req Request) string {
 		pay = strings.Replace(pay, shellQuote(req.URL), "'<this URL>'", 1)
 	}
 	line := fmt.Sprintf("Payment required: %s %s on %s. Pay with: %s", h.Price, h.Asset, h.Network, pay)
+	if pay == genericPay {
+		line = fmt.Sprintf("Payment required: %s %s on %s. Pay with any x402 v2 client (exact, EIP-3009).", h.Price, h.Asset, h.Network)
+	}
 	if req.Refused != "" {
 		return req.Refused + ": payment refused. " + line
 	}

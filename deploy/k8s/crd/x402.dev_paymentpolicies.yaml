@@ -139,11 +139,14 @@ spec:
                 type: string
               network:
                 description: |-
-                  The Radius network to charge on. The controller resolves the chain ID, the SBC
-                  contract and the facilitator from this name, so a policy never carries addresses
-                  that could be mistyped. Only testnet until the Phase 6 soak gate passes.
+                  The network to charge on: testnet is Radius testnet (priced in SBC), base-sepolia is
+                  Base's testnet (priced in test USDC). The controller resolves the chain ID, the
+                  token contract and the facilitator from this name, so a policy never carries
+                  addresses that could be mistyped. Testnets only until the Phase 6 soak gate passes,
+                  and only the networks the filter was started with (-networks).
                 enum:
                 - testnet
+                - base-sepolia
                 type: string
               payTo:
                 description: The address that receives every payment for this route.
@@ -151,7 +154,8 @@ spec:
                 type: string
               price:
                 description: |-
-                  Price per request in atomic units of SBC (6 decimals): "1000" is 0.001 SBC. A
+                  Price per request in atomic units of the network's token (6 decimals on both
+                  networks): "1000" is 0.001 SBC or 0.001 USDC. A
                   decimal string, so "0.001" is refused as a unit mistake, not read as a small price.
                   At most 15 digits: the filter's Redis arithmetic is exact below 2^53.
                 maxLength: 15

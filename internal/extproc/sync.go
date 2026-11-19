@@ -11,7 +11,6 @@ import (
 
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
-	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 )
 
@@ -169,7 +168,7 @@ func (s *Server) usedOnChain(ctx context.Context, st *request) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chainCheckTimeout)
 	defer cancel()
-	return rpc.AuthorizationState(ctx, radius.SBCAddress, st.res.Payer, st.res.Authorization.Nonce)
+	return rpc.AuthorizationState(ctx, st.entry.Network.TokenAddress(), st.res.Payer, st.res.Authorization.Nonce)
 }
 
 func errText(err error) string {
