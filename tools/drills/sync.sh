@@ -56,7 +56,10 @@ case "$cmd" in
     n=${4:?how many}
     echo "balance before: $(balance)"
     for _ in $(seq 1 "$n"); do
-      "$BUYER" pay -network "$net" "$url" 2>&1 | grep -m1 '^HTTP' || echo "no answer"
+      # Capture first: piping into grep -m1 lets grep exit before the body is written, and
+      # under pipefail the SIGPIPE turned a served request into an extra "no answer" line.
+      out=$("$BUYER" pay -network "$net" "$url" 2>&1) || true
+      grep -m1 '^HTTP' <<<"$out" || echo "no answer"
     done | sort | uniq -c
     echo "balance after:  $(balance)"
     echo "settle times are in the filter's log: decision=settled, field ms"
