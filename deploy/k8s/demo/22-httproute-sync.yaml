@@ -1,0 +1,45 @@
+# The drill routes for captureMode: Sync, on the same httpbin. /anything/sync is priced on
+# Radius testnet and /anything/base on Base Sepolia (42-paymentpolicy-sync.yaml). They are
+# separate HTTPRoutes because a PaymentPolicy prices one HTTPRoute; both paths are longer
+# than the demo route's `/`, so they win, and the demo route keeps settling Async.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: httpbin-sync
+  namespace: demo
+spec:
+  parentRefs:
+    - name: x402
+      namespace: gateway
+      sectionName: http
+  hostnames:
+    - x402-22ade072.nip.io
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /anything/sync
+      backendRefs:
+        - name: httpbin
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: httpbin-base
+  namespace: demo
+spec:
+  parentRefs:
+    - name: x402
+      namespace: gateway
+      sectionName: http
+  hostnames:
+    - x402-22ade072.nip.io
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /anything/base
+      backendRefs:
+        - name: httpbin
+          port: 8080

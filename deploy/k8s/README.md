@@ -41,7 +41,7 @@ policy's route, price and `Accepted` status; `-o yaml` has the reason when it is
 |---|---|
 | `gateway/` | `gateway` namespace; `EnvoyProxy` (LoadBalancer on the reserved IP, proxies on the system pool); `GatewayClass x402`; `Gateway x402` with one HTTP listener that accepts routes only from labelled namespaces |
 | `crd/` | `PaymentPolicy` (`x402.dev/v1alpha1`), generated from `api/v1alpha1` |
-| `demo/` | `demo` namespace (labelled for routes); httpbin on the spot pool; `HTTPRoute httpbin` sending `/` to it and the `PaymentPolicy` that prices it; `HTTPRoute httpbin-unpriced` for `/anything/free`, which has no policy and so never reaches the filter |
+| `demo/` | `demo` namespace (labelled for routes); httpbin on the spot pool; `HTTPRoute httpbin` sending `/` to it and the `PaymentPolicy` that prices it; `HTTPRoute httpbin-unpriced` for `/anything/free`, which has no policy and so never reaches the filter; `httpbin-sync` (`/anything/sync`, Radius testnet) and `httpbin-base` (`/anything/base`, Base Sepolia), both `captureMode: Sync`, for the settle-before-release drills |
 | `x402-system/` | `x402-system` namespace; Redis as a one-replica StatefulSet on the system pool, AOF (`everysec`) on a 10Gi PVC, behind a headless Service; the filter's ServiceAccount and a Role that can list/watch only the `x402-prices` ConfigMap; the `x402-filter` Deployment (2 replicas, payments on via `-redis`), Service and PodDisruptionBudget; the controller's ServiceAccount, ClusterRole (policies, routes, extension policies) and namespaced Role (the one ConfigMap, the one grant, the Lease), and its Deployment; the `x402-settler` Deployment (no Kubernetes API access) |
 
 A paid request, end to end: Envoy sends the request to the filter, which verifies the
@@ -49,5 +49,7 @@ signature, reads the payer's balance (cached in Redis), reserves (claims the non
 to the payer's in-flight sum) and lets it through with `x-x402-payer` set for the
 backend; on a 2xx the settlement job goes on the Redis stream and the client gets
 `PAYMENT-RESPONSE`; the settler calls the facilitator's `/settle` and logs the explorer
-link. The filter never calls the facilitator. A keyed RPC URL, when there is one, goes in
+link. On an Async route the filter never calls the facilitator. On a `captureMode: Sync`
+route there is no job: the filter calls `/settle` itself while Envoy holds the response,
+and the client gets it, with the transaction in `PAYMENT-RESPONSE`, only if that succeeded. A keyed RPC URL, when there is one, goes in
 a Secret as `RADIUS_RPC_URL` on both the filter and the settler.
