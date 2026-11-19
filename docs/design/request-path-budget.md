@@ -206,6 +206,14 @@ testnet, one after another: 100 x 200, 100 settled, no `settlement_unknown`, exa
 prices spent (3.407698 → 3.307698 SBC). Held response p50 539 ms, p90 754 ms, p99 983 ms,
 max 1,011 ms. No `/settle` took longer than 2 s in this run, so the slow path the fix is
 for was not exercised here; it is covered by unit tests only.
+
+**Concurrent load (same images, same day):** 4 buyers at once from one wallet, 25 paid
+requests each, Radius testnet. 99 x 200 and settled, 1 x 503; exactly 99 prices spent
+(3.303698 → 3.204698 SBC). Held response p50 567 ms, p90 829 ms, max 1,631 ms. The 503 was
+`dependency_unavailable`: the `authorizationState` read before `/settle` hit its 0.5 s
+budget (`eth_call: context deadline exceeded`), so nothing was settled and the buyer was
+not charged. Safe, but a valid payer got an error. Candidates: retry the read once inside
+the budget, or give it more of the 10 s `messageTimeout`; not built.
 What is still missing for the case that remains: a record of unknown outcomes that a
 seller can refund or redeliver from.
 
