@@ -182,12 +182,13 @@ The request phase (verify, cached balance, reserve) took p50 1 ms on both.
 
 | Drill | Radius testnet | Base Sepolia |
 |---|---|---|
-| Settlement refused after the backend answered (wallet holding one price pays twice) | 402, no backend body | not run |
+| Settlement refused after the backend answered (wallet holding one price pays twice) | 402, no backend body | 402 `invalid_exact_evm_insufficient_balance`, response withheld (2026-11-19, `426a878e6fad`) |
 | Payment settled outside the gate, then sent through it | 402 `payment_already_used` (was 200 before the chain read) | 402 |
 | Same, and the facilitator asked to settle it twice directly | second settle: **success** | second settle: refused, `invalid_exact_evm_nonce_already_used` |
 | One signed payment, 12 copies at once | 11 x 402, 1 x 503, one price spent (see below) | 1 x 200, 11 x 402, one price spent |
-| Paid once, Redis nonce records deleted, replayed | 402 | not run |
-| Redis pod killed | paid requests 503 for about 8 s, unpaid 402 throughout, then 200 again | not run |
+| Paid once, Redis nonce records deleted, replayed | 402 | 402 `payment_already_used` from the chain read, 42 ms, no `/settle` (2026-11-19) |
+| Redis pod killed | paid requests 503 for about 8 s, unpaid 402 throughout, then 200 again | not run (Redis does not depend on the chain) |
+| Facilitator unreachable: its hostname resolved to a dead IP in the filter pods only (`hostAliases`) | 3 x 503 `settlement_unknown` in 4.7-5.2 s (2 s dial timeout + 2.5 s chain poll), not charged; unpaid requests 402 throughout (2026-11-19) | not run |
 | Both filter pods force-killed about 0.35 s into a paid request | 200, paid; the kill missed the settle window, so this did not test a kill mid-settle | not run |
 
 No drill released a response unpaid.
@@ -222,9 +223,20 @@ seller can refund or redeliver from.
 was not charged (balance checked). A retry when the nonce is still unused would have
 served it; not built.
 
+**Facilitator unreachable, a detail:** a connection that never opened means `/settle`
+never reached the facilitator, so the outcome is known (not settled), yet the filter polls
+the chain for 2.5 s and calls it `settlement_unknown`. Harmless; it could answer at once.
+
+**Price table, found while setting up the drills:** a filter started with
+`-networks=testnet` rejects the whole price table when one entry is on a network it does
+not serve (`httpbin-base`), so a new pod never becomes ready. The old pods kept serving, so
+nothing broke, but one stray policy can block every rollout of the filter.
+
 **Not run:** cancelAuthorization mid-request (needs gas in the payer wallet; the chain
-read treats a cancelled nonce as used), facilitator unreachable (unit-tested only), a
-kill that lands mid-settle, anything under concurrent load.
+read treats a cancelled nonce as used), a kill that lands mid-settle, and a facilitator
+slower than 2 s (the case the 6 s settle budget fixes). The last two need a facilitator
+the drill can slow down: `-facilitator-url` overrides one endpoint and is refused with two
+networks, so it cannot point only Radius testnet at a delaying proxy.
 
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or
