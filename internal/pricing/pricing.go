@@ -54,7 +54,7 @@ const (
 // the filter's settle budget (internal/extproc) has to fit under SyncMessageTimeout.
 const (
 	AsyncMessageTimeout = 300 * time.Millisecond
-	SyncMessageTimeout  = 5 * time.Second
+	SyncMessageTimeout  = 10 * time.Second
 )
 
 // MaxPrice is 2^53 - 1 atomic units (about 9e9 SBC): the filter's in-flight sums are

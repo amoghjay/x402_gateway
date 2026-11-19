@@ -93,7 +93,7 @@ func run(log *slog.Logger, redisAddr, networks, consumer, healthAddr, facilitato
 		if rpcURL != "" {
 			ru = rpcURL
 		}
-		facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: httpClient}
+		facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: radius.NewFacilitatorHTTPClient()}
 		rpcs[p.Network()] = &radius.RPC{URL: ru, HTTP: httpClient}
 	}
 	s := &settle.Settler{

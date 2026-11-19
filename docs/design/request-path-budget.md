@@ -102,7 +102,7 @@ from.
 | `captureMode` | `messageTimeout` | Filter deadline | Why |
 |---|---|---|---|
 | `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (225 ms, laptop) fits Envoy's timeout; the filter deadline is re-set from the in-cluster baseline at Gate Zero |
-| `Sync` (opt-in) | 5 s | request 250 ms; held response 3 s for `/settle` + 1 s for one chain read | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
+| `Sync` (opt-in) | 10 s | request 250 ms; held response: 0.5 s chain read + 6 s for `/settle` + up to 2.5 s asking the chain after an unclear settle | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
 
 `failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
 
@@ -161,6 +161,56 @@ before it settles: a nonce already used on chain is a replay and gets a 402 with
 `/settle` call; if the read fails, the response is withheld with a 503. The Redis claim
 is still the first guard, and the only one against two copies arriving at once.
 Open question for the Radius facilitator team: is the repeated success intended?
+
+### Sync drills on GKE, both chains (2026-11-19)
+
+Images `052abe3c9a04` (with the chain read before settling). Routes `/anything/sync`
+(Radius testnet, SBC, Radius facilitator) and `/anything/base` (Base Sepolia, test USDC,
+`x402.org/facilitator`). One buyer per chain, from a laptop, requests one after another.
+The drills are `tools/drills/sync.sh`; the Redis and pod kills were `kubectl delete pod`.
+
+**Latency of the held response**, as timed by the filter (chain read + `/settle`):
+
+| Route | Paid requests | Settled | p50 | p90 | max |
+|---|---|---|---|---|---|
+| Radius testnet | 50 | 50 | 548 ms | 780 ms | 1,975 ms |
+| Base Sepolia | 30 | 29 | 548 ms | 662 ms | 752 ms |
+
+The request phase (verify, cached balance, reserve) took p50 1 ms on both.
+
+**Drills.** "Unpaid" means a backend response released without a transfer.
+
+| Drill | Radius testnet | Base Sepolia |
+|---|---|---|
+| Settlement refused after the backend answered (wallet holding one price pays twice) | 402, no backend body | not run |
+| Payment settled outside the gate, then sent through it | 402 `payment_already_used` (was 200 before the chain read) | 402 |
+| Same, and the facilitator asked to settle it twice directly | second settle: **success** | second settle: refused, `invalid_exact_evm_nonce_already_used` |
+| One signed payment, 12 copies at once | 11 x 402, 1 x 503, one price spent (see below) | 1 x 200, 11 x 402, one price spent |
+| Paid once, Redis nonce records deleted, replayed | 402 | not run |
+| Redis pod killed | paid requests 503 for about 8 s, unpaid 402 throughout, then 200 again | not run |
+| Both filter pods force-killed about 0.35 s into a paid request | 200, paid; the kill missed the settle window, so this did not test a kill mid-settle | not run |
+
+No drill released a response unpaid.
+
+**Charged and not served: 2 of about 75 Radius requests.** Twice the Radius facilitator
+took longer than 2 s to answer `/settle`. The shared HTTP client's 2 s limit on response
+headers cut the call off (the settle budget was 3 s), the chain still showed the nonce
+unused, and the filter answered 503 `settlement_unknown`. The transfer landed afterwards:
+the buyer paid and got nothing. One of the two is the 503 in the burst row. Fixed after
+this run: the facilitator call has its own HTTP client with no header limit, the settle
+budget is 6 s, and after an unclear answer the filter asks the chain every 250 ms for
+2.5 s before giving up, under a 10 s `messageTimeout`. Not yet rerun on the cluster.
+What is still missing for the case that remains: a record of unknown outcomes that a
+seller can refund or redeliver from.
+
+**One refusal of a valid payment: 1 of 30 on Base.** The x402.org facilitator answered
+`invalid_exact_evm_transaction_failed` in 280 ms. The gate returned 402 and the buyer
+was not charged (balance checked). A retry when the nonce is still unused would have
+served it; not built.
+
+**Not run:** cancelAuthorization mid-request (needs gas in the payer wallet; the chain
+read treats a cancelled nonce as used), facilitator unreachable (unit-tested only), a
+kill that lands mid-settle, anything under concurrent load.
 
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or

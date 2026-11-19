@@ -402,7 +402,11 @@ func pay(args []string) error {
 	// The answer's body goes to stdout so it can be piped; everything else to stderr.
 	if out.Paid.Amount != "" {
 		amount, _ := evm.ParseUint256(out.Paid.Amount)
-		fmt.Fprintf(os.Stderr, "paid %s SBC to %s on %s\n", radius.FormatSBC(amount), out.Paid.PayTo, out.Paid.Network)
+		symbol := "SBC"
+		if p, err := radius.ByNetwork(out.Paid.Network); err == nil {
+			symbol = p.Token.Symbol
+		}
+		fmt.Fprintf(os.Stderr, "paid %s %s to %s on %s\n", radius.FormatSBC(amount), symbol, out.Paid.PayTo, out.Paid.Network)
 	} else {
 		fmt.Fprintln(os.Stderr, "no 402; nothing paid")
 	}
