@@ -263,17 +263,40 @@ func TestSyncRetriesWhenTheFacilitatorHasNoWalletFree(t *testing.T) {
 }
 
 // A backend error is never settled: nothing was served.
-func TestSyncNon2xxNeverSettles(t *testing.T) {
+func TestSyncNotServedNeverSettles(t *testing.T) {
+	for _, code := range []string{"500", "404", "304"} {
+		t.Run(code, func(t *testing.T) {
+			p, f := setupSync(t, 0)
+			stream, _ := p.request(p.payment())
+			p.respond(stream, code)
+			if f.calls.Load() != 0 {
+				t.Errorf("/settle called %d times for a %s", f.calls.Load(), code)
+			}
+			if p.inflight() != "" {
+				t.Errorf("in-flight = %q, want released", p.inflight())
+			}
+			p.decided(ReleasedNotServed)
+		})
+	}
+}
+
+// A 302 is held and settled like a 200: its Location can be the content. Before
+// 2026-11-19 it was released unpaid.
+func TestSyncRedirectIsSettledBeforeRelease(t *testing.T) {
 	p, f := setupSync(t, 0)
 	stream, _ := p.request(p.payment())
-	p.respond(stream, "500")
-	if f.calls.Load() != 0 {
-		t.Errorf("/settle called %d times for a failed response", f.calls.Load())
+	resp := p.respond(stream, "302")
+	if ir := resp.GetImmediateResponse(); ir != nil {
+		t.Fatalf("response phase = %v, want the 302 released after settling", ir.GetStatus().GetCode())
 	}
-	if p.inflight() != "" {
-		t.Errorf("in-flight = %q, want released", p.inflight())
+	set, _ := mutations(t, resp.GetResponseHeaders().GetResponse())
+	if r, err := x402.DecodeSettleResponse(set["payment-response"]); err != nil || !r.Success || r.Transaction != "0xfeed" {
+		t.Errorf("receipt = %+v, %v", r, err)
 	}
-	p.decided(ReleasedNon2xx)
+	if f.calls.Load() != 1 {
+		t.Errorf("/settle calls = %d, want 1", f.calls.Load())
+	}
+	p.decided(Settled)
 }
 
 // A Sync route with no facilitator, or no RPC, is refused before the backend is called.

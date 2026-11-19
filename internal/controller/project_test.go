@@ -98,7 +98,7 @@ func TestTableJSON(t *testing.T) {
 	b.Namespace, b.Spec.TargetRef.Name, b.Spec.Price = "shop", "catalog", "2500"
 	ra, _ := routeOf(a)
 	rb, _ := routeOf(b)
-	data, err := tableJSON(map[string]pricing.Route{routeKey(a): ra, routeKey(b): rb}, testnet)
+	data, err := tableJSON(map[string]pricing.Route{routeKey(a): ra, routeKey(b): rb}, nil, testnet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestTableJSON(t *testing.T) {
 		t.Errorf("entry = %+v", e)
 	}
 
-	empty, err := tableJSON(nil, testnet)
+	empty, err := tableJSON(nil, nil, testnet)
 	if err != nil || !strings.Contains(string(empty), `"routes": {}`) {
 		t.Errorf("empty table = %q, %v", empty, err)
 	}

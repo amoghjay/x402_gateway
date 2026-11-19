@@ -58,7 +58,7 @@ func TestGeneratedCRD(t *testing.T) {
 		{"failureMode", "enum", []any{"Closed"}},
 		{"failureMode", "default", "Closed"},
 		{"captureMode", "enum", []any{"Async", "Sync"}},
-		{"captureMode", "default", "Async"},
+		{"captureMode", "default", "Sync"},
 		{"description", "maxLength", float64(256)},
 	}
 	for _, c := range checks {

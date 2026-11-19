@@ -47,9 +47,9 @@ policy's route, price and `Accepted` status; `-o yaml` has the reason when it is
 A paid request, end to end: Envoy sends the request to the filter, which verifies the
 signature, reads the payer's balance (cached in Redis), reserves (claims the nonce, adds
 to the payer's in-flight sum) and lets it through with `x-x402-payer` set for the
-backend; on a 2xx the settlement job goes on the Redis stream and the client gets
-`PAYMENT-RESPONSE`; the settler calls the facilitator's `/settle` and logs the explorer
-link. On an Async route the filter never calls the facilitator. On a `captureMode: Sync`
-route there is no job: the filter calls `/settle` itself while Envoy holds the response,
-and the client gets it, with the transaction in `PAYMENT-RESPONSE`, only if that succeeded. A keyed RPC URL, when there is one, goes in
+backend. On a `captureMode: Sync` route (the default) the filter then calls `/settle`
+itself while Envoy holds the response, and the client gets it, with the transaction in
+`PAYMENT-RESPONSE`, only if that succeeded. On an Async route (opt-in) the response goes
+out at once, the settlement job goes on the Redis stream, and the settler calls the
+facilitator's `/settle` and logs the explorer link. A keyed RPC URL, when there is one, goes in
 a Secret as `RADIUS_RPC_URL` on both the filter and the settler.

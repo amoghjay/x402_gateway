@@ -1,7 +1,7 @@
 # Sync capture: the filter settles through the facilitator while Envoy holds httpbin's
 # response, and releases it only once the transfer is on chain. A refused settlement is
 # a 402 in place of the response, an unclear one a 503. The controller gives these
-# routes a 10 s Envoy messageTimeout (300 ms on the Async demo route).
+# routes a 10 s Envoy messageTimeout (300 ms on an Async route).
 #
 # Same price and seller as the demo route, so the only difference under test is when
 # the money moves, and on which chain.

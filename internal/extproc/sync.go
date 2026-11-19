@@ -17,8 +17,9 @@ import (
 
 // Sync capture: settle, then release.
 //
-// The backend has answered 2xx and Envoy is holding that response: it sends nothing to
-// the client until this phase is answered. So the filter settles here, and what the
+// The backend has answered with a chargeable status (2xx, or a 3xx other than 304) and
+// Envoy is holding that response: it sends nothing to the client until this phase is
+// answered. So the filter settles here, and what the
 // client gets depends on the outcome:
 //
 //	settled                      → the backend's response, with the receipt (a real transaction)
@@ -71,7 +72,7 @@ const (
 // ReasonSettlementUnknown is the 503's error code when a settle gave no clear answer.
 const ReasonSettlementUnknown = "settlement_unknown"
 
-// settleHeld settles a Sync route's payment while Envoy holds the backend's 2xx.
+// settleHeld settles a Sync route's payment while Envoy holds the backend's response.
 func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extprocv3.ProcessingResponse {
 	entry, id := st.entry, paymentID(st.res)
 	fac := s.pay.Facilitators[entry.Network.Network()] // not nil: accept refused the request otherwise
@@ -96,7 +97,7 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	cancel()
 	ms := time.Since(t0).Milliseconds()
 	if err == nil && resp.Success {
-		return s.release2xx(st, code, resp.Transaction, Settled, ms)
+		return s.releaseHeld(st, code, resp.Transaction, Settled, ms)
 	}
 
 	// A definite no is believed as it is. (If the nonce is used by now, another copy of
@@ -118,7 +119,7 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	used, cerr := s.confirmOnChain(ctx, st)
 	ms = time.Since(t0).Milliseconds()
 	if cerr == nil && used {
-		return s.release2xx(st, code, resp.Transaction, SettledOnChain, ms)
+		return s.releaseHeld(st, code, resp.Transaction, SettledOnChain, ms)
 	}
 	// Unknown. The reservation is not released (the money may have moved; the in-flight
 	// TTL clears it) and nothing retries the settle: a later success would charge for a
@@ -133,8 +134,8 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 		[]byte(ReasonSettlementUnknown+": the payment could not be confirmed, so the response was withheld. Payment "+id+"\n"), SettlementUnknown)
 }
 
-// release2xx lets the held response go, with the receipt.
-func (s *Server) release2xx(st *request, code int, tx string, d Decision, ms int64) *extprocv3.ProcessingResponse {
+// releaseHeld lets the held response go, with the receipt.
+func (s *Server) releaseHeld(st *request, code int, tx string, d Decision, ms int64) *extprocv3.ProcessingResponse {
 	entry, id := st.entry, paymentID(st.res)
 	st.settled = true
 	s.release(st, d) // the transfer is on chain: the in-flight amount has done its job

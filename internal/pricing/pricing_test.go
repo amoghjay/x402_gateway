@@ -90,8 +90,10 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
-// One bad route rejects the whole table, and every bad route is named.
-func TestParseRejectsWholeTableAndNamesEveryRoute(t *testing.T) {
+// A bad route is blocked, not dropped: the good routes still load, the bad ones are
+// refused (Blocked), and the error names every one. Before 2026-11-19 one bad route
+// rejected the whole table, so a new filter pod never became ready.
+func TestParseBlocksBadRoutesAndNamesEach(t *testing.T) {
 	var tbl map[string]any
 	_ = json.Unmarshal(example(t), &tbl)
 	routes := tbl["routes"].(map[string]any)
@@ -103,9 +105,78 @@ func TestParseRejectsWholeTableAndNamesEveryRoute(t *testing.T) {
 	bad1["price"], bad2["payTo"] = "-1", "nope"
 	routes["httproute/demo/a"], routes["httproute/demo/b"] = bad1, bad2
 	b, _ := json.Marshal(tbl)
-	_, err := Parse(b, radius.Testnet)
+	p, err := Parse(b, radius.Testnet)
 	if err == nil || !strings.Contains(err.Error(), `"httproute/demo/a"`) || !strings.Contains(err.Error(), `"httproute/demo/b"`) {
 		t.Fatalf("err %v", err)
+	}
+	if p == nil {
+		t.Fatal("no table: the good route should still load")
+	}
+	if _, ok := p.Lookup("httproute/demo/httpbin"); !ok {
+		t.Error("the good route is not priced")
+	}
+	for _, k := range []string{"httproute/demo/a", "httproute/demo/b"} {
+		if _, ok := p.Lookup(k); ok {
+			t.Errorf("%s is priced", k)
+		}
+		if _, ok := p.Blocked(k); !ok {
+			t.Errorf("%s is not blocked", k)
+		}
+	}
+	if got := p.BlockedKeys(); len(got) != 2 {
+		t.Errorf("BlockedKeys = %v", got)
+	}
+}
+
+// Every route-level mistake blocks its route; only a broken document rejects the table.
+func TestRouteMistakesBlockTheRouteOnly(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"typo in a key":     mutate(t, func(r map[string]any) { r["payto"] = r["payTo"] }),
+		"price as a number": mutate(t, func(r map[string]any) { r["price"] = 1000 }),
+		"network not served": mutate(t, func(r map[string]any) {
+			r["network"] = radius.BaseSepolia.Network()
+			r["asset"] = radius.BaseSepolia.Token.Address
+		}),
+		"mainnet not allowed":    mutate(t, func(r map[string]any) { r["network"] = radius.Mainnet.Network() }),
+		"route is not an object": []byte(`{"schemaVersion":1,"routes":{"httproute/demo/httpbin":"free"}}`),
+	} {
+		p, err := Parse(data, radius.Testnet)
+		if err == nil || p == nil {
+			t.Errorf("%s: table %v, err %v; want the table with the route blocked", name, p, err)
+			continue
+		}
+		if _, ok := p.Blocked("httproute/demo/httpbin"); !ok {
+			t.Errorf("%s: route not blocked", name)
+		}
+	}
+	for name, data := range map[string][]byte{
+		"unknown top-level key": []byte(`{"schemaVersion":1,"routes":{},"route":{}}`),
+		"bad blocked key":       []byte(`{"schemaVersion":1,"routes":{},"blocked":{"demo/x":"why"}}`),
+		"blocked not a map":     []byte(`{"schemaVersion":1,"routes":{},"blocked":["httproute/demo/x"]}`),
+		"routes not a map":      []byte(`{"schemaVersion":1,"routes":[]}`),
+	} {
+		if p, err := Parse(data, radius.Testnet); p != nil || err == nil {
+			t.Errorf("%s: table %v, err %v; want the whole table rejected", name, p, err)
+		}
+	}
+}
+
+// The controller lists routes whose policy is invalid; they are blocked even if they
+// also appear priced.
+func TestControllerBlockedRoutes(t *testing.T) {
+	var tbl map[string]any
+	_ = json.Unmarshal(example(t), &tbl)
+	tbl["blocked"] = map[string]any{"httproute/demo/httpbin": "price: not atomic units", "httproute/shop/cart": "network not served"}
+	b, _ := json.Marshal(tbl)
+	p, err := Parse(b, radius.Testnet)
+	if err != nil {
+		t.Fatalf("a table with controller-blocked routes is not an error: %v", err)
+	}
+	if _, ok := p.Lookup("httproute/demo/httpbin"); ok {
+		t.Error("a blocked route is still priced")
+	}
+	if why, ok := p.Blocked("httproute/shop/cart"); !ok || !strings.Contains(why, "network not served") {
+		t.Errorf("Blocked = %q, %v", why, ok)
 	}
 }
 

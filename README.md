@@ -54,41 +54,44 @@ pay it. So far only our own buyer has been tested against it; `radius-cli wallet
 
 ## Why the data plane forces the design
 
-Envoy gives an external filter a fixed budget per message: 200 ms by default, 300 ms
-here. A filter that runs out gets the request failed (504), or, if it fails open,
-**releases the response unpaid**. A facilitator round trip takes 0.3–0.4 s to verify and
-0.6–1.1 s to settle (measured). So the enforcer cannot call out inline. It **verifies
-locally in milliseconds and settles after the response**
+Envoy gives an external filter a fixed budget per message: 200 ms by default. A filter
+that runs out gets the request failed (504), or, if it fails open, **releases the
+response unpaid**. A facilitator takes 0.3–0.4 s to verify and about 0.5–1 s to settle
+(measured). So the filter **verifies locally in milliseconds on the request**, and
+settles **on the response, while Envoy holds it** (`captureMode: Sync`, the default)
 ([design note](docs/design/request-path-budget.md)):
 
 ```
 request_headers   no payment  → 402 + PAYMENT-REQUIRED          (backend never sees it)
                   payment     → verify the signature locally (~0.1 ms),
                                 check the cached balance, RESERVE in Redis
-response          2xx         → release now, enqueue settlement
-                  not 2xx     → drop the reservation             (nobody is charged)
-x402-settler      off-path    → settle through the facilitator   (~1 s)
+response          2xx or 3xx  → hold it: check on chain the payment is unspent,
+                  (not 304)     settle through the facilitator, then
+                                  settled → release, with the transaction
+                                  refused → 402 in its place     (nobody is charged)
+                                  unclear → ask the chain; still unclear → 503
+                  otherwise   → drop the reservation             (nobody is charged)
 ```
 
-The shared Redis reservation closes two flaws that an app-level gateway can't: a
-payment replayed against another replica, and concurrent requests overdrawing one
-balance. The cost of settling after the response is that a payer can cancel the
-authorization or move the funds in the gap, and the seller carries that loss. It is
-capped per wallet but not in total, since wallets are free to create
-([design note](docs/design/request-path-budget.md)).
+Nothing is served unless its transfer is on chain, so a cancelled authorization, a
+moved balance or a replayed payment can cost the seller a backend call, never a
+response. The check on chain before settling is there because a facilitator may answer
+a repeated settle with success. The shared Redis reservation still stops what an
+app-level gateway can't: a payment replayed against another replica, and concurrent
+requests overdrawing one balance. A broken `PaymentPolicy` makes its route answer 503,
+never serve free.
 
-A route that cannot accept that sets `captureMode: Sync`. The filter then settles
-through the facilitator while Envoy holds the backend's response, and releases it only
-once the transfer is on chain; a refused settlement becomes a 402 and an unclear one a
-503, in place of the response. Before it settles, the filter also checks on chain that
-the payment has not been spent already, because a facilitator may answer a repeated
-settle with success. Each paid request waits for one chain read and the facilitator.
-On the cluster, 2026-11-19, on Radius testnet and Base Sepolia: the held response took
-about 0.55 s at the median, a refused settlement and a replay both reached the client as
-a 402, and no drill released a response unpaid. Two of about 75 Radius requests were
-charged and answered 503 when the facilitator took over 2 s; the fix for that is merged
-with these results and not yet rerun
-([results](docs/design/request-path-budget.md)).
+Measured on GKE on 2026-11-19, on Radius testnet and Base Sepolia: the held response
+took about 0.55 s at the median (p99 under 1 s, n=100 at four concurrent buyers);
+refused settlements, replays, a deleted Redis record, a facilitator slow by 3 s or 8 s,
+a hung or unreachable facilitator and a rolling restart mid-settle all ended with
+nobody served unpaid and nobody charged without a response. The one case left: a filter
+pod killed outright mid-settle charges the buyer and returns a 503; a record of those,
+for refunds, is next ([results](docs/design/request-path-budget.md)).
+
+`captureMode: Async` is the opt-in fast path: the response goes out at once and the
+`x402-settler` settles about a second later. The payer can cancel or move the funds in
+that gap and the seller carries the loss, capped per wallet but not in total.
 
 ## Architecture
 

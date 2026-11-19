@@ -73,7 +73,14 @@ status, which follows the Gateway API `PolicyStatus` shape so `kubectl get pp` r
 like any policy.
 
 `kubectl delete` → Kubernetes garbage-collects the owned EEP (the route is free again)
-and the controller's full recompute drops the table and grant entries.
+and the controller's full recompute drops the table and grant entries. Deleting the
+policy is how a seller makes a route free, so that is intended.
+
+An **invalid** policy is different: the route is still meant to be paid for. The
+controller keeps its EEP, lists the route under `blocked` in the price table, and sets
+`Accepted=False` with the reason; the filter answers **503 `policy_invalid`** on that
+route until the policy is fixed. A broken policy is an error the seller sees, never a
+free route. (Before 2026-11-19 the EEP was removed and the route went free.)
 
 Measured on GKE (2026-11-04): apply → first 402 in **0.34–0.39 s**; delete → first 200
 in **≤ 0.13–0.21 s**.
@@ -178,8 +185,10 @@ atomically, and the layout survives a move to Redis Cluster.
   address are the controller's, so a team cannot weaken enforcement from its own
   namespace. The schema (pattern, enum, bounds) refuses mistakes at `kubectl apply`.
 - **The price table is the contract**, validated by one parser on both sides: the
-  controller runs it before writing, the filter before loading. A table that fails is
-  rejected whole and the last good one stays; a typo never makes a priced route free.
+  controller runs it before writing, the filter before loading. A document that cannot
+  be read is rejected whole and the last good one stays. A route that fails validation
+  is blocked (503), not dropped, so a typo never makes a priced route free and one bad
+  route cannot stop the others, or a new filter pod, from loading.
 
 ## The request budget
 

@@ -23,8 +23,9 @@ import (
 // metadata.name field selector, which is also what lets RBAC grant list/watch on that one
 // name (resourceNames) and nothing else.
 //
-// A table that fails to parse, or a deleted ConfigMap, leaves the last good table in
-// place: the controller being down or wrong must not make priced routes free.
+// A table that cannot be read at all, or a deleted ConfigMap, leaves the last good table
+// in place: the controller being down or wrong must not make priced routes free. A table
+// with broken routes is loaded with those routes blocked (Parse).
 //
 // It is built from the core/v1 client and a plain ListWatch, not the clientset and its
 // informer factory: those import every API group's client and informer, which took the
@@ -88,13 +89,18 @@ func (w *Watcher) apply(obj any) {
 		return
 	}
 	p, err := Parse([]byte(data), w.Networks...)
-	if err != nil {
+	if p == nil {
 		log.Error("price table rejected; serving the last good table", "err", err, "loaded", w.Store.Load() != nil)
 		w.done(false)
 		return
 	}
 	w.Store.Set(p)
-	log.Info("price table loaded", "routes", p.Len())
+	if blocked := p.BlockedKeys(); len(blocked) > 0 {
+		// Loaded: the blocked routes answer 503 until their policy is fixed.
+		log.Error("price table loaded with blocked routes; they answer 503", "routes", p.Len(), "blocked", blocked, "err", errText(err))
+	} else {
+		log.Info("price table loaded", "routes", p.Len())
+	}
 	w.done(true)
 }
 
@@ -102,4 +108,11 @@ func (w *Watcher) done(accepted bool) {
 	if w.notify != nil {
 		w.notify(accepted)
 	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
