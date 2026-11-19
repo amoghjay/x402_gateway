@@ -57,14 +57,17 @@ pay it. So far only our own buyer has been tested against it; `radius-cli wallet
 Envoy gives an external filter a fixed budget per message: 200 ms by default. A filter
 that runs out gets the request failed (504), or, if it fails open, **releases the
 response unpaid**. A facilitator takes 0.3–0.4 s to verify and about 0.5–1 s to settle
-(measured). So the filter **verifies locally in milliseconds on the request**, and
+(measured). So the filter **verifies locally in milliseconds on the request**, asks the
+facilitator's `/verify` as the gate standard requires (`-facilitator-verify`, on by
+default), and
 settles **on the response, while Envoy holds it** (`captureMode: Sync`, the default)
 ([design note](docs/design/request-path-budget.md)):
 
 ```
 request_headers   no payment  → 402 + PAYMENT-REQUIRED          (backend never sees it)
                   payment     → verify the signature locally (~0.1 ms),
-                                check the cached balance, RESERVE in Redis
+                                check the cached balance, RESERVE in Redis,
+                                then the facilitator's /verify (~0.3–0.4 s)
 response          2xx or 3xx  → hold it: check on chain the payment is unspent,
                   (not 304)     settle through the facilitator, then
                                   settled → release, with the transaction

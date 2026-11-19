@@ -59,6 +59,8 @@ type config struct {
 	facilitatorURL                         string // "" = the network's facilitator
 	deadline, fresh, lastKnown, keepalive  time.Duration
 	settleTimeout                          time.Duration
+	facilitatorVerify                      bool
+	verifyTimeout                          time.Duration
 }
 
 func main() {
@@ -74,6 +76,8 @@ func main() {
 	flag.StringVar(&c.rpcURL, "rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for balance reads (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
 	flag.StringVar(&c.facilitatorURL, "facilitator-url", os.Getenv("X402_FACILITATOR_URL"), "x402 facilitator base URL for Sync routes (default $X402_FACILITATOR_URL, then the network's); with several networks, name=URL pairs separated by commas, e.g. testnet=http://f:8080")
 	flag.DurationVar(&c.settleTimeout, "settle-timeout", extproc.DefaultSettleTimeout, "Sync routes: how long a response is held for the facilitator's /settle; with the chain reads it must stay under the route's Envoy messageTimeout")
+	flag.BoolVar(&c.facilitatorVerify, "facilitator-verify", true, "Sync routes: also ask the facilitator's /verify on the request (the gate standard requires it; one facilitator round trip before the backend is called)")
+	flag.DurationVar(&c.verifyTimeout, "verify-timeout", extproc.DefaultVerifyTimeout, "Sync routes: limit for the facilitator's /verify on the request")
 	flag.DurationVar(&c.deadline, "deadline", extproc.DefaultDeadline, "request-phase budget; past it a valid payer gets 503 + Retry-After, not a charge")
 	flag.DurationVar(&c.fresh, "balance-fresh", balance.DefaultFresh, "a cached balance younger than this is served as is")
 	flag.DurationVar(&c.lastKnown, "balance-last-known", balance.DefaultLastKnown, "a cached balance up to this old is served when a refresh overruns the deadline")
@@ -115,6 +119,9 @@ func run(log *slog.Logger, c config) error {
 	facURLs, err := facilitatorURLs(c.facilitatorURL, nets)
 	if err != nil {
 		return err
+	}
+	if c.verifyTimeout+c.deadline >= pricing.SyncMessageTimeout {
+		return fmt.Errorf("-verify-timeout %s plus -deadline %s must be under Envoy's messageTimeout for Sync routes (%s)", c.verifyTimeout, c.deadline, pricing.SyncMessageTimeout)
 	}
 	if c.settleTimeout >= pricing.SyncMessageTimeout {
 		return fmt.Errorf("-settle-timeout %s must be under Envoy's messageTimeout for Sync routes (%s)", c.settleTimeout, pricing.SyncMessageTimeout)
@@ -177,6 +184,7 @@ func run(log *slog.Logger, c config) error {
 			Reserve:      &reserve.Store{Redis: redisClient},
 			Deadline:     c.deadline,
 			Facilitators: facs, RPCs: rpcs, SettleTimeout: c.settleTimeout,
+			FacilitatorVerify: c.facilitatorVerify, VerifyTimeout: c.verifyTimeout,
 		})
 	} else {
 		log.Warn("payments are off (-redis is empty): every priced request gets the 402")
@@ -192,7 +200,7 @@ func run(log *slog.Logger, c config) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(lis) }()
 	log.Info("listening", "addr", lis.Addr().String(), "prices", c.namespace+"/"+c.configMap, "networks", c.networks,
-		"redis", c.redis, "deadline", c.deadline.String())
+		"redis", c.redis, "deadline", c.deadline.String(), "facilitatorVerify", c.facilitatorVerify)
 	if c.delay > 0 {
 		log.Warn("drill mode: every request is held before it is answered", "delay", c.delay.String())
 	}

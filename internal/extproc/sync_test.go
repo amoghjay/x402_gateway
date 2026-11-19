@@ -2,6 +2,7 @@ package extproc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,10 @@ type fakeFacilitator struct {
 	calls  atomic.Int32
 	last   atomic.Value // the last request body, string
 	onCall atomic.Value // func(), run on each /settle before answering
+
+	verifyStatus atomic.Int64 // /verify; 0 = 200
+	verifyBody   atomic.Value // string; unset = {"isValid":true}
+	verifyCalls  atomic.Int32
 }
 
 func (f *fakeFacilitator) answer(status int, body string) {
@@ -57,11 +62,24 @@ func syncPrices(t *testing.T) *pricing.Store {
 	return s
 }
 
-func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitator) {
+func setupSync(t *testing.T, settleTimeout time.Duration, opts ...func(*Payments)) (*paid, *fakeFacilitator) {
 	t.Helper()
 	f := &fakeFacilitator{}
 	f.answer(200, `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/verify" {
+			f.verifyCalls.Add(1)
+			code, body := int(f.verifyStatus.Load()), `{"isValid":true}`
+			if code == 0 {
+				code = 200
+			}
+			if b, ok := f.verifyBody.Load().(string); ok {
+				body = b
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+			return
+		}
 		if r.URL.Path != "/settle" {
 			http.NotFound(w, r)
 			return
@@ -83,6 +101,9 @@ func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitat
 		pay.RPCs = map[string]*radius.RPC{radius.Testnet.Network(): node}
 		pay.SettleTimeout = settleTimeout
 		pay.ConfirmWait = 300 * time.Millisecond // the default would add 2.5 s to every unclear case
+		for _, o := range opts {
+			o(pay)
+		}
 	})
 	return p, f
 }
@@ -532,6 +553,65 @@ func TestSyncCancelledAuthorizationIsNeverServed(t *testing.T) {
 		ir := p.respond(stream, "200").GetImmediateResponse()
 		if ir.GetStatus().GetCode() != 402 {
 			t.Errorf("response phase = %v, want 402", ir.GetStatus().GetCode())
+		}
+	})
+}
+
+// With FacilitatorVerify, a Sync route's payment is also checked by the facilitator's
+// /verify on the request, before the backend is called.
+func TestSyncFacilitatorVerify(t *testing.T) {
+	on := func(p *Payments) { p.FacilitatorVerify = true }
+	t.Run("valid: forwarded and settled", func(t *testing.T) {
+		p, f := setupSync(t, 0, on)
+		stream, resp := p.request(p.payment())
+		if resp.GetImmediateResponse() != nil {
+			t.Fatalf("request phase refused: %v", resp)
+		}
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir != nil {
+			t.Fatalf("response phase = %v", ir)
+		}
+		if f.verifyCalls.Load() != 1 || f.calls.Load() != 1 {
+			t.Errorf("/verify calls %d, /settle calls %d; want 1 and 1", f.verifyCalls.Load(), f.calls.Load())
+		}
+	})
+	for name, c := range map[string]struct {
+		status  int64
+		body    string
+		code    int32
+		details string
+		reason  string
+	}{
+		"says no":           {200, `{"isValid":false,"invalidReason":"invalid_exact_evm_insufficient_balance"}`, 402, "x402_payment_invalid", "invalid_exact_evm_insufficient_balance"},
+		"says no with 400":  {400, `{"isValid":false,"invalidReason":"invalid_exact_evm_payload_signature"}`, 402, "x402_payment_invalid", "invalid_exact_evm_payload_signature"},
+		"5xx":               {503, `down`, 503, "x402_dependency_unavailable", ""},
+		"a different payer": {200, `{"isValid":true,"payer":"0x0000000000000000000000000000000000000001"}`, 503, "x402_dependency_unavailable", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, f := setupSync(t, 0, on)
+			f.verifyStatus.Store(c.status)
+			f.verifyBody.Store(c.body)
+			_, resp := p.request(p.payment())
+			ir := resp.GetImmediateResponse()
+			if int32(ir.GetStatus().GetCode()) != c.code || ir.GetDetails() != c.details {
+				t.Fatalf("request phase = %v %q, want %d %q", ir.GetStatus().GetCode(), ir.GetDetails(), c.code, c.details)
+			}
+			if c.reason != "" && !strings.Contains(string(ir.GetBody())+fmt.Sprint(ir.GetHeaders()), c.reason) {
+				t.Errorf("402 does not carry the facilitator's reason %q", c.reason)
+			}
+			if p.inflight() != "" {
+				t.Errorf("in-flight = %q, want released", p.inflight())
+			}
+			if f.calls.Load() != 0 {
+				t.Errorf("/settle called %d times", f.calls.Load())
+			}
+		})
+	}
+	t.Run("off: not called", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.respond(stream, "200")
+		if f.verifyCalls.Load() != 0 {
+			t.Errorf("/verify called %d times with FacilitatorVerify off", f.verifyCalls.Load())
 		}
 	})
 }

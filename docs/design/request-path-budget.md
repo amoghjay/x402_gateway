@@ -102,7 +102,7 @@ from.
 | `captureMode` | `messageTimeout` | Filter deadline | Why |
 |---|---|---|---|
 | `Async` (default) | 300 ms | 150 ms | the worst cache miss measured (225 ms, laptop) fits Envoy's timeout; the filter deadline is re-set from the in-cluster baseline at Gate Zero |
-| `Sync` (opt-in) | 10 s | request 250 ms; held response: chain read (0.5 s, asked twice) + 5.5 s for `/settle` + up to 2.5 s asking the chain after an unclear settle; answered at once if `/settle` never reached the facilitator | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
+| `Sync` (default) | 10 s | request 250 ms + the facilitator's `/verify` (up to 2 s, ~0.3–0.4 s measured); held response: chain read (0.5 s, asked twice) + 5.5 s for `/settle` + up to 2.5 s asking the chain after an unclear settle; answered at once if `/settle` never reached the facilitator | measured settle max was 1.13 s (laptop, n=10); to be re-measured from GKE. Envoy Gateway has one `messageTimeout` for both phases |
 
 `failOpen` is hard-coded to `false` and is not a PaymentPolicy field.
 
