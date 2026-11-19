@@ -27,6 +27,7 @@ type fakeFacilitator struct {
 	delay  atomic.Int64
 	calls  atomic.Int32
 	last   atomic.Value // the last request body, string
+	onCall atomic.Value // func(), run on each /settle before answering
 }
 
 func (f *fakeFacilitator) answer(status int, body string) {
@@ -69,6 +70,9 @@ func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitat
 		var raw json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&raw)
 		f.last.Store(string(raw))
+		if fn, ok := f.onCall.Load().(func()); ok {
+			fn()
+		}
 		time.Sleep(time.Duration(f.delay.Load()))
 		w.WriteHeader(int(f.status.Load()))
 		_, _ = w.Write([]byte(f.body.Load().(string)))
@@ -210,7 +214,7 @@ func TestSyncUnknownSettleWithholdsTheResponse(t *testing.T) {
 func TestSyncUnclearSettleButUsedOnChainReleases(t *testing.T) {
 	p, f := setupSync(t, 0)
 	f.answer(500, `oops`)
-	p.node.used.Store(true)
+	f.onCall.Store(func() { p.node.used.Store(true) }) // the transfer lands; only the answer is lost
 	stream, _ := p.request(p.payment())
 	resp := p.respond(stream, "200")
 	set, _ := mutations(t, resp.GetResponseHeaders().GetResponse())
@@ -254,23 +258,86 @@ func TestSyncNon2xxNeverSettles(t *testing.T) {
 	p.decided(ReleasedNon2xx)
 }
 
-// A Sync route with no facilitator is refused before the backend is called.
-func TestSyncWithoutAFacilitatorFailsClosed(t *testing.T) {
-	p := setupWith(t, 5000, 0, syncPrices(t), nil)
-	_, resp := p.request(p.payment())
-	ir := resp.GetImmediateResponse()
-	if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
-		t.Fatalf("request phase = %v, want a 503", resp)
+// A Sync route with no facilitator, or no RPC, is refused before the backend is called.
+func TestSyncWithoutAFacilitatorOrRPCFailsClosed(t *testing.T) {
+	fac := map[string]*facilitator.Client{radius.Testnet.Network(): {URL: "http://127.0.0.1:1"}}
+	for name, mod := range map[string]func(*Payments, *radius.RPC){
+		"neither": nil,
+		"no RPC":  func(pay *Payments, _ *radius.RPC) { pay.Facilitators = fac },
+		"no facilitator": func(pay *Payments, node *radius.RPC) {
+			pay.RPCs = map[string]*radius.RPC{radius.Testnet.Network(): node}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := setupWith(t, 5000, 0, syncPrices(t), mod)
+			_, resp := p.request(p.payment())
+			ir := resp.GetImmediateResponse()
+			if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
+				t.Fatalf("request phase = %v, want a 503", resp)
+			}
+			if p.inflight() != "" {
+				t.Errorf("in-flight = %q, want nothing reserved", p.inflight())
+			}
+		})
+	}
+}
+
+// A facilitator may answer /settle with success for a payment that already settled
+// (Radius testnet does). So a payment whose nonce is used on chain before this request
+// settles is a replay: it gets a 402 and /settle is never called. This is the case
+// where Redis lost the nonce claim; with the claim, it is refused at the door.
+func TestSyncReplayOfASpentPaymentIsWithheld(t *testing.T) {
+	p, f := setupSync(t, 0) // the facilitator would say success
+	p.node.used.Store(true)
+	stream, _ := p.request(p.payment())
+	ir := p.respond(stream, "200").GetImmediateResponse()
+	if ir.GetStatus().GetCode() != 402 || ir.GetDetails() != "x402_replay" {
+		t.Fatalf("response phase = %v %q, want a 402 for the replay", ir.GetStatus().GetCode(), ir.GetDetails())
+	}
+	receipt, err := x402.DecodeSettleResponse(immediateHeaders(t, ir)["payment-response"])
+	if err != nil || receipt.Success || receipt.ErrorReason != ReasonReplay {
+		t.Errorf("receipt = %+v, %v", receipt, err)
+	}
+	if f.calls.Load() != 0 {
+		t.Errorf("/settle called %d times for a spent payment", f.calls.Load())
 	}
 	if p.inflight() != "" {
-		t.Errorf("in-flight = %q, want nothing reserved", p.inflight())
+		t.Errorf("in-flight = %q, want released", p.inflight())
+	}
+}
+
+// Without the chain read a replay cannot be ruled out, so the response is withheld and
+// nothing is settled.
+func TestSyncChainReadFailureBeforeSettleFailsClosed(t *testing.T) {
+	p, f := setupSync(t, 0)
+	p.node.down.Store(true)
+	stream, _ := p.request(p.payment())
+	ir := p.respond(stream, "200").GetImmediateResponse()
+	if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
+		t.Fatalf("response phase = %v %q, want a 503", ir.GetStatus().GetCode(), ir.GetDetails())
+	}
+	if f.calls.Load() != 0 || p.inflight() != "" {
+		t.Errorf("/settle calls = %d, in-flight = %q; want no settle and the reservation released", f.calls.Load(), p.inflight())
+	}
+}
+
+// A definite refusal is believed even if the nonce turns out used: another copy of the
+// payment settled in the meantime, and that copy's request is the one that paid.
+func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {
+	p, f := setupSync(t, 0)
+	f.answer(400, `{"success":false,"errorReason":"invalid_transaction_state","transaction":"","network":"eip155:72344"}`)
+	f.onCall.Store(func() { p.node.used.Store(true) })
+	stream, _ := p.request(p.payment())
+	ir := p.respond(stream, "200").GetImmediateResponse()
+	if ir.GetStatus().GetCode() != 402 || ir.GetDetails() != "x402_settle_refused" {
+		t.Fatalf("response phase = %v %q, want the 402", ir.GetStatus().GetCode(), ir.GetDetails())
 	}
 }
 
 // The held response has to be answered before Envoy's per-message timeout for a Sync
 // route, in the worst case: a settle that runs to its limit, then the chain read.
 func TestSyncBudgetFitsUnderEnvoysTimeout(t *testing.T) {
-	if worst := DefaultSettleTimeout + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
-		t.Errorf("settle %s + chain check %s = %s, not under messageTimeout %s", DefaultSettleTimeout, chainCheckTimeout, worst, pricing.SyncMessageTimeout)
+	if worst := chainCheckTimeout + DefaultSettleTimeout + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
+		t.Errorf("chain read %s + settle %s + chain read = %s, not under messageTimeout %s", chainCheckTimeout, DefaultSettleTimeout, worst, pricing.SyncMessageTimeout)
 	}
 }

@@ -80,8 +80,12 @@ capped per wallet but not in total, since wallets are free to create
 A route that cannot accept that sets `captureMode: Sync`. The filter then settles
 through the facilitator while Envoy holds the backend's response, and releases it only
 once the transfer is on chain; a refused settlement becomes a 402 and an unclear one a
-503, in place of the response. Nothing is served unpaid, and each paid request waits
-for the facilitator. Sync is built and unit-tested; it has not yet run on the cluster.
+503, in place of the response. Before it settles, the filter also checks on chain that
+the payment has not been spent already, because a facilitator may answer a repeated
+settle with success. Each paid request waits for one chain read and the facilitator.
+First run on the cluster, 2026-11-19: paid requests settled in 0.6 to 1.2 s and a
+refused settlement reached the client as a 402
+([results](docs/design/request-path-budget.md)); the failure drills are still to run.
 
 ## Architecture
 

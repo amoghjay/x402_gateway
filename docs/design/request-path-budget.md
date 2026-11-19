@@ -133,10 +133,34 @@ only costs duplicate upstream work, because its settlement fails before the body
 settle-after, that replay would be a free response, so the nonce must be claimed somewhere
 every replica sees.
 
-Both models stay available: settle-before-release is `captureMode: Sync` (built 2026-11-20,
+Both models stay available: settle-before-release is `captureMode: Sync` (built 2026-11-19,
 unit-tested, not yet run on the cluster). The filter calls `/settle` on the response phase
 while Envoy holds the backend's 2xx: settled releases it, a refusal becomes a 402 and an
 unclear outcome a 503 in its place. Phase 6 measures the two side by side.
+
+### Sync capture on GKE, first run (2026-11-19)
+
+Images `e25dec140cb3`, Envoy Gateway v1.9.2, route `/anything/sync` on Radius testnet,
+facilitator `facilitator.testnet.radiustech.xyz`, one buyer from a laptop. These are
+functional checks with a handful of requests, not a latency baseline.
+
+| Check | Result |
+|---|---|
+| Paid request | 200, `PAYMENT-RESPONSE` names the transaction; 4 of 4 |
+| `/settle` as timed by the filter, from the pod | 583, 684, 922, 1157 ms (n=4) |
+| Settlement refused after the backend answered 200 | Client got **402** with the facilitator's reason and none of the backend's body. Envoy Gateway does replace a held response with an `ImmediateResponse` on the response-headers phase |
+| How the refusal was forced | A wallet holding exactly one price paid twice within the cached-balance window; the second passed the door and failed at `/settle` ("Insufficient balance: has 0, needs 1000"), 195 ms |
+| A payment already settled outside the gate, sent through it | **Released.** The facilitator answered `/settle` with success and the old transaction in 88 ms |
+
+The last row is a finding about the facilitator, and it changes the design. The gate
+standard assumes a facilitator lets at most one settle of a payment succeed. Radius
+testnet's answered a second `/settle` of the same payment with success. So a successful
+`/settle` does not prove that this request paid, and the Redis nonce claim was the only
+thing between a replay and a free response. The filter now reads `authorizationState`
+before it settles: a nonce already used on chain is a replay and gets a 402 without a
+`/settle` call; if the read fails, the response is withheld with a 503. The Redis claim
+is still the first guard, and the only one against two copies arriving at once.
+Open question for the Radius facilitator team: is the repeated success intended?
 
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or

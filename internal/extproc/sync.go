@@ -26,18 +26,26 @@ import (
 //	unknown (timeout, 5xx,       → 503 in place of the response: the payment may or may
 //	  no answer)                   not have gone through, so the response is withheld
 //
-// This is what makes the chain the replay guard. An EIP-3009 nonce transfers once, and a
-// response is released only against a transfer, so a lost Redis write, a stale cached
-// balance, a cancelled authorization or an emptied wallet can cost the seller one
-// backend call, never a response. Redis only saves those wasted calls.
+// So a stale cached balance, a cancelled authorization or an emptied wallet can cost the
+// seller one backend call, never a response.
 //
-// Budget: the settle call, one retry gap if the facilitator's wallet pool is busy, and
-// one chain read must all fit under Envoy's per-message timeout for a Sync route
-// (pricing.SyncMessageTimeout). Past that Envoy answers 504 itself and closes the
-// stream, and the outcome is logged as unknown.
+// Replay needs one more step. A facilitator may answer /settle for a payment that has
+// already settled with success and the old transaction (Radius testnet does: seen on
+// 2026-11-19, a payment settled outside the gate and then sent through it was released).
+// So a successful /settle does not prove this request paid. The filter therefore reads
+// authorizationState first: a nonce already used on chain is a replay and gets a 402
+// without calling /settle. The Redis nonce claim at the door is still the first guard,
+// and the only one against two copies arriving at the same moment; this read covers the
+// case where Redis lost the claim (a restart, a failover, an eviction). If the read
+// fails the response is withheld with a 503: without it a replay cannot be ruled out.
+//
+// Budget: the chain read, the settle call (with a retry gap if the facilitator's wallet
+// pool is busy), and a second chain read after an unclear settle must all fit under
+// Envoy's per-message timeout for a Sync route (pricing.SyncMessageTimeout). Past that
+// Envoy answers 504 itself and closes the stream, and the outcome is logged as unknown.
 const (
 	DefaultSettleTimeout = 3 * time.Second
-	chainCheckTimeout    = time.Second
+	chainCheckTimeout    = 500 * time.Millisecond
 	// walletRetry is the gap before asking again when the facilitator has no wallet free
 	// (its documented answer is "retry in 1-2 s"; the settle budget bounds the retries).
 	walletRetry = 500 * time.Millisecond
@@ -52,6 +60,17 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	fac := s.pay.Facilitators[entry.Network.Network()] // not nil: accept refused the request otherwise
 	t0 := time.Now()
 
+	// Already used on chain: this signature paid for something once, somewhere, and is
+	// not paying for this response.
+	switch used, cerr := s.usedOnChain(ctx, st); {
+	case cerr != nil:
+		s.release(st, DependencyUnavailable)
+		st.log.Error("could not read authorizationState before settling: response withheld, not charged", "decision", DependencyUnavailable, "paymentId", id, "err", cerr)
+		return retryLater(DependencyUnavailable)
+	case used:
+		return s.withhold(st, ReasonReplay, Replay, nil, time.Since(t0).Milliseconds())
+	}
+
 	sctx, cancel := context.WithTimeout(ctx, s.pay.settleTimeout())
 	resp, err := fac.Settle(sctx, st.pp, entry.Requirements)
 	for noWalletFree(err) && wait(sctx, walletRetry) == nil {
@@ -63,17 +82,18 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 		return s.release2xx(st, code, resp.Transaction, Settled, ms)
 	}
 
-	// A failure of any kind: ask the chain before believing it. A used nonce means the
-	// transfer happened (this attempt's answer was lost, or an earlier attempt's was).
-	// The read runs on its own clock: if Envoy has already given up on the stream, the
-	// log should still say which way it went.
-	refused, reason := refusal(resp, err)
+	// A definite no is believed as it is. (If the nonce is used by now, another copy of
+	// this payment settled in the meantime; that copy's request is the one that paid.)
+	if refused, reason := refusal(resp, err); refused {
+		return s.withhold(st, reason, SettleRefused, err, ms)
+	}
+	// No clear answer: ask the chain. The nonce was unused a moment ago, so if it is used
+	// now, this settle went through and only its answer was lost. The read runs on its
+	// own clock: if Envoy has already given up on the stream, the log should still say
+	// which way it went.
 	used, cerr := s.usedOnChain(ctx, st)
-	switch {
-	case cerr == nil && used:
+	if cerr == nil && used {
 		return s.release2xx(st, code, resp.Transaction, SettledOnChain, ms)
-	case refused:
-		return s.withholdRefused(st, reason, err, ms)
 	}
 	// Unknown. The reservation is not released (the money may have moved; the in-flight
 	// TTL clears it) and nothing retries the settle: a later success would charge for a
@@ -110,14 +130,15 @@ func (s *Server) release2xx(st *request, code int, tx string, d Decision, ms int
 	return continueResponse(&extprocv3.HeaderMutation{SetHeaders: setHeaders(set...)})
 }
 
-// withholdRefused answers 402 in place of the backend's response: the settlement was
-// refused for good, so nothing was charged and nothing is given away. The 402 carries
-// the reason and the terms, like a payment refused at the door; the buyer signs again.
-func (s *Server) withholdRefused(st *request, reason string, cause error, ms int64) *extprocv3.ProcessingResponse {
+// withhold answers 402 in place of the backend's response: the settlement was refused
+// for good, or the payment was already spent, so this request charged nothing and is
+// given nothing. The 402 carries the reason and the terms, like a payment refused at
+// the door; the buyer signs again.
+func (s *Server) withhold(st *request, reason string, d Decision, cause error, ms int64) *extprocv3.ProcessingResponse {
 	if reason == "" {
 		reason = x402.ReasonUnexpectedSettle
 	}
-	s.release(st, SettleRefused)
+	s.release(st, d)
 	pw := st.pw
 	pw.Refused = reason
 	resp, err := paywall.Render(st.entry, pw)
@@ -131,9 +152,9 @@ func (s *Server) withholdRefused(st *request, reason string, cause error, ms int
 	if err == nil {
 		resp.Headers.Set(x402.HeaderPaymentResponse, receipt)
 	}
-	st.log.Warn("settlement refused: response withheld", "decision", SettleRefused, "paymentId", paymentID(st.res),
+	st.log.Warn("not paid by this request: response withheld", "decision", d, "paymentId", paymentID(st.res),
 		"reason", reason, "settleErr", errText(cause), "ms", ms)
-	return immediate(resp.Status, resp.Headers, resp.Body, SettleRefused)
+	return immediate(resp.Status, resp.Headers, resp.Body, d)
 }
 
 // refusal reports whether a failed settle is a definite no, and the reason given. A 4xx

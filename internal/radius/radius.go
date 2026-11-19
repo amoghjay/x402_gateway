@@ -127,7 +127,7 @@ var Mainnet = Profile{
 }
 
 // BaseSepolia is Base's testnet, priced in Circle's test USDC, settled through the
-// x402 Foundation's public test facilitator (no account). Checked live on 2026-11-20:
+// x402 Foundation's public test facilitator (no account). Checked live on 2026-11-19:
 // eth_chainId is 84532; the token's name() is "USDC", version() "2", decimals() 6; the
 // facilitator's /supported lists exact on eip155:84532 for x402 v2. The public RPC is
 // rate-limited: fine for drills, not for load.
