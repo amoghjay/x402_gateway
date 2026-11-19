@@ -1,0 +1,53 @@
+# Drill only: a proxy in front of the Radius testnet facilitator, for the drills that need
+# /settle to be slow (the >2 s case, a filter killed mid-settle). Never leave it running.
+#
+# Setup (from the repo root):
+#   kubectl -n x402-system create configmap fac-shim --from-file=tools/drills/fac-shim/shim.py
+#   kubectl apply -f tools/drills/fac-shim/shim.yaml
+#   kubectl -n x402-system patch deploy x402-filter --type=json -p='[{"op":"add",
+#     "path":"/spec/template/spec/containers/0/args/-",
+#     "value":"-facilitator-url=testnet=http://fac-shim.x402-system.svc:8080"}]'
+#   kubectl -n x402-system rollout status deploy/x402-filter
+#
+# Modes (the filter only calls /settle; base-sepolia keeps its own facilitator):
+#   kubectl -n x402-system exec fac-shim -- wget -qO- 'localhost:8080/_mode?m=delay&d=3'
+#   m=forward | m=delay&d=SECONDS (the transfer lands, the answer is late) | m=hang
+#   kubectl -n x402-system logs -f fac-shim     # what reached it, when it answered
+#
+# Teardown: `kubectl apply` does not remove an arg added by a patch, so remove it:
+#   kubectl -n x402-system patch deploy x402-filter --type=json -p='[{"op":"remove",
+#     "path":"/spec/template/spec/containers/0/args/3"}]'   # check the index first
+#   kubectl diff -f deploy/k8s/x402-system/20-filter.yaml   # empty = back to the repo
+#   kubectl delete -f tools/drills/fac-shim/shim.yaml
+#   kubectl -n x402-system delete configmap fac-shim
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fac-shim
+  namespace: x402-system
+  labels: {app: fac-shim}
+spec:
+  containers:
+    - name: shim
+      image: python:3.12.7-alpine
+      command: ["python", "-u", "/shim/shim.py"]
+      env:
+        - name: UPSTREAM
+          value: https://facilitator.testnet.radiustech.xyz
+      ports: [{containerPort: 8080}]
+      volumeMounts: [{name: shim, mountPath: /shim}]
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+  volumes:
+    - name: shim
+      configMap: {name: fac-shim}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fac-shim
+  namespace: x402-system
+spec:
+  selector: {app: fac-shim}
+  ports: [{port: 8080, targetPort: 8080}]
