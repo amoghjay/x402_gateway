@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -71,7 +72,7 @@ func main() {
 	flag.StringVar(&c.networks, "networks", "testnet", "comma-separated networks routes may charge on (testnet, mainnet)")
 	flag.StringVar(&c.redis, "redis", "", "Redis address for the replay guard, in-flight sums, balance cache and settle stream; empty = payments off, every priced request gets the 402")
 	flag.StringVar(&c.rpcURL, "rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for balance reads (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
-	flag.StringVar(&c.facilitatorURL, "facilitator-url", os.Getenv("X402_FACILITATOR_URL"), "x402 facilitator base URL for Sync routes (default $X402_FACILITATOR_URL, then the network's)")
+	flag.StringVar(&c.facilitatorURL, "facilitator-url", os.Getenv("X402_FACILITATOR_URL"), "x402 facilitator base URL for Sync routes (default $X402_FACILITATOR_URL, then the network's); with several networks, name=URL pairs separated by commas, e.g. testnet=http://f:8080")
 	flag.DurationVar(&c.settleTimeout, "settle-timeout", extproc.DefaultSettleTimeout, "Sync routes: how long a response is held for the facilitator's /settle; with the chain reads it must stay under the route's Envoy messageTimeout")
 	flag.DurationVar(&c.deadline, "deadline", extproc.DefaultDeadline, "request-phase budget; past it a valid payer gets 503 + Retry-After, not a charge")
 	flag.DurationVar(&c.fresh, "balance-fresh", balance.DefaultFresh, "a cached balance younger than this is served as is")
@@ -108,8 +109,12 @@ func run(log *slog.Logger, c config) error {
 	if c.namespace == "" {
 		return fmt.Errorf("no namespace for the price table: set -prices-namespace or POD_NAMESPACE")
 	}
-	if (c.rpcURL != "" || c.facilitatorURL != "") && len(nets) != 1 {
-		return fmt.Errorf("-rpc-url and -facilitator-url name one endpoint, but %d networks are configured", len(nets))
+	if c.rpcURL != "" && len(nets) != 1 {
+		return fmt.Errorf("-rpc-url names one endpoint, but %d networks are configured", len(nets))
+	}
+	facURLs, err := facilitatorURLs(c.facilitatorURL, nets)
+	if err != nil {
+		return err
 	}
 	if c.settleTimeout >= pricing.SyncMessageTimeout {
 		return fmt.Errorf("-settle-timeout %s must be under Envoy's messageTimeout for Sync routes (%s)", c.settleTimeout, pricing.SyncMessageTimeout)
@@ -160,8 +165,9 @@ func run(log *slog.Logger, c config) error {
 				Fresh: c.fresh, LastKnown: c.lastKnown,
 			}
 			fu := p.Facilitator
-			if c.facilitatorURL != "" {
-				fu = c.facilitatorURL
+			if u, ok := facURLs[p.Name]; ok {
+				fu = u
+				log.Warn("facilitator overridden", "network", p.Name, "url", u)
 			}
 			facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: facilitatorHTTP}
 			rpcs[p.Network()] = rpc
@@ -251,4 +257,37 @@ func readiness(ctx context.Context, log *slog.Logger, hs *health.Server, prices 
 			check()
 		}
 	}
+}
+
+// facilitatorURLs reads -facilitator-url: one bare URL when one network is configured,
+// or name=URL pairs that override only the networks they name (a drill points Radius
+// testnet at a slow proxy while Base Sepolia keeps its own facilitator). A name that is
+// not a configured network is an error, so a typo cannot leave the default in place.
+func facilitatorURLs(v string, nets []radius.Profile) (map[string]string, error) {
+	out := map[string]string{}
+	if v == "" {
+		return out, nil
+	}
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		name, u, pair := strings.Cut(part, "=")
+		if !pair || strings.Contains(name, "/") || strings.Contains(name, ":") { // a bare URL (it may hold a '=' in its query)
+			if len(nets) != 1 || strings.Contains(v, ",") {
+				return nil, fmt.Errorf("-facilitator-url: a bare URL needs exactly one network (%d configured); use name=URL pairs", len(nets))
+			}
+			out[nets[0].Name] = part
+			continue
+		}
+		if !slices.ContainsFunc(nets, func(p radius.Profile) bool { return p.Name == name }) {
+			return nil, fmt.Errorf("-facilitator-url: %q is not one of the configured networks", name)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("-facilitator-url: %q is given twice", name)
+		}
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return nil, fmt.Errorf("-facilitator-url: %s=%q is not an http(s) URL", name, u)
+		}
+		out[name] = u
+	}
+	return out, nil
 }
