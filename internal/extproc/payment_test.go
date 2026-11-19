@@ -34,8 +34,8 @@ type node struct {
 	balance atomic.Int64
 	delay   atomic.Int64
 	calls   atomic.Int32
-	used    atomic.Bool // what authorizationState answers
-	down    atomic.Bool // authorizationState fails (balanceOf still answers)
+	used    atomic.Bool  // what authorizationState answers
+	down    atomic.Bool  // authorizationState fails (balanceOf still answers)
 	stall   atomic.Int64 // the next authorizationState read waits this long (once)
 }
 
