@@ -85,9 +85,11 @@ Measured on GKE on 2026-11-19, on Radius testnet and Base Sepolia: the held resp
 took about 0.55 s at the median (p99 under 1 s, n=100 at four concurrent buyers);
 refused settlements, replays, a deleted Redis record, a facilitator slow by 3 s or 8 s,
 a hung or unreachable facilitator and a rolling restart mid-settle all ended with
-nobody served unpaid and nobody charged without a response. The one case left: a filter
-pod killed outright mid-settle charges the buyer and returns a 503; a record of those,
-for refunds, is next ([results](docs/design/request-path-budget.md)).
+nobody served unpaid and nobody charged without a response. The one case where a buyer
+can still pay and get a 503 is a filter pod killed outright mid-settle; the filter
+records every payment before settling it, and the settler lists any that were charged
+without a confirmed delivery, for a refund ([results](docs/design/request-path-budget.md),
+[how to list them](deploy/k8s/README.md)).
 
 `captureMode: Async` is the opt-in fast path: the response goes out at once and the
 `x402-settler` settles about a second later. The payer can cancel or move the funds in

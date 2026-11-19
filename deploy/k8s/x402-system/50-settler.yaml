@@ -45,7 +45,9 @@ spec:
           image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-settler:10a1b4cd00d6
           args:
             - -redis=redis.x402-system.svc:6379
-            - -networks=testnet
+            # Every network a route charges on: the settler also resolves the filter's
+            # held Sync payments, and reads the chain of each one.
+            - -networks=testnet,base-sepolia
           env:
             # The consumer name in the group: the pod's, so a claimed job's log says who.
             - name: POD_NAME

@@ -404,6 +404,72 @@ func TestSyncUnreachableFacilitatorAnswersAtOnce(t *testing.T) {
 	p.decided(DependencyUnavailable)
 }
 
+// held counts the payments recorded before /settle and not yet cleared.
+func (p *paid) held() int {
+	p.t.Helper()
+	n, err := p.store.Redis.ZCard(p.t.Context(), reserve.HeldSet).Result()
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	return int(n)
+}
+
+// The record written before /settle: cleared once the response is handed to Envoy or
+// the settle is refused, kept when the outcome is unknown (the settler resolves it).
+func TestSyncHeldRecord(t *testing.T) {
+	t.Run("delivered: cleared", func(t *testing.T) {
+		p, _ := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir != nil {
+			t.Fatalf("not released: %v", ir)
+		}
+		// Cleared just after the server's Send returns, so poll briefly.
+		deadline := time.Now().Add(time.Second)
+		for p.held() != 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if n := p.held(); n != 0 {
+			t.Errorf("%d records left after a delivered response", n)
+		}
+	})
+	t.Run("refused: cleared", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		f.answer(400, `{"success":false,"errorReason":"invalid_exact_evm_insufficient_balance","transaction":"","network":"eip155:72344"}`)
+		stream, _ := p.request(p.payment())
+		p.respond(stream, "200")
+		if n := p.held(); n != 0 {
+			t.Errorf("%d records left after a refusal", n)
+		}
+	})
+	t.Run("unknown: kept with the details", func(t *testing.T) {
+		p, f := setupSync(t, 100*time.Millisecond)
+		f.answer(502, `bad gateway`)
+		stream, _ := p.request(p.payment())
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir.GetStatus().GetCode() != 503 {
+			t.Fatalf("response phase = %v", ir)
+		}
+		hs, err := p.store.HeldBefore(t.Context(), time.Now().Add(time.Minute), 10)
+		if err != nil || len(hs) != 1 {
+			t.Fatalf("held = %+v, %v; want the one payment", hs, err)
+		}
+		if h := hs[0]; h.Payer != p.w.Address().String() || h.Amount != "1000" || h.Route != "httproute/demo/httpbin" || h.Nonce != h.PaymentID || h.ValidBefore == 0 {
+			t.Errorf("record = %+v", h)
+		}
+	})
+	t.Run("record cannot be written: nothing settled", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.redis.SetError("READONLY drill") // Redis refuses writes from here on
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
+			t.Fatalf("response phase = %v %q, want a 503", ir.GetStatus().GetCode(), ir.GetDetails())
+		}
+		if f.calls.Load() != 0 {
+			t.Errorf("/settle called %d times without a record", f.calls.Load())
+		}
+	})
+}
+
 // A definite refusal is believed even if the nonce turns out used: another copy of the
 // payment settled in the meantime, and that copy's request is the one that paid.
 func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {

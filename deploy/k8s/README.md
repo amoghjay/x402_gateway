@@ -53,3 +53,15 @@ itself while Envoy holds the response, and the client gets it, with the transact
 out at once, the settlement job goes on the Redis stream, and the settler calls the
 facilitator's `/settle` and logs the explorer link. A keyed RPC URL, when there is one, goes in
 a Secret as `RADIUS_RPC_URL` on both the filter and the settler.
+
+**Payments charged without a confirmed delivery.** Before a Sync `/settle` the filter
+writes the payment to Redis, and clears it once Envoy has the response or the settle is
+refused. What is left (a 503 `settlement_unknown`, a filter killed mid-settle, a stream
+lost after the transfer) is checked on chain by the settler after 30 s: a used nonce
+goes on the `outcomes` stream as `charged_unconfirmed`, with the payer, route and
+amount, for the seller to refund or redeliver; an authorization that expired unused is
+dropped (nobody was charged). The settler logs each one at error level. To list them:
+
+```
+kubectl -n x402-system exec redis-0 -- redis-cli XRANGE outcomes - +
+```

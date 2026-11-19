@@ -175,6 +175,7 @@ type request struct {
 	released bool
 	settled  bool // Sync: the transfer is on chain
 	unknown  bool // Sync: the settle's outcome is not known; the in-flight amount stays until its TTL
+	held     bool // Sync: the payment's record (reserve.Held) is written and not yet cleared
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -197,10 +198,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		if err := stream.Send(resp); err != nil {
 			if st.settled {
 				// Paid for and not delivered: Envoy (or the client) went away while the
-				// response was held. Rare, and the seller should hear about it.
+				// response was held. The record stays, so the settler lists it for a refund.
 				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", paymentID(st.res), "err", err)
 			}
 			return err
+		}
+		if st.settled {
+			// Envoy has the paid response: delivered, so the record can go. Only now, so
+			// a crash between the settle and this point leaves it for the settler.
+			s.unhold(st)
 		}
 	}
 }
