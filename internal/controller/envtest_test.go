@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -181,6 +182,46 @@ func TestReconciler(t *testing.T) {
 			}
 			return nil
 		})
+	})
+
+	// A policy the schema allows but this controller refuses (a network it was not
+	// started with). Its route must not go free: the EnvoyExtensionPolicy stays and the
+	// table blocks the route, so the filter answers 503. Fixed, it is priced again.
+	t.Run("invalid policy blocks its route", func(t *testing.T) {
+		h.t = t
+		var pp v1alpha1.PaymentPolicy
+		h.must(c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "catalog"}, &pp))
+		pp.Spec.Network = "base-sepolia"
+		h.must(c.Update(ctx, &pp))
+		h.eventually("Invalid", func() error { return h.accepted("shop", "catalog", metav1.ConditionFalse, v1alpha1.ReasonInvalid) })
+		h.eventually("route blocked, not priced", func() error {
+			prices, err := h.prices()
+			if err != nil {
+				return err
+			}
+			if _, priced := prices.Lookup("httproute/shop/catalog"); priced {
+				return errors.New("still priced")
+			}
+			if why, blocked := prices.Blocked("httproute/shop/catalog"); !blocked || !strings.Contains(why, "not one this filter charges on") {
+				return fmt.Errorf("blocked = %v (%q)", blocked, why)
+			}
+			if _, ok := prices.Lookup("httproute/demo/httpbin"); !ok {
+				return errors.New("the other route lost its price")
+			}
+			return nil
+		})
+		if _, err := h.tryGet(eepGVK, "shop", "x402-catalog"); err != nil {
+			t.Errorf("EnvoyExtensionPolicy removed for an invalid policy (the route would go free): %v", err)
+		}
+		if err := h.grant("demo", "shop"); err != nil {
+			t.Error(err)
+		}
+
+		h.must(c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "catalog"}, &pp))
+		pp.Spec.Network = "testnet"
+		h.must(c.Update(ctx, &pp))
+		h.eventually("accepted again", func() error { return h.accepted("shop", "catalog", metav1.ConditionTrue, v1alpha1.ReasonAccepted) })
+		h.eventually("priced again", func() error { return h.table("httproute/demo/httpbin", "httproute/shop/catalog") })
 	})
 
 	t.Run("mirrors Envoy Gateway's verdict", func(t *testing.T) {

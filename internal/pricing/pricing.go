@@ -8,9 +8,12 @@
 //
 // The schema is versioned and complete from the start: every field the later stages read
 // is defined here, so adding verification, reservation or settlement never changes it.
-// A table is accepted whole or not at all. An unknown key, an unknown version or one bad
-// route rejects the table, and the caller keeps serving the last good one; a mistyped
-// field must never turn a priced route into a free one.
+// A broken table document (not JSON, an unknown top-level key, an unknown version) is
+// rejected whole, and the caller keeps serving the last good one. A broken route is not
+// dropped: it is blocked, and the filter refuses it with a 503 until it is fixed. So a
+// mistyped field never turns a priced route into a free one, and one bad route cannot
+// keep every other route (or a new filter pod) from loading. The controller blocks a
+// route the same way when its PaymentPolicy is invalid (Table.Blocked).
 package pricing
 
 import (
@@ -18,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/url"
 	"reflect"
@@ -73,6 +77,9 @@ const (
 type Table struct {
 	SchemaVersion int              `json:"schemaVersion"`
 	Routes        map[string]Route `json:"routes"`
+	// Blocked lists routes whose PaymentPolicy exists but is invalid, with the reason.
+	// The filter answers 503 on them rather than serving them free.
+	Blocked map[string]string `json:"blocked,omitempty"`
 }
 
 // Route is the price of one HTTPRoute. Keys in Table.Routes are "httproute/<ns>/<name>".
@@ -109,6 +116,7 @@ type Entry struct {
 // Prices is a validated, immutable table.
 type Prices struct {
 	entries map[string]*Entry
+	blocked map[string]string // route key → why it is refused
 }
 
 // Sync reports whether the route settles before its response is released.
@@ -123,6 +131,24 @@ func (p *Prices) Lookup(key string) (*Entry, bool) {
 	return e, ok
 }
 
+// Blocked reports whether a route is refused (a broken entry, or a policy the
+// controller found invalid), and why. It is safe on a nil *Prices.
+func (p *Prices) Blocked(key string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	why, ok := p.blocked[key]
+	return why, ok
+}
+
+// BlockedKeys lists the refused routes, sorted.
+func (p *Prices) BlockedKeys() []string {
+	if p == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(p.blocked))
+}
+
 // Len is the number of priced routes.
 func (p *Prices) Len() int {
 	if p == nil {
@@ -132,74 +158,112 @@ func (p *Prices) Len() int {
 }
 
 // Parse decodes and validates a table. networks lists the networks this filter may
-// charge on; a route on any other network rejects the table (mainnet stays out until the
-// Phase 6 gate by not being listed). Every problem is reported, not just the first.
+// charge on; a route on any other network is blocked (mainnet stays out until the Phase
+// 6 gate by not being listed). Every problem is reported, not just the first.
+//
+// When the document itself is unusable the table is nil. When only routes are broken,
+// the table is returned with those routes blocked, together with an error naming each
+// one: a caller that loads tables (the filter) serves it and logs the error; a caller
+// that checks tables (the controller) treats any error as a refusal.
 func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
-	// exactKeys also rejects trailing data after the table (json.Unmarshal does).
-	if err := exactKeys(data); err != nil {
+	// Unmarshal also rejects trailing data after the table.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("pricing: decode: %w", err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var t Table
-	if err := dec.Decode(&t); err != nil {
+	if err := keysOf(top, Table{}, "table"); err != nil {
 		return nil, fmt.Errorf("pricing: decode: %w", err)
 	}
-	if t.SchemaVersion != SchemaVersion {
-		return nil, fmt.Errorf("pricing: schemaVersion %d, this filter reads %d", t.SchemaVersion, SchemaVersion)
+	var version int
+	if err := strictDecode(top["schemaVersion"], &version); err != nil && top["schemaVersion"] != nil {
+		return nil, fmt.Errorf("pricing: decode: schemaVersion: %w", err)
+	}
+	if version != SchemaVersion {
+		return nil, fmt.Errorf("pricing: schemaVersion %d, this filter reads %d", version, SchemaVersion)
+	}
+	var routes map[string]json.RawMessage
+	if raw, ok := top["routes"]; ok {
+		if err := strictDecode(raw, &routes); err != nil {
+			return nil, fmt.Errorf("pricing: decode: routes: %w", err)
+		}
+	}
+	var blocked map[string]string
+	if raw, ok := top["blocked"]; ok {
+		if err := strictDecode(raw, &blocked); err != nil {
+			return nil, fmt.Errorf("pricing: decode: blocked: %w", err)
+		}
 	}
 
-	keys := make([]string, 0, len(t.Routes))
-	for k := range t.Routes {
-		keys = append(keys, k)
+	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}}
+	for k, why := range blocked {
+		if rk, ok := RouteKey(k + "/"); !ok || rk != k {
+			return nil, fmt.Errorf("pricing: blocked route %q: key must be \"httproute/<namespace>/<name>\"", k)
+		}
+		out.blocked[k] = "policy invalid: " + why
 	}
-	slices.Sort(keys)
-
-	out := &Prices{entries: make(map[string]*Entry, len(t.Routes))}
 	var errs []error
-	for _, k := range keys {
-		e, err := validate(k, t.Routes[k], networks)
+	for _, k := range slices.Sorted(maps.Keys(routes)) {
+		if _, ok := out.blocked[k]; ok {
+			continue // listed as blocked as well as priced: blocked wins
+		}
+		e, err := parseRoute(k, routes[k], networks)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("route %q: %w", k, err))
+			err = fmt.Errorf("route %q: %w", k, err)
+			out.blocked[k] = err.Error()
+			errs = append(errs, err)
 			continue
 		}
 		out.entries[k] = e
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("pricing: %w", errors.Join(errs...))
+		return out, fmt.Errorf("pricing: %w", errors.Join(errs...))
 	}
 	return out, nil
 }
 
-// exactKeys refuses any key that is not spelled exactly as a field's json tag.
-// encoding/json matches keys case-insensitively and DisallowUnknownFields does not see
-// case, so "payto" would be read as payTo, and a second spelling could override the first.
-func exactKeys(data []byte) error {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		return err
-	}
-	if err := keysOf(top, Table{}, "table"); err != nil {
-		return err
-	}
-	var routes map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(top["routes"], &routes); err != nil || routes == nil {
-		return nil // not an object of objects: the typed decode reports it
-	}
-	for k, r := range routes {
-		if err := keysOf(r, Route{}, fmt.Sprintf("route %q", k)); err != nil {
-			return err
-		}
-		var help map[string]json.RawMessage
-		if json.Unmarshal(r["help"], &help) == nil && help != nil {
-			if err := keysOf(help, Help{}, fmt.Sprintf("route %q help", k)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+// ValidateRoute is Parse's check of one route: what the controller runs on a policy
+// before it puts the route in the table.
+func ValidateRoute(key string, r Route, networks ...radius.Profile) error {
+	_, err := validate(key, r, networks)
+	return err
 }
 
+// parseRoute decodes one route strictly (exact key spelling, no unknown fields) and
+// validates it.
+func parseRoute(key string, raw json.RawMessage, networks []radius.Profile) (*Entry, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	if err := keysOf(obj, Route{}, "route"); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	var help map[string]json.RawMessage
+	if json.Unmarshal(obj["help"], &help) == nil && help != nil {
+		if err := keysOf(help, Help{}, "help"); err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+	}
+	var r Route
+	if err := strictDecode(raw, &r); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return validate(key, r, networks)
+}
+
+// strictDecode is json.Unmarshal that refuses unknown fields.
+func strictDecode(raw json.RawMessage, v any) error {
+	if raw == nil {
+		return errors.New("missing")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
+// keysOf refuses any key that is not spelled exactly as a field's json tag.
+// encoding/json matches keys case-insensitively and DisallowUnknownFields does not see
+// case, so "payto" would be read as payTo, and a second spelling could override the first.
 func keysOf(obj map[string]json.RawMessage, v any, where string) error {
 	allowed := map[string]bool{}
 	t := reflect.TypeOf(v)

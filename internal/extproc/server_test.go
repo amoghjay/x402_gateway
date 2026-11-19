@@ -50,6 +50,27 @@ func loaded(t *testing.T) *pricing.Store {
 	return s
 }
 
+func exampleTable(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("../pricing/testdata/prices.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// withTable loads a table that may have blocked routes, the way the watcher does.
+func withTable(t *testing.T, data string) *pricing.Store {
+	t.Helper()
+	p, _ := pricing.Parse([]byte(data), radius.Testnet)
+	if p == nil {
+		t.Fatal("table rejected whole")
+	}
+	s := pricing.NewStore()
+	s.Set(p)
+	return s
+}
+
 // dial starts the server on an in-memory listener and opens one stream, as Envoy would
 // for one HTTP request. It returns the stream and everything the server logged.
 func dial(t *testing.T, delay time.Duration, prices *pricing.Store, level slog.Level) (extprocv3.ExternalProcessor_ProcessClient, *logBuf) {
@@ -259,6 +280,9 @@ func TestFailsClosed(t *testing.T) {
 		"route without parts": {loaded(t), "httproute/demo", 500, "x402_no_route_attribute"},
 		"no table yet":        {pricing.NewStore(), priced, 503, "x402_table_not_loaded"},
 		"no table, unpriced":  {pricing.NewStore(), unpriced, 503, "x402_table_not_loaded"},
+		// A broken policy blocks its route: refused, not served free and not paywalled.
+		"policy invalid": {withTable(t, `{"schemaVersion":1,"routes":{},"blocked":{"httproute/demo/httpbin":"price: not atomic units"}}`), priced, 503, "x402_policy_invalid"},
+		"entry on a network this filter does not serve": {withTable(t, strings.Replace(exampleTable(t), "eip155:72344", "eip155:84532", 1)), priced, 503, "x402_policy_invalid"},
 	} {
 		stream, _ := dial(t, 0, c.prices, slog.LevelInfo)
 		ir := roundTrip(t, stream, requestHeaders(c.route)).GetImmediateResponse()

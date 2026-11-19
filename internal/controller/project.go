@@ -89,16 +89,20 @@ func validate(pp *v1alpha1.PaymentPolicy, networks []radius.Profile) error {
 	if err != nil {
 		return err
 	}
-	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, networks)
+	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, nil, networks)
 	return err
 }
 
-// tableJSON is the price table for the accepted routes, validated as the filter would.
-func tableJSON(routes map[string]pricing.Route, networks []radius.Profile) ([]byte, error) {
+// tableJSON is the price table: the accepted routes priced, and the routes whose policy
+// is invalid blocked. Validated as the filter would; any error refuses it.
+func tableJSON(routes map[string]pricing.Route, blocked map[string]string, networks []radius.Profile) ([]byte, error) {
 	if routes == nil {
 		routes = map[string]pricing.Route{} // "routes": {} rather than null
 	}
-	data, err := json.MarshalIndent(pricing.Table{SchemaVersion: pricing.SchemaVersion, Routes: routes}, "", "  ")
+	if len(blocked) == 0 {
+		blocked = nil // omitted: a filter from before blocked routes still reads the table
+	}
+	data, err := json.MarshalIndent(pricing.Table{SchemaVersion: pricing.SchemaVersion, Routes: routes, Blocked: blocked}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

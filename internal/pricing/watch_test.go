@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,10 +109,21 @@ func TestWatcher(t *testing.T) {
 	if _, err := cms.Update(ctx, configMap(name, map[string]string{ConfigMapKey: `{"schemaVersion":1,"routes":{"httproute/demo/httpbin":{"price":"0.001"}}}`}), metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	next(false)
-	if store.Load() != first {
-		t.Fatal("a rejected table replaced the good one")
+	// One bad route: the table loads, and that route is blocked (a 503), not free.
+	next(true)
+	bad := store.Load()
+	if _, priced := bad.Lookup("httproute/demo/httpbin"); priced {
+		t.Fatal("a broken route is still priced")
 	}
+	if why, blocked := bad.Blocked("httproute/demo/httpbin"); !blocked || !strings.Contains(why, "httproute/demo/httpbin") {
+		t.Fatalf("broken route not blocked: %q, %v", why, blocked)
+	}
+
+	if _, err := cms.Update(ctx, configMap(name, map[string]string{ConfigMapKey: good}), metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	next(true)
+	first = store.Load()
 
 	if _, err := cms.Update(ctx, configMap(name, map[string]string{"wrong-key": good}), metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)

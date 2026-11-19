@@ -113,9 +113,7 @@ func (r *Reconciler) reconcilePolicy(ctx context.Context, pp *v1alpha1.PaymentPo
 		return metav1.Condition{Type: string(gatewayv1.PolicyConditionAccepted), Status: status, Reason: string(reason), Message: msg}
 	}
 
-	if err := validate(pp, r.Networks); err != nil {
-		return accepted(metav1.ConditionFalse, v1alpha1.ReasonInvalid, err.Error()), r.removeEEP(ctx, pp)
-	}
+	invalid := validate(pp, r.Networks)
 
 	route := &metav1.PartialObjectMetadata{}
 	route.SetGroupVersionKind(httpRouteGVK)
@@ -123,9 +121,17 @@ func (r *Reconciler) reconcilePolicy(ctx context.Context, pp *v1alpha1.PaymentPo
 		if !apierrors.IsNotFound(err) {
 			return metav1.Condition{}, err
 		}
+		if invalid != nil {
+			return accepted(metav1.ConditionFalse, v1alpha1.ReasonInvalid, invalid.Error()), r.removeEEP(ctx, pp)
+		}
 		msg := fmt.Sprintf("HTTPRoute %s/%s not found", pp.Namespace, pp.Spec.TargetRef.Name)
 		return accepted(metav1.ConditionFalse, v1alpha1.ReasonTargetNotFound, msg), r.removeEEP(ctx, pp)
 	}
+
+	// The route exists, so it stays behind the filter even when the policy is invalid:
+	// removing the EnvoyExtensionPolicy would serve a priced route free. The route is
+	// listed as blocked in the price table instead (project), and answers 503 until the
+	// policy is fixed.
 
 	eep := desiredEEP(pp, r.Filter)
 	if err := controllerutil.SetControllerReference(pp, eep, r.Scheme); err != nil {
@@ -139,6 +145,9 @@ func (r *Reconciler) reconcilePolicy(ctx context.Context, pp *v1alpha1.PaymentPo
 	// no condition yet; its later status change re-enters here through the Owns watch.
 	if err := r.Get(ctx, client.ObjectKeyFromObject(eep), eep); err != nil {
 		return metav1.Condition{}, err
+	}
+	if invalid != nil {
+		return accepted(metav1.ConditionFalse, v1alpha1.ReasonInvalid, invalid.Error()+"; the route answers 503 until this is fixed"), nil
 	}
 	if status, reason, msg, found := eepAccepted(eep); found && status != metav1.ConditionTrue {
 		why := v1alpha1.ReasonInvalid
@@ -203,13 +212,10 @@ func (r *Reconciler) project(ctx context.Context) error {
 		return err
 	}
 	routes := map[string]pricing.Route{}
+	blocked := map[string]string{}
 	namespaces := map[string]bool{}
 	for i := range list.Items {
 		pp := &list.Items[i]
-		rt, err := routeOf(pp)
-		if err != nil || validate(pp, r.Networks) != nil {
-			continue
-		}
 		route := &metav1.PartialObjectMetadata{}
 		route.SetGroupVersionKind(httpRouteGVK)
 		if err := r.Get(ctx, client.ObjectKey{Namespace: pp.Namespace, Name: pp.Spec.TargetRef.Name}, route); err != nil {
@@ -218,11 +224,16 @@ func (r *Reconciler) project(ctx context.Context) error {
 			}
 			return err
 		}
+		namespaces[pp.Namespace] = true // the EnvoyExtensionPolicy is there either way
+		if err := validate(pp, r.Networks); err != nil {
+			blocked[routeKey(pp)] = pp.Name + ": " + err.Error()
+			continue
+		}
+		rt, _ := routeOf(pp) // validate has called it
 		routes[routeKey(pp)] = rt
-		namespaces[pp.Namespace] = true
 	}
 
-	table, err := tableJSON(routes, r.Networks)
+	table, err := tableJSON(routes, blocked, r.Networks)
 	if err != nil {
 		// Each route passed validate on its own, so this cannot happen; if it does, the
 		// last good table stays in place and the error surfaces in the log.
@@ -241,6 +252,6 @@ func (r *Reconciler) project(ctx context.Context) error {
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(grant), client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
 		return fmt.Errorf("apply ReferenceGrant: %w", err)
 	}
-	r.Log.Debug("projected", "routes", len(routes), "namespaces", len(namespaces))
+	r.Log.Debug("projected", "routes", len(routes), "blocked", len(blocked), "namespaces", len(namespaces))
 	return nil
 }

@@ -106,6 +106,7 @@ const (
 	Deadline                 Decision = "deadline"                   // 503 + Retry-After: the balance read overran the filter's deadline
 	DependencyUnavailable    Decision = "dependency_unavailable"     // 503 + Retry-After: Redis or the RPC failed
 	Unpriced                 Decision = "unpriced"                   // continue: the route has no price (a policy being removed)
+	PolicyInvalid            Decision = "policy_invalid"             // 503: the route's policy or price entry is invalid; refused, never served free
 	NoRouteAttribute         Decision = "no_route_attribute"         // 500: the policy does not send xds.route_name
 	TableNotLoaded           Decision = "table_not_loaded"           // 503: no price table yet
 	PaywallError             Decision = "paywall_error"              // 500: the 402 could not be built
@@ -256,6 +257,12 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 	if table == nil {
 		log.Error("no price table loaded", "decision", TableNotLoaded)
 		return plain(http.StatusServiceUnavailable, "x402 filter: price table not loaded\n", TableNotLoaded)
+	}
+	if why, blocked := table.Blocked(key); blocked {
+		// The route has a policy, but it is broken. Serving it would give it away and a
+		// 402 would ask for a payment that cannot be right: refuse until it is fixed.
+		log.Error("route's payment policy is invalid; refused", "decision", PolicyInvalid, "reason", why)
+		return plain(http.StatusServiceUnavailable, "x402 filter: this route's payment policy is invalid\n", PolicyInvalid)
 	}
 	entry, ok := table.Lookup(key)
 	if !ok {
