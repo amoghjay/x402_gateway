@@ -101,8 +101,24 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 
 	sctx, cancel := context.WithTimeout(ctx, s.pay.settleTimeout())
 	resp, err := fac.Settle(sctx, st.pp, entry.Requirements)
-	for noWalletFree(err) && wait(sctx, walletRetry) == nil {
-		resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+	retried := false
+	for {
+		if noWalletFree(err) && wait(sctx, walletRetry) == nil {
+			resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+			continue
+		}
+		// A refusal that can pass (the facilitator's transaction failed) is tried once
+		// more, but only while the chain shows the payment unspent: a nonce settles at
+		// most once, so a second try can never charge twice.
+		if refused, reason := refusal(resp, err); refused && !retried && passingRefusal(reason) && sctx.Err() == nil {
+			if used, cerr := s.usedOnChain(ctx, st); cerr == nil && !used {
+				retried = true
+				st.log.Warn("settle refused for a reason that can pass, and the payment is unspent: settling once more", "paymentId", id, "reason", reason)
+				resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+				continue
+			}
+		}
+		break
 	}
 	cancel()
 	ms := time.Since(t0).Milliseconds()
@@ -209,6 +225,15 @@ func refusal(resp x402.SettleResponse, err error) (bool, string) {
 		return true, resp.ErrorReason
 	}
 	return false, ""
+}
+
+// passingRefusal reports whether a refusal says the attempt failed rather than the
+// payment: the facilitator's own transaction failed or it hit an unexpected error. Seen
+// once in 30 Base Sepolia payments on 2026-11-19 (invalid_exact_evm_transaction_failed)
+// for a buyer who could pay. Insufficient funds, a bad signature or a used nonce are
+// about the payment and are never retried.
+func passingRefusal(reason string) bool {
+	return reason == "invalid_exact_evm_transaction_failed" || reason == x402.ReasonUnexpectedSettle
 }
 
 // noWalletFree is the facilitator saying its own signer pool is busy: nothing was

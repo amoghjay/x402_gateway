@@ -470,6 +470,72 @@ func TestSyncHeldRecord(t *testing.T) {
 	})
 }
 
+// A refusal that can pass is settled once more while the payment is unspent; one about
+// the payment, or a payment already spent, is not.
+func TestSyncPassingRefusalIsTriedOnceMore(t *testing.T) {
+	const failed = `{"success":false,"errorReason":"invalid_exact_evm_transaction_failed","transaction":"","network":"eip155:72344"}`
+	const ok = `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`
+	for name, c := range map[string]struct {
+		first     string
+		then      string
+		spent     bool // the nonce is used on chain by the time of the second look
+		wantCode  int32
+		wantCalls int32
+	}{
+		"transaction failed, then settles": {failed, ok, false, 0, 2},
+		"transaction failed twice":         {failed, failed, false, 402, 2},
+		"transaction failed, nonce spent":  {failed, ok, true, 402, 1},
+		"insufficient balance: never retried": {
+			`{"success":false,"errorReason":"invalid_exact_evm_insufficient_balance","transaction":"","network":"eip155:72344"}`, ok, false, 402, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, f := setupSync(t, 0)
+			f.onCall.Store(func() {
+				if f.calls.Load() == 1 {
+					f.answer(400, c.first)
+					p.node.used.Store(c.spent)
+					return
+				}
+				f.answer(200, c.then)
+			})
+			stream, _ := p.request(p.payment())
+			resp := p.respond(stream, "200")
+			if code := resp.GetImmediateResponse().GetStatus().GetCode(); int32(code) != c.wantCode {
+				t.Errorf("response phase = %v, want %d (0 = released)", code, c.wantCode)
+			}
+			if n := f.calls.Load(); n != c.wantCalls {
+				t.Errorf("/settle calls = %d, want %d", n, c.wantCalls)
+			}
+		})
+	}
+}
+
+// The payer cancels the authorization (cancelAuthorization) while the request is in
+// flight. On chain a cancelled nonce reads as used, so: cancelled before the response
+// phase → caught by the read before /settle (402, never settled); cancelled while the
+// settle runs → the facilitator refuses it (402). Either way nothing is served.
+func TestSyncCancelledAuthorizationIsNeverServed(t *testing.T) {
+	t.Run("before the response phase", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.node.used.Store(true) // cancelAuthorization lands while the backend works
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 402 || f.calls.Load() != 0 {
+			t.Errorf("response phase = %v, /settle calls = %d; want 402 and no settle", ir.GetStatus().GetCode(), f.calls.Load())
+		}
+	})
+	t.Run("during the settle", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		f.answer(400, `{"success":false,"errorReason":"invalid_transaction_state","transaction":"","network":"eip155:72344"}`)
+		f.onCall.Store(func() { p.node.used.Store(true) })
+		stream, _ := p.request(p.payment())
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 402 {
+			t.Errorf("response phase = %v, want 402", ir.GetStatus().GetCode())
+		}
+	})
+}
+
 // A definite refusal is believed even if the nonce turns out used: another copy of the
 // payment settled in the meantime, and that copy's request is the one that paid.
 func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {
