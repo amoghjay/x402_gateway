@@ -130,9 +130,10 @@ fits ([design note](docs/design/request-path-budget.md)):
 3. `x402-settler` workers settle off-path from a Redis Stream, idempotently.
 
 The synchronous capture mode (`captureMode: Sync`) settles through the facilitator while
-Envoy holds the response, under a 5 s Envoy timeout. First run on the cluster 2026-11-19:
-`/settle` took 0.6 to 1.2 s from the pod (n=4), and a refused settlement replaced the
-held response with a 402. A proper latency sample and the failure drills are still to run.
+Envoy holds the response, under a 10 s Envoy timeout. First run on the cluster 2026-11-19:
+the held response took p50 548 ms on Radius testnet (n=50) and on Base Sepolia (n=29), and
+no drill released a response unpaid. Load, a kill mid-settle and facilitator-down are still
+to run ([results](docs/design/request-path-budget.md)).
 
 ### Phase 4 — The platform layer
 

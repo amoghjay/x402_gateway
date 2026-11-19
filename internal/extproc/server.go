@@ -134,6 +134,7 @@ type Payments struct {
 	// and after one that gave no clear answer. Required for Sync routes, like Facilitators.
 	RPCs          map[string]*radius.RPC // by CAIP-2 network
 	SettleTimeout time.Duration          // per held response; default DefaultSettleTimeout
+	ConfirmWait   time.Duration          // after an unclear settle; default DefaultConfirmWait
 }
 
 // Server is the ext_proc server.
@@ -599,6 +600,13 @@ func (p *Payments) settleTimeout() time.Duration {
 		return p.SettleTimeout
 	}
 	return DefaultSettleTimeout
+}
+
+func (p *Payments) confirmWait() time.Duration {
+	if p.ConfirmWait > 0 {
+		return p.ConfirmWait
+	}
+	return DefaultConfirmWait
 }
 
 func (p *Payments) now() time.Time {

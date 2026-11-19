@@ -83,9 +83,12 @@ once the transfer is on chain; a refused settlement becomes a 402 and an unclear
 503, in place of the response. Before it settles, the filter also checks on chain that
 the payment has not been spent already, because a facilitator may answer a repeated
 settle with success. Each paid request waits for one chain read and the facilitator.
-First run on the cluster, 2026-11-19: paid requests settled in 0.6 to 1.2 s and a
-refused settlement reached the client as a 402
-([results](docs/design/request-path-budget.md)); the failure drills are still to run.
+On the cluster, 2026-11-19, on Radius testnet and Base Sepolia: the held response took
+about 0.55 s at the median, a refused settlement and a replay both reached the client as
+a 402, and no drill released a response unpaid. Two of about 75 Radius requests were
+charged and answered 503 when the facilitator took over 2 s; the fix for that is merged
+with these results and not yet rerun
+([results](docs/design/request-path-budget.md)).
 
 ## Architecture
 

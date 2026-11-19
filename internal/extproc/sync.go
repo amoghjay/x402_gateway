@@ -39,13 +39,21 @@ import (
 // case where Redis lost the claim (a restart, a failover, an eviction). If the read
 // fails the response is withheld with a 503: without it a replay cannot be ruled out.
 //
+// An unclear settle (a timeout, a 5xx) is the one case where a buyer can be charged and
+// get nothing: the transfer may land after the filter stopped waiting. So the settle
+// budget is generous, and after an unclear answer the filter keeps asking the chain for
+// a while before it gives up. A slow paid response is better than a paid 503.
+//
 // Budget: the chain read, the settle call (with a retry gap if the facilitator's wallet
-// pool is busy), and a second chain read after an unclear settle must all fit under
+// pool is busy), and the wait for the chain after an unclear settle must all fit under
 // Envoy's per-message timeout for a Sync route (pricing.SyncMessageTimeout). Past that
 // Envoy answers 504 itself and closes the stream, and the outcome is logged as unknown.
 const (
-	DefaultSettleTimeout = 3 * time.Second
-	chainCheckTimeout    = 500 * time.Millisecond
+	DefaultSettleTimeout = 6 * time.Second
+	// DefaultConfirmWait is how long the chain is asked whether an unclear settle landed.
+	DefaultConfirmWait = 2500 * time.Millisecond
+	confirmEvery       = 250 * time.Millisecond
+	chainCheckTimeout  = 500 * time.Millisecond
 	// walletRetry is the gap before asking again when the facilitator has no wallet free
 	// (its documented answer is "retry in 1-2 s"; the settle budget bounds the retries).
 	walletRetry = 500 * time.Millisecond
@@ -87,11 +95,12 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	if refused, reason := refusal(resp, err); refused {
 		return s.withhold(st, reason, SettleRefused, err, ms)
 	}
-	// No clear answer: ask the chain. The nonce was unused a moment ago, so if it is used
-	// now, this settle went through and only its answer was lost. The read runs on its
-	// own clock: if Envoy has already given up on the stream, the log should still say
-	// which way it went.
-	used, cerr := s.usedOnChain(ctx, st)
+	// No clear answer: ask the chain, for a while. The nonce was unused a moment ago, so
+	// if it is used now, this settle went through and only its answer was lost or late.
+	// The reads run on their own clock: if Envoy has already given up on the stream, the
+	// log should still say which way it went.
+	used, cerr := s.confirmOnChain(ctx, st)
+	ms = time.Since(t0).Milliseconds()
 	if cerr == nil && used {
 		return s.release2xx(st, code, resp.Transaction, SettledOnChain, ms)
 	}
@@ -190,6 +199,18 @@ func (s *Server) usedOnChain(ctx context.Context, st *request) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chainCheckTimeout)
 	defer cancel()
 	return rpc.AuthorizationState(ctx, st.entry.Network.TokenAddress(), st.res.Payer, st.res.Authorization.Nonce)
+}
+
+// confirmOnChain asks whether the nonce is used until it is, or until ConfirmWait is up.
+func (s *Server) confirmOnChain(ctx context.Context, st *request) (bool, error) {
+	deadline := time.Now().Add(s.pay.confirmWait())
+	for {
+		used, err := s.usedOnChain(ctx, st)
+		if (err == nil && used) || time.Until(deadline) < confirmEvery {
+			return used, err
+		}
+		time.Sleep(confirmEvery)
+	}
 }
 
 func errText(err error) string {

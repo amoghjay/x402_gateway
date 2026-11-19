@@ -196,7 +196,7 @@ func TestEEPAccepted(t *testing.T) {
 // A Sync route settles while Envoy holds the response, so Envoy has to wait for the
 // facilitator there; an Async route keeps the short budget. failOpen stays false on both.
 func TestDesiredEEPMessageTimeoutFollowsCaptureMode(t *testing.T) {
-	for mode, want := range map[string]string{"Async": "300ms", "Sync": "5s"} {
+	for mode, want := range map[string]string{"Async": "300ms", "Sync": "10s"} {
 		pp := sample()
 		pp.Spec.CaptureMode = mode
 		u := desiredEEP(pp, Backend{Namespace: "x402-system", Name: "x402-filter", Port: 9002})

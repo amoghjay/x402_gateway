@@ -72,7 +72,7 @@ func main() {
 	flag.StringVar(&c.redis, "redis", "", "Redis address for the replay guard, in-flight sums, balance cache and settle stream; empty = payments off, every priced request gets the 402")
 	flag.StringVar(&c.rpcURL, "rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for balance reads (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
 	flag.StringVar(&c.facilitatorURL, "facilitator-url", os.Getenv("X402_FACILITATOR_URL"), "x402 facilitator base URL for Sync routes (default $X402_FACILITATOR_URL, then the network's)")
-	flag.DurationVar(&c.settleTimeout, "settle-timeout", extproc.DefaultSettleTimeout, "Sync routes: how long a response is held for the facilitator's /settle; must stay under the route's Envoy messageTimeout")
+	flag.DurationVar(&c.settleTimeout, "settle-timeout", extproc.DefaultSettleTimeout, "Sync routes: how long a response is held for the facilitator's /settle; with the chain reads it must stay under the route's Envoy messageTimeout")
 	flag.DurationVar(&c.deadline, "deadline", extproc.DefaultDeadline, "request-phase budget; past it a valid payer gets 503 + Retry-After, not a charge")
 	flag.DurationVar(&c.fresh, "balance-fresh", balance.DefaultFresh, "a cached balance younger than this is served as is")
 	flag.DurationVar(&c.lastKnown, "balance-last-known", balance.DefaultLastKnown, "a cached balance up to this old is served when a refresh overruns the deadline")
@@ -144,6 +144,7 @@ func run(log *slog.Logger, c config) error {
 	if c.redis != "" {
 		redisClient = rdb.RequestPath(c.redis)
 		httpClient := radius.NewHTTPClient()
+		facilitatorHTTP := radius.NewFacilitatorHTTPClient()
 		balances := map[string]*balance.Cache{}
 		facs := map[string]*facilitator.Client{}
 		rpcs := map[string]*radius.RPC{}
@@ -162,7 +163,7 @@ func run(log *slog.Logger, c config) error {
 			if c.facilitatorURL != "" {
 				fu = c.facilitatorURL
 			}
-			facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: httpClient}
+			facs[p.Network()] = &facilitator.Client{URL: fu, HTTP: facilitatorHTTP}
 			rpcs[p.Network()] = rpc
 		}
 		server.WithPayments(&extproc.Payments{

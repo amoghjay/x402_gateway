@@ -82,6 +82,7 @@ func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitat
 		pay.Facilitators = map[string]*facilitator.Client{radius.Testnet.Network(): {URL: srv.URL, HTTP: srv.Client()}}
 		pay.RPCs = map[string]*radius.RPC{radius.Testnet.Network(): node}
 		pay.SettleTimeout = settleTimeout
+		pay.ConfirmWait = 300 * time.Millisecond // the default would add 2.5 s to every unclear case
 	})
 	return p, f
 }
@@ -228,6 +229,23 @@ func TestSyncUnclearSettleButUsedOnChainReleases(t *testing.T) {
 	p.decided(SettledOnChain)
 }
 
+// The settle call times out, and the transfer lands a little later: seen on Radius
+// testnet, where it left a buyer charged with a 503. The filter keeps asking the chain
+// for a while, so the buyer gets the response.
+func TestSyncLateTransferAfterATimeoutIsStillReleased(t *testing.T) {
+	p, f := setupSync(t, 100*time.Millisecond)
+	f.delay.Store(int64(400 * time.Millisecond)) // longer than the settle timeout
+	f.onCall.Store(func() {
+		go func() { time.Sleep(250 * time.Millisecond); p.node.used.Store(true) }() // lands 150 ms after we gave up
+	})
+	stream, _ := p.request(p.payment())
+	resp := p.respond(stream, "200")
+	if resp.GetResponseHeaders() == nil {
+		t.Fatalf("response = %v, want released once the chain shows the transfer", resp)
+	}
+	p.decided(SettledOnChain)
+}
+
 // A busy wallet pool is asked again inside the budget instead of failing the buyer.
 func TestSyncRetriesWhenTheFacilitatorHasNoWalletFree(t *testing.T) {
 	p, f := setupSync(t, 0)
@@ -337,7 +355,7 @@ func TestSyncRefusalIsNotOverriddenByAUsedNonce(t *testing.T) {
 // The held response has to be answered before Envoy's per-message timeout for a Sync
 // route, in the worst case: a settle that runs to its limit, then the chain read.
 func TestSyncBudgetFitsUnderEnvoysTimeout(t *testing.T) {
-	if worst := chainCheckTimeout + DefaultSettleTimeout + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
-		t.Errorf("chain read %s + settle %s + chain read = %s, not under messageTimeout %s", chainCheckTimeout, DefaultSettleTimeout, worst, pricing.SyncMessageTimeout)
+	if worst := chainCheckTimeout + DefaultSettleTimeout + DefaultConfirmWait + chainCheckTimeout; worst >= pricing.SyncMessageTimeout {
+		t.Errorf("chain read %s + settle %s + confirm %s + one last read = %s, not under messageTimeout %s", chainCheckTimeout, DefaultSettleTimeout, DefaultConfirmWait, worst, pricing.SyncMessageTimeout)
 	}
 }

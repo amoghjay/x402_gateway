@@ -46,6 +46,18 @@ func NewHTTPClient() *http.Client {
 	}}
 }
 
+// NewFacilitatorHTTPClient is NewHTTPClient without the 2 s limit on response headers.
+// A facilitator's /settle answers only once the transfer is on chain, and on Radius
+// testnet that took more than 2 s several times in the first hundred Sync requests
+// (2026-11-19). The shared limit cut those calls off while the transfer was still on
+// its way: the buyer was charged and the response withheld. The caller's context is
+// the only limit here.
+func NewFacilitatorHTTPClient() *http.Client {
+	c := NewHTTPClient()
+	c.Transport.(*http.Transport).ResponseHeaderTimeout = 0
+	return c
+}
+
 // KeepWarm calls eth_chainId at once and then every `every` until ctx is done. A cold
 // connection to the RPC costs ~265 ms (measured on GKE), which never fits the request
 // deadline; a 20 s cadence keeps the HTTP/2 connection open through the real path, not
