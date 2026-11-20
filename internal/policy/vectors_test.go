@@ -57,7 +57,7 @@ func TestConformanceVectors(t *testing.T) {
 	sort.Strings(files)
 	total := 0
 	for _, file := range files {
-		data, err := os.ReadFile(file)
+		data, err := os.ReadFile(filepath.Clean(file)) // a vector file in the repo, not user input
 		if err != nil {
 			t.Fatal(err)
 		}
