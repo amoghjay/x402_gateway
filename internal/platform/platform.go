@@ -155,7 +155,7 @@ func (c *Client) Fetch(ctx context.Context, p Project, apiKey string, have uint6
 		// The URL holds no secret, so the transport error may be returned as it is.
 		return Result{}, fmt.Errorf("fetching the compiled policy: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode == http.StatusNotModified:

@@ -47,7 +47,7 @@ func newServer(t *testing.T, doc []byte, handler func(w http.ResponseWriter, r *
 		}
 		if r.Header.Get("Authorization") != "Bearer "+key {
 			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"code":"unauthorized","message":"Invalid API key"}`))
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Invalid API key"}`))
 			return
 		}
 		if r.Header.Get("If-None-Match") == `"2"` {
@@ -56,7 +56,7 @@ func newServer(t *testing.T, doc []byte, handler func(w http.ResponseWriter, r *
 		}
 		w.Header().Set("ETag", `"2"`)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(s.doc)
+		_, _ = w.Write(s.doc)
 	}))
 	t.Cleanup(s.Close)
 	return s
@@ -104,7 +104,7 @@ func TestFetchErrors(t *testing.T) {
 	s := newServer(t, document(t), func(w http.ResponseWriter, r *http.Request) bool {
 		if strings.Contains(r.URL.Path, "/projects/down/") {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("<html>bad gateway</html>"))
+			_, _ = w.Write([]byte("<html>bad gateway</html>"))
 			return true
 		}
 		return false
@@ -165,7 +165,7 @@ func TestFetchRefuses(t *testing.T) {
 // The project ID matches whatever case the CRD was written in: UUIDs are case-insensitive.
 func TestFetchProjectIDCase(t *testing.T) {
 	doc := document(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(doc) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(doc) }))
 	defer srv.Close()
 	p := Project{BaseURL: srv.URL, OrganizationID: org, ProjectID: strings.ToUpper(project)}
 	if _, err := (&Client{}).Fetch(context.Background(), p, key, 0); err != nil {
