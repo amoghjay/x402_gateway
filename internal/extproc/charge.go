@@ -26,8 +26,8 @@ import (
 //     claim and reservation, the facilitator's /verify, response held, authorizationState
 //     read, held-payment record, /settle, release. Its facilitator is the one the option
 //     names, never replaced by ours.
-//   - Anything else (Permit2, another token): not taken by this filter version; the buyer
-//     gets a 402 saying so and can pick another option from the same 402.
+//   - Anything else (Permit2, another token): the facilitator-only path (facilitated.go):
+//     replay claim, the option's facilitator's /verify, response held, /settle, release.
 //
 // Keeping a replay claim and a held-payment record goes beyond §6.2, which says a gate keeps
 // no record of payments. It is a stated deviation: the Radius testnet facilitator answered a
@@ -198,7 +198,8 @@ func (s *Server) platformCharge(ctx context.Context, h map[string]string, st *re
 			fmt.Errorf("accepted %s %s %s to %s matches none of the %d offered options", pp.Accepted.Amount, pp.Accepted.Asset, pp.Accepted.Network, pp.Accepted.PayTo, len(offers)))
 	}
 	if o.entry == nil {
-		return s.refuse(st, pw, x402.ReasonUnsupportedScheme, PaymentInvalid, fmt.Errorf("%s; pay with another option of this 402", o.why))
+		// Not checkable here (o.why): its facilitator decides.
+		return s.acceptRemote(ctx, st, pw, pp, o)
 	}
 	st.entry, st.fac = o.entry, s.pay.facilitatorAt(o.facilitator)
 	st.log = st.log.With("network", o.req.Network, "facilitator", o.facilitator)

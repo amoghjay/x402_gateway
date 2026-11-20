@@ -166,3 +166,25 @@ func TestCaptureRoundTrip(t *testing.T) {
 		t.Error("stream missing")
 	}
 }
+
+func TestClaim(t *testing.T) {
+	mr, s := setup(t)
+	ctx := context.Background()
+	ok, err := s.Claim(ctx, "abc", time.Now().Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("first claim: %v, %v", ok, err)
+	}
+	if ok, _ := s.Claim(ctx, "abc", time.Now().Add(time.Minute)); ok {
+		t.Error("claimed twice")
+	}
+	if ttl := mr.TTL("claim:{abc}"); ttl < time.Minute || ttl > time.Minute+DefaultNonceMargin {
+		t.Errorf("TTL %v", ttl)
+	}
+	if ok, _ := s.Claim(ctx, "no-expiry", time.Time{}); !ok || mr.TTL("claim:{no-expiry}") != MaxClaim {
+		t.Errorf("no expiry: TTL %v", mr.TTL("claim:{no-expiry}"))
+	}
+	mr.FastForward(2 * time.Minute)
+	if ok, _ := s.Claim(ctx, "abc", time.Now().Add(time.Minute)); !ok {
+		t.Error("claim still held after it expired")
+	}
+}

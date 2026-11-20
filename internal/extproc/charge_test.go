@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,22 +192,123 @@ func TestChargePaidThroughTheOptionsFacilitator(t *testing.T) {
 	}
 }
 
-// An option this filter does not take yet (Permit2): a 402 saying so, with every option.
-func TestChargeOptionNotTakenYet(t *testing.T) {
+// A Permit2 payment, as a client builds it for the third option. The signature is not
+// checked here: on this path only the facilitator checks it.
+func permit2Payment(t *testing.T, terms x402.Requirements, from, nonce, deadline string) string {
+	t.Helper()
+	body := `{"signature":"0x` + strings.Repeat("ab", 65) + `","permit2Authorization":{"permitted":{"token":"` + terms.Asset +
+		`","amount":"1000"},"from":"` + from + `","spender":"0x4020615294c913F045dc10f0a5cdEbd86c280001","nonce":"` + nonce +
+		`","deadline":"` + deadline + `","witness":{"to":"` + terms.PayTo + `","validAfter":"0","extra":"0x"}}}`
+	hdr, err := x402.PaymentPayload{X402Version: x402.Version, Accepted: terms, Payload: json.RawMessage(body)}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hdr
+}
+
+const permit2Payer = "0x857b06519E91e3A54538791bDbb0E22373e36b66"
+
+func future() string { return strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10) }
+
+// The Permit2 option goes through its facilitator: /verify on the request, the response held
+// while it settles, the receipt on release. A re-encoded copy of the same payment is a replay.
+func TestChargeFacilitatorOnlyPath(t *testing.T) {
 	p, f := setupCharge(t)
 	_, resp := p.chargeRequest("")
 	pr, _ := offered(t, resp)
-	pp := x402.PaymentPayload{X402Version: x402.Version, Accepted: pr.Accepts[2], Payload: json.RawMessage(`{"signature":"0x00"}`)}
-	hdr, _ := pp.Encode()
+	terms := pr.Accepts[2]
+
+	stream, resp := p.chargeRequest(permit2Payment(t, terms, permit2Payer, "255", future()))
+	if resp.GetRequestHeaders() == nil {
+		t.Fatalf("request phase: %v (logs %s)", resp, p.logs)
+	}
+	if f.verifyCalls.Load() != 1 || f.calls.Load() != 0 {
+		t.Fatalf("verify %d, settle %d before the backend answered", f.verifyCalls.Load(), f.calls.Load())
+	}
+	set, removed := mutations(t, resp.GetRequestHeaders().GetResponse())
+	if !strings.EqualFold(set[HeaderPayer], permit2Payer) || len(set[HeaderPaymentID]) != 64 || !slices.Contains(removed, "payment-signature") {
+		t.Errorf("request mutations: set %v, removed %v", set, removed)
+	}
+
+	resp = p.respond(stream, "200")
+	set, _ = mutations(t, resp.GetResponseHeaders().GetResponse())
+	receipt, err := x402.DecodeSettleResponse(set["payment-response"])
+	if err != nil || !receipt.Success || receipt.Transaction != "0xfeed" || receipt.Network != "eip155:84532" {
+		t.Fatalf("receipt %+v, %v (response %v)", receipt, err, resp)
+	}
+	if body := f.last.Load().(string); !strings.Contains(body, `"assetTransferMethod":"permit2"`) || !strings.Contains(body, `"permit2Authorization"`) {
+		t.Errorf("settle request: %s", body)
+	}
+	p.decided(Settled)
+
+	// The same payment, re-encoded (hex nonce, payer in upper case): refused before the
+	// facilitator is asked.
+	_, resp = p.chargeRequest(permit2Payment(t, terms, strings.ToUpper(permit2Payer[2:]), "0xff", future()))
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) && !strings.HasPrefix(got.Error, ReasonReplay) {
+		t.Errorf("re-encoded copy: error %q", got.Error)
+	}
+	_, resp = p.chargeRequest(permit2Payment(t, terms, "0x"+strings.ToUpper(permit2Payer[2:]), "0xff", future()))
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, ReasonReplay) {
+		t.Errorf("re-encoded copy: error %q", got.Error)
+	}
+	if f.verifyCalls.Load() != 1 || f.calls.Load() != 1 {
+		t.Errorf("a replay reached the facilitator: verify %d, settle %d", f.verifyCalls.Load(), f.calls.Load())
+	}
+}
+
+func TestChargeFacilitatorOnlyRefusals(t *testing.T) {
+	p, f := setupCharge(t)
+	_, resp := p.chargeRequest("")
+	pr, _ := offered(t, resp)
+	terms := pr.Accepts[2]
+
+	// /verify says no: a 402 with its reason, nothing settled.
+	f.verifyStatus.Store(400)
+	f.verifyBody.Store(`{"isValid":false,"invalidReason":"permit2_allowance_required"}`)
+	_, resp = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "1", future()))
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, "permit2_allowance_required") || len(got.Accepts) != 3 {
+		t.Errorf("verify refused: error %q", got.Error)
+	}
+	f.verifyStatus.Store(0)
+	f.verifyBody.Store(`{"isValid":true}`)
+
+	// No payer or nonce to claim on: refused without asking anyone.
+	n := f.verifyCalls.Load()
+	hdr, _ := x402.PaymentPayload{X402Version: x402.Version, Accepted: terms, Payload: json.RawMessage(`{"signature":"0x00"}`)}.Encode()
 	_, resp = p.chargeRequest(hdr)
-	got, _ := offered(t, resp)
-	if !strings.HasPrefix(got.Error, x402.ReasonUnsupportedScheme) || len(got.Accepts) != 3 {
-		t.Errorf("error %q, %d options", got.Error, len(got.Accepts))
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) {
+		t.Errorf("unidentifiable: error %q", got.Error)
 	}
-	if f.calls.Load()+f.verifyCalls.Load() != 0 {
-		t.Error("the facilitator was called for an option this filter does not take")
+	// Expired.
+	_, resp = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "2", "1700000000"))
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) {
+		t.Errorf("expired: error %q", got.Error)
 	}
-	p.decided(PaymentInvalid)
+	if f.verifyCalls.Load() != n {
+		t.Error("the facilitator was asked about a payment refused at the door")
+	}
+
+	// The backend fails: nothing settled.
+	stream, _ := p.chargeRequest(permit2Payment(t, terms, permit2Payer, "3", future()))
+	if resp := p.respond(stream, "502"); resp.GetResponseHeaders() == nil || f.calls.Load() != 0 {
+		t.Errorf("unserved: %v, settle calls %d", resp, f.calls.Load())
+	}
+
+	// Settle refused: a 402 in place of the response, every option offered.
+	f.answer(400, `{"success":false,"errorReason":"insufficient_funds","transaction":"","network":"eip155:84532"}`)
+	stream, _ = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "4", future()))
+	if got, _ := offered(t, p.respond(stream, "200")); !strings.HasPrefix(got.Error, "insufficient_funds") || len(got.Accepts) != 3 {
+		t.Errorf("settle refused: error %q", got.Error)
+	}
+
+	// Settle unclear: withheld with a 503.
+	f.answer(500, `oops`)
+	stream, _ = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "5", future()))
+	resp = p.respond(stream, "200")
+	if ir := resp.GetImmediateResponse(); ir == nil || ir.GetStatus().GetCode() != 503 || !strings.Contains(string(ir.GetBody()), ReasonSettlementUnknown) {
+		t.Errorf("settle unclear: %v", resp)
+	}
+	p.decided(SettlementUnknown)
 }
 
 // A payment for terms that were never offered.
