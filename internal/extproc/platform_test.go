@@ -173,15 +173,20 @@ func TestPlatformRateLimit(t *testing.T) {
 }
 
 // The free quota counts per client address, from Envoy's source.address. Past it the charge
-// applies, which this filter version refuses with a 503 rather than serving free.
+// applies: a 402.
 func TestPlatformFreeQuotaPerClient(t *testing.T) {
 	pt := newPlatformTest(t, platformStore(t, "deny", compiledDoc(t)))
 	for i := 0; i < 3; i++ {
 		continued(t, pt.request(pt.conn(), "GET", "/anything/platform/metered", "203.0.113.5:4711"))
 	}
 	resp := pt.request(pt.conn(), "GET", "/anything/platform/metered", "203.0.113.5:4712")
-	if ir := resp.GetImmediateResponse(); ir == nil || ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_charge_not_built" {
+	ir := resp.GetImmediateResponse()
+	if ir == nil || ir.GetStatus().GetCode() != 402 {
 		t.Fatalf("past the free quota: %v", resp)
+	}
+	// The 402 carries the free quota's headers (§4.5): nothing left this window.
+	if h := immediateHeaders(t, ir); h["ratelimit-limit"] != "3" || h["ratelimit-remaining"] != "0" {
+		t.Errorf("402 limit headers %v", h)
 	}
 	// Another client has its own quota.
 	continued(t, pt.request(pt.conn(), "GET", "/anything/platform/metered", "[2001:db8::1]:443"))
@@ -191,17 +196,6 @@ func TestPlatformFreeQuotaPerClient(t *testing.T) {
 	for _, want := range []string{":ip:203.0.113.5", ":ip:2001:db8::/64", ":ip:unknown"} {
 		if !strings.Contains(keys, want) {
 			t.Errorf("no counter key with %s: %s", want, keys)
-		}
-	}
-}
-
-// A paid rule is never served free, with or without a payment attached.
-func TestPlatformChargeIsRefusedForNow(t *testing.T) {
-	pt := newPlatformTest(t, platformStore(t, "deny", compiledDoc(t)))
-	for _, kv := range [][]string{nil, {"payment-signature", "abc"}} {
-		resp := pt.request(pt.conn(), "GET", "/anything/platform/paid/42", "203.0.113.5:1", kv...)
-		if ir := resp.GetImmediateResponse(); ir == nil || ir.GetStatus().GetCode() != 503 {
-			t.Fatalf("paid rule: %v", resp)
 		}
 	}
 }
