@@ -89,20 +89,31 @@ func validate(pp *v1alpha1.PaymentPolicy, networks []radius.Profile) error {
 	if err != nil {
 		return err
 	}
-	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, nil, networks)
+	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, nil, nil, networks)
 	return err
+}
+
+// noPolicy is the table's spelling of a platform policy's noPolicy: deny unless it says Allow.
+func noPolicy(p *v1alpha1.Platform) string {
+	if p.NoPolicy == "Allow" {
+		return "allow"
+	}
+	return "deny"
 }
 
 // tableJSON is the price table: the accepted routes priced, and the routes whose policy
 // is invalid blocked. Validated as the filter would; any error refuses it.
-func tableJSON(routes map[string]pricing.Route, blocked map[string]string, networks []radius.Profile) ([]byte, error) {
+func tableJSON(routes map[string]pricing.Route, blocked map[string]string, platform map[string]pricing.PlatformRoute, networks []radius.Profile) ([]byte, error) {
 	if routes == nil {
 		routes = map[string]pricing.Route{} // "routes": {} rather than null
 	}
 	if len(blocked) == 0 {
 		blocked = nil // omitted: a filter from before blocked routes still reads the table
 	}
-	data, err := json.MarshalIndent(pricing.Table{SchemaVersion: pricing.SchemaVersion, Routes: routes, Blocked: blocked}, "", "  ")
+	if len(platform) == 0 {
+		platform = nil // omitted: a filter from before platform routes still reads the table
+	}
+	data, err := json.MarshalIndent(pricing.Table{SchemaVersion: pricing.SchemaVersion, Routes: routes, Blocked: blocked, Platform: platform}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +150,7 @@ func desiredEEP(pp *v1alpha1.PaymentPolicy, filter Backend) *unstructured.Unstru
 					"port":      filter.Port,
 				}},
 				"processingMode": map[string]any{
-					"request":  map[string]any{"attributes": []any{"xds.route_name"}},
+					"request":  map[string]any{"attributes": requestAttributes(pp)},
 					"response": map[string]any{},
 				},
 				"failOpen":       false,
@@ -150,6 +161,16 @@ func desiredEEP(pp *v1alpha1.PaymentPolicy, filter Backend) *unstructured.Unstru
 	}}
 	u.SetGroupVersionKind(eepGVK)
 	return u
+}
+
+// requestAttributes are the Envoy attributes the filter reads: the route's name, always, and
+// for a platform route the downstream peer's address, which a compiled policy's
+// client_ip: remote_addr means.
+func requestAttributes(pp *v1alpha1.PaymentPolicy) []any {
+	if pp.Spec.Platform != nil {
+		return []any{"xds.route_name", "source.address"}
+	}
+	return []any{"xds.route_name"}
 }
 
 // messageTimeout is Envoy's per-message budget for the route. Async: 300 ms, raised from

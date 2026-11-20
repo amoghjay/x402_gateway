@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 	"github.com/amoghjay/x402_gateway/internal/x402/eip3009"
@@ -84,6 +85,18 @@ type Table struct {
 	// Blocked lists routes whose PaymentPolicy exists but is invalid, with the reason.
 	// The filter answers 503 on them rather than serving them free.
 	Blocked map[string]string `json:"blocked,omitempty"`
+	// Platform lists the routes a Radius Platform project's compiled policy governs. The
+	// documents are in the same ConfigMap, under PolicyKey(project). Omitted when empty, so
+	// a table without platform routes still loads in a filter from before them.
+	Platform map[string]PlatformRoute `json:"platform,omitempty"`
+}
+
+// PlatformRoute names the project whose compiled policy decides a route's requests.
+type PlatformRoute struct {
+	Project string `json:"project"` // the project ID, lower case
+	// NoPolicy is what the route answers while no document for the project was ever
+	// loaded: "deny" (503 policy_unavailable) or "allow".
+	NoPolicy string `json:"noPolicy"`
 }
 
 // Route is the price of one HTTPRoute. Keys in Table.Routes are "httproute/<ns>/<name>".
@@ -119,8 +132,37 @@ type Entry struct {
 
 // Prices is a validated, immutable table.
 type Prices struct {
-	entries map[string]*Entry
-	blocked map[string]string // route key → why it is refused
+	entries  map[string]*Entry
+	blocked  map[string]string                 // route key → why it is refused
+	platform map[string]PlatformRoute          // route key → its project
+	policies map[string]*compiledpolicy.Policy // project → its loaded compiled policy (Watcher)
+}
+
+// Platform returns the project that governs a route, if one does. It is safe on a nil
+// *Prices.
+func (p *Prices) Platform(key string) (PlatformRoute, bool) {
+	if p == nil {
+		return PlatformRoute{}, false
+	}
+	r, ok := p.platform[key]
+	return r, ok
+}
+
+// Policy returns a project's loaded compiled policy, or nil when none was ever loaded. It is
+// safe on a nil *Prices.
+func (p *Prices) Policy(project string) *compiledpolicy.Policy {
+	if p == nil {
+		return nil
+	}
+	return p.policies[strings.ToLower(project)]
+}
+
+// PlatformLen is the number of routes a platform project governs.
+func (p *Prices) PlatformLen() int {
+	if p == nil {
+		return 0
+	}
+	return len(p.platform)
 }
 
 // Sync reports whether the route settles before its response is released.
@@ -197,8 +239,14 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 			return nil, fmt.Errorf("pricing: decode: blocked: %w", err)
 		}
 	}
+	var platform map[string]json.RawMessage
+	if raw, ok := top["platform"]; ok {
+		if err := strictDecode(raw, &platform); err != nil {
+			return nil, fmt.Errorf("pricing: decode: platform: %w", err)
+		}
+	}
 
-	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}}
+	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}, platform: map[string]PlatformRoute{}}
 	for k, why := range blocked {
 		if rk, ok := RouteKey(k + "/"); !ok || rk != k {
 			return nil, fmt.Errorf("pricing: blocked route %q: key must be \"httproute/<namespace>/<name>\"", k)
@@ -206,9 +254,30 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 		out.blocked[k] = "policy invalid: " + why
 	}
 	var errs []error
+	for _, k := range slices.Sorted(maps.Keys(platform)) {
+		if _, ok := out.blocked[k]; ok {
+			continue // blocked wins
+		}
+		pr, err := parsePlatformRoute(k, platform[k])
+		if err == nil {
+			if _, priced := routes[k]; priced {
+				err = errors.New("listed with a price and a platform project")
+			}
+		}
+		if err != nil {
+			err = fmt.Errorf("route %q: %w", k, err)
+			out.blocked[k] = err.Error()
+			errs = append(errs, err)
+			continue
+		}
+		out.platform[k] = pr
+	}
 	for _, k := range slices.Sorted(maps.Keys(routes)) {
 		if _, ok := out.blocked[k]; ok {
 			continue // listed as blocked as well as priced: blocked wins
+		}
+		if _, ok := platform[k]; ok {
+			continue // blocked above, for being both
 		}
 		e, err := parseRoute(k, routes[k], networks)
 		if err != nil {
@@ -224,6 +293,33 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 	}
 	return out, nil
 }
+
+// parsePlatformRoute decodes and checks one platform entry.
+func parsePlatformRoute(key string, raw json.RawMessage) (PlatformRoute, error) {
+	if rk, ok := RouteKey(key + "/"); !ok || rk != key {
+		return PlatformRoute{}, errors.New(`key must be "httproute/<namespace>/<name>"`)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return PlatformRoute{}, fmt.Errorf("decode: %w", err)
+	}
+	if err := keysOf(obj, PlatformRoute{}, "platform route"); err != nil {
+		return PlatformRoute{}, fmt.Errorf("decode: %w", err)
+	}
+	var r PlatformRoute
+	if err := strictDecode(raw, &r); err != nil {
+		return PlatformRoute{}, fmt.Errorf("decode: %w", err)
+	}
+	if !projectID.MatchString(r.Project) {
+		return PlatformRoute{}, fmt.Errorf("project %q is not a lower-case UUID", r.Project)
+	}
+	if r.NoPolicy != compiledpolicy.Allow && r.NoPolicy != compiledpolicy.Deny {
+		return PlatformRoute{}, fmt.Errorf("noPolicy %q is not allow or deny", r.NoPolicy)
+	}
+	return r, nil
+}
+
+var projectID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ValidateRoute is Parse's check of one route: what the controller runs on a policy
 // before it puts the route in the table.

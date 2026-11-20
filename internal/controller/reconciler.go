@@ -305,6 +305,7 @@ func (r *Reconciler) project(ctx context.Context) error {
 	blocked := map[string]string{}
 	namespaces := map[string]bool{}
 	projects := map[string]bool{} // platform projects named by a policy on an existing route
+	platformRoutes := map[string]pricing.PlatformRoute{}
 	for i := range list.Items {
 		pp := &list.Items[i]
 		route := &metav1.PartialObjectMetadata{}
@@ -321,17 +322,16 @@ func (r *Reconciler) project(ctx context.Context) error {
 			continue
 		}
 		if pp.Spec.Platform != nil {
-			projects[projectID(pp.Spec.Platform)] = true
-			// The filter does not enforce a compiled policy yet (M6b step 4). Until it does,
-			// the route is refused rather than left out of the table, which would serve it free.
-			blocked[routeKey(pp)] = pp.Name + ": Radius Platform policies are not enforced by this filter version; the route answers 503"
+			id := projectID(pp.Spec.Platform)
+			projects[id] = true
+			platformRoutes[routeKey(pp)] = pricing.PlatformRoute{Project: id, NoPolicy: noPolicy(pp.Spec.Platform)}
 			continue
 		}
 		rt, _ := routeOf(pp) // validate has called it
 		routes[routeKey(pp)] = rt
 	}
 
-	table, err := tableJSON(routes, blocked, r.Networks)
+	table, err := tableJSON(routes, blocked, platformRoutes, r.Networks)
 	if err != nil {
 		// Each route passed validate on its own, so this cannot happen; if it does, the
 		// last good table stays in place and the error surfaces in the log.

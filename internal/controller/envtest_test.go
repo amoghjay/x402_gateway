@@ -311,9 +311,9 @@ func TestReconciler(t *testing.T) {
 		}
 	})
 
-	// A route governed by a Radius Platform project. Until the filter enforces compiled
-	// policies (M6b step 4) its route is blocked; the controller already fetches, validates
-	// and stores the document, and reports on it in Synced.
+	// A route governed by a Radius Platform project: the controller fetches, validates and
+	// stores the document, lists the route under the table's platform section, and reports
+	// on the document in Synced.
 	docKey := pricing.PolicyKey(testProject)
 	t.Run("platform policy", func(t *testing.T) {
 		h.t = t
@@ -329,19 +329,22 @@ func TestReconciler(t *testing.T) {
 			return h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "version 2 ")
 		})
 		h.eventually("document in the ConfigMap", func() error { return h.document(docKey, docVersion(t, 2)) })
-		h.eventually("route blocked until the filter enforces it", func() error {
+		h.eventually("route on the project in the table", func() error {
 			prices, err := h.prices()
 			if err != nil {
 				return err
 			}
-			if why, ok := prices.Blocked("httproute/shop/metered"); !ok || !strings.Contains(why, "not enforced by this filter version") {
-				return fmt.Errorf("blocked = %v (%q)", ok, why)
+			if r, ok := prices.Platform("httproute/shop/metered"); !ok || r.Project != testProject || r.NoPolicy != "deny" {
+				return fmt.Errorf("platform route = %+v, %v", r, ok)
 			}
 			return nil
 		})
 		eep := h.get(eepGVK, "shop", "x402-metered")
-		if raw, _ := json.Marshal(eep.Object["spec"]); !strings.Contains(string(raw), `"messageTimeout":"10s"`) {
-			t.Errorf("a platform route is not on the Sync timeout: %s", raw)
+		raw, _ := json.Marshal(eep.Object["spec"])
+		for _, want := range []string{`"messageTimeout":"10s"`, `"attributes":["xds.route_name","source.address"]`} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("a platform route's EnvoyExtensionPolicy lacks %s: %s", want, raw)
+			}
 		}
 
 		fp.set(docVersion(t, 3), 0)
