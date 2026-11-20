@@ -1,0 +1,542 @@
+{
+  "description": "Endpoints whose routes overlap: a request follows only the most specific endpoint it matches (a literal segment beats :name, :name beats a trailing *), whatever their slugs, and never falls through to a less specific endpoint's rules. The compiler orders endpoints' rules most specific first and ends an endpoint's rules with <slug>/_unmatched where a less specific endpoint could otherwise decide its requests.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 4,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-29T12:00:00Z",
+    "mode": "production",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": "remote_addr",
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "get-files-id/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-files-id",
+            "methods": ["GET"],
+            "path": "/files/:id"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.01",
+          "description": "File",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "10000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "id": "any-files-all/charge",
+        "match": {
+          "endpoint": {
+            "slug": "any-files-all",
+            "methods": [],
+            "path": "/files/*"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.05",
+          "description": "Files",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "50000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "id": "get-forecast-list/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-forecast-list",
+            "methods": ["GET"],
+            "path": "/forecast/list"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.0005",
+          "description": "Forecasts",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "500",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000004",
+        "id": "get-forecast-regions/_unmatched",
+        "match": {
+          "endpoint": {
+            "slug": "get-forecast-regions",
+            "methods": ["GET"],
+            "path": "/forecast/regions"
+          }
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000005",
+        "id": "get-forecast-region/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-forecast-region",
+            "methods": ["GET"],
+            "path": "/forecast/:region"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.001",
+          "description": "Forecast",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000006",
+        "id": "any-items-latest/_unmatched",
+        "match": {
+          "endpoint": {
+            "slug": "any-items-latest",
+            "methods": [],
+            "path": "/items/latest"
+          }
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000007",
+        "id": "get-items-id/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-items-id",
+            "methods": ["GET"],
+            "path": "/items/:id"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.003",
+          "description": "Item",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "3000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000008",
+        "id": "get-value-type-list/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-value-type-list",
+            "methods": ["GET"],
+            "path": "/value-type/list"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.0001",
+          "description": "Value types",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "100",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000009",
+        "id": "get-value-type-id/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-value-type-id",
+            "methods": ["GET"],
+            "path": "/value-type/:id"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.002",
+          "description": "Value type",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "2000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "a literal segment beats :id even when the :id endpoint's slug sorts first",
+      "request": {
+        "method": "GET",
+        "path": "/value-type/list",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-value-type-list/charge",
+          "type": "payment_required",
+          "price": "0.0001",
+          "description": "Value types",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "100",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "any other value is the :id endpoint's",
+      "request": {
+        "method": "GET",
+        "path": "/value-type/usdc",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-value-type-id/charge",
+          "type": "payment_required",
+          "price": "0.002",
+          "description": "Value type",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "2000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a literal segment beats :region when the literal endpoint's slug sorts first",
+      "request": {
+        "method": "GET",
+        "path": "/forecast/list",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-forecast-list/charge",
+          "type": "payment_required",
+          "price": "0.0005",
+          "description": "Forecasts",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "500",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "an endpoint without rules is free, not charged by the :region endpoint it also matches",
+      "request": {
+        "method": "GET",
+        "path": "/forecast/regions",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-forecast-regions/_unmatched",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "a region pays the :region charge",
+      "request": {
+        "method": "GET",
+        "path": "/forecast/tokyo",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-forecast-region/charge",
+          "type": "payment_required",
+          "price": "0.001",
+          "description": "Forecast",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a method no endpoint has gets defaults.unmatched",
+      "request": {
+        "method": "POST",
+        "path": "/forecast/regions",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": ":id beats a trailing * even when the wildcard endpoint's slug sorts first",
+      "request": {
+        "method": "GET",
+        "path": "/files/report",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-files-id/charge",
+          "type": "payment_required",
+          "price": "0.01",
+          "description": "File",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "10000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "deeper paths only the wildcard matches are the wildcard's",
+      "request": {
+        "method": "GET",
+        "path": "/files/report/raw",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "any-files-all/charge",
+          "type": "payment_required",
+          "price": "0.05",
+          "description": "Files",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "50000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a method the :id endpoint doesn't have is the wildcard's",
+      "request": {
+        "method": "DELETE",
+        "path": "/files/report",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "any-files-all/charge",
+          "type": "payment_required",
+          "price": "0.05",
+          "description": "Files",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "50000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a trailing * matches the bare path",
+      "request": {
+        "method": "GET",
+        "path": "/files",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "any-files-all/charge",
+          "type": "payment_required",
+          "price": "0.05",
+          "description": "Files",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "50000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "the path decides before methods: ANY /items/latest beats GET /items/:id, and without rules it's free",
+      "request": {
+        "method": "GET",
+        "path": "/items/latest",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "any-items-latest/_unmatched",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "other items pay",
+      "request": {
+        "method": "GET",
+        "path": "/items/42",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-items-id/charge",
+          "type": "payment_required",
+          "price": "0.003",
+          "description": "Item",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "3000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "an ANY endpoint governs every method of its path",
+      "request": {
+        "method": "POST",
+        "path": "/items/latest",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "any-items-latest/_unmatched",
+          "type": "allow"
+        }
+      }
+    }
+  ]
+}

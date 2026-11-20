@@ -1,0 +1,40 @@
+{
+  "description": "Before any policy has been fetched, failure.no_policy (from the enforcement point's configuration) decides.",
+  "policy": null,
+  "cases": [
+    {
+      "name": "no policy, no_policy allow",
+      "no_policy": "allow",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "no policy, no_policy deny",
+      "no_policy": "deny",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "deny",
+          "status": 503,
+          "code": "policy_unavailable"
+        }
+      }
+    }
+  ]
+}

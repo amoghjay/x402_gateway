@@ -1,0 +1,450 @@
+{
+  "description": "radius.policy/0.2: rules that match on the verified agent, by Cloudflare category or Web Bot Auth signature agent, alone and ANDed with an endpoint or IP range, and limits keyed by the verified agent.",
+  "policy": {
+    "schema": "radius.policy/0.2",
+    "version": 1,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-11-03T12:00:00Z",
+    "mode": "test",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": {
+        "header": "cf-connecting-ip"
+      },
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "good-bots",
+        "match": {
+          "agent": {
+            "category": [
+              "monitoring_and_analytics",
+              "page_preview",
+              "search_engine_crawler",
+              "webhooks"
+            ]
+          }
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "id": "corpus/no-training",
+        "match": {
+          "endpoint": {
+            "slug": "corpus",
+            "methods": ["GET"],
+            "path": "/llms-full.txt"
+          },
+          "agent": {
+            "category": ["ai_crawler"]
+          }
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "no_training"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "id": "office-crawlers",
+        "match": {
+          "ip_in": ["10.0.0.0/8"],
+          "agent": {
+            "category": ["ai_crawler"]
+          }
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000005",
+        "id": "signed-crawlers",
+        "match": {
+          "agent": {
+            "category": ["ai_crawler"],
+            "signature_agent": ["https://radiustech.xyz"]
+          }
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "signed_crawler"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000006",
+        "id": "radius-signed",
+        "match": {
+          "agent": {
+            "signature_agent": ["https://agent.example", "https://radiustech.xyz"]
+          }
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000007",
+        "id": "ai-search-allowance",
+        "match": {
+          "agent": {
+            "category": ["ai_search"]
+          }
+        },
+        "free_quota": {
+          "key": "agent",
+          "quota": 50,
+          "window_s": 86400
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "over_quota"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000004",
+        "id": "everyone-else",
+        "match": {},
+        "action": {
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "a verified search engine crawler matches its category",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "search_engine_crawler"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "good-bots",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "any category in the list matches",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "page_preview"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "good-bots",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "a request with no verified agent never matches an agent rule",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "an agent outside the list doesn't match",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_assistant"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "agent and endpoint are ANDed: an AI crawler on the endpoint",
+      "request": {
+        "method": "GET",
+        "path": "/llms-full.txt",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_crawler"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "corpus/no-training",
+          "type": "deny",
+          "status": 403,
+          "code": "no_training"
+        }
+      }
+    },
+    {
+      "name": "agent and endpoint are ANDed: an AI crawler elsewhere",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_crawler"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "agent and IP range are ANDed: both hold",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "client_ip": "10.1.2.3",
+        "agent": {
+          "category": "ai_crawler"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "office-crawlers",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "agent and IP range are ANDed: the range alone isn't enough",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "client_ip": "10.1.2.3"
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "a verified signature agent in the list matches",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "signature_agent": "https://radiustech.xyz"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "radius-signed",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "a signature agent outside the list doesn't match",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "signature_agent": "https://other.example"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "category and signature agent are ANDed: both hold",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_crawler",
+          "signature_agent": "https://radiustech.xyz"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "signed-crawlers",
+          "type": "deny",
+          "status": 403,
+          "code": "signed_crawler"
+        }
+      }
+    },
+    {
+      "name": "category and signature agent are ANDed: the category alone isn't enough",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_crawler"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "a rule on signature agents ignores the category",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {
+          "category": "ai_assistant",
+          "signature_agent": "https://agent.example"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "radius-signed",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "an empty agent matches no agent rule",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "agent": {}
+      },
+      "expected": {
+        "decision": {
+          "rule": "everyone-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "agent keys count a signed agent by its signature agent origin, not its IP",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7",
+        "agent": {
+          "category": "ai_search",
+          "signature_agent": "https://other.example"
+        }
+      },
+      "counts": [1],
+      "expected": {
+        "counted": [
+          {
+            "rule": "ai-search-allowance",
+            "limit": "free_quota",
+            "key": "00000000-0000-4000-8000-000000000007:free:20370:agent:sig:https://other.example",
+            "reset_s": 54400
+          }
+        ],
+        "decision": {
+          "rule": "ai-search-allowance",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "50",
+            "RateLimit-Remaining": "49",
+            "RateLimit-Reset": "54400"
+          }
+        }
+      }
+    },
+    {
+      "name": "agent keys count an unsigned verified agent by its category",
+      "request": {
+        "method": "GET",
+        "path": "/build",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7",
+        "agent": {
+          "category": "ai_search"
+        }
+      },
+      "counts": [2],
+      "expected": {
+        "counted": [
+          {
+            "rule": "ai-search-allowance",
+            "limit": "free_quota",
+            "key": "00000000-0000-4000-8000-000000000007:free:20370:agent:cat:ai_search",
+            "reset_s": 54400
+          }
+        ],
+        "decision": {
+          "rule": "ai-search-allowance",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "50",
+            "RateLimit-Remaining": "48",
+            "RateLimit-Reset": "54400"
+          }
+        }
+      }
+    }
+  ]
+}

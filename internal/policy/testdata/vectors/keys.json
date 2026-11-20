@@ -1,0 +1,189 @@
+{
+  "description": "Limit keys: caller (falling back to ip) and global.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 3,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-17T12:00:00Z",
+    "mode": "test",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": "remote_addr",
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "per-caller",
+        "match": {
+          "endpoint": {
+            "slug": "search",
+            "methods": ["GET"],
+            "path": "/search"
+          }
+        },
+        "rate_limit": {
+          "key": "caller",
+          "quota": 5,
+          "window_s": 3600
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "id": "everyone",
+        "match": {
+          "endpoint": {
+            "slug": "feed",
+            "methods": ["GET"],
+            "path": "/feed"
+          }
+        },
+        "rate_limit": {
+          "key": "global",
+          "quota": 100,
+          "window_s": 86400
+        },
+        "action": {
+          "type": "allow"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "caller keys count the verified caller",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7",
+        "caller": {
+          "id": "acct_42"
+        }
+      },
+      "counts": [5],
+      "expected": {
+        "counted": [
+          {
+            "rule": "per-caller",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:488888:caller:acct_42",
+            "reset_s": 400
+          }
+        ],
+        "decision": {
+          "rule": "per-caller",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "5",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "400"
+          }
+        }
+      }
+    },
+    {
+      "name": "caller keys fall back to the IP address without a caller",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "now": 1760000000,
+        "client_ip": "2001:db8::7"
+      },
+      "counts": [6],
+      "expected": {
+        "counted": [
+          {
+            "rule": "per-caller",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:488888:ip:2001:db8::/64",
+            "reset_s": 400
+          }
+        ],
+        "decision": {
+          "rule": "per-caller",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited",
+          "headers": {
+            "RateLimit-Limit": "5",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "400",
+            "Retry-After": "400"
+          }
+        }
+      }
+    },
+    {
+      "name": "IPv6 addresses count per /64: another address in the same /64 shares the counter",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "now": 1760000000,
+        "client_ip": "2001:db8::ffff:1"
+      },
+      "counts": [6],
+      "expected": {
+        "counted": [
+          {
+            "rule": "per-caller",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:488888:ip:2001:db8::/64",
+            "reset_s": 400
+          }
+        ],
+        "decision": {
+          "rule": "per-caller",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited",
+          "headers": {
+            "RateLimit-Limit": "5",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "400",
+            "Retry-After": "400"
+          }
+        }
+      }
+    },
+    {
+      "name": "global keys share one counter",
+      "request": {
+        "method": "GET",
+        "path": "/feed",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [100],
+      "expected": {
+        "counted": [
+          {
+            "rule": "everyone",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000002:rate:20370:global",
+            "reset_s": 54400
+          }
+        ],
+        "decision": {
+          "rule": "everyone",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "100",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "54400"
+          }
+        }
+      }
+    }
+  ]
+}

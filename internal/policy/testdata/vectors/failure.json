@@ -1,0 +1,143 @@
+{
+  "description": "Failure modes: counter_error over, headers off, unmatched deny.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 3,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-17T12:00:00Z",
+    "mode": "test",
+    "defaults": {
+      "unmatched": "deny",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "over"
+      },
+      "client_ip": "remote_addr",
+      "headers": {
+        "ratelimit": false,
+        "retry_after": false
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "metered",
+        "match": {
+          "endpoint": {
+            "slug": "quote",
+            "methods": ["GET"],
+            "path": "/quote"
+          }
+        },
+        "rate_limit": {
+          "key": "ip",
+          "quota": 10,
+          "window_s": 60
+        },
+        "action": {
+          "type": "allow"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "counter_error over: a failed counter applies the action, without headers",
+      "request": {
+        "method": "GET",
+        "path": "/quote",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counter_error": true,
+      "expected": {
+        "counted": [
+          {
+            "rule": "metered",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "metered",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited"
+        }
+      }
+    },
+    {
+      "name": "with headers off, a denial over the limit adds none",
+      "request": {
+        "method": "GET",
+        "path": "/quote",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [11],
+      "expected": {
+        "counted": [
+          {
+            "rule": "metered",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "metered",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited"
+        }
+      }
+    },
+    {
+      "name": "unmatched deny refuses requests no rule matches",
+      "request": {
+        "method": "GET",
+        "path": "/other",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      }
+    },
+    {
+      "name": "client_ip remote_addr: the connection's address is the client's",
+      "request": {
+        "method": "GET",
+        "path": "/quote",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "198.51.100.20",
+        "headers": {
+          "cf-connecting-ip": "10.9.9.9"
+        }
+      },
+      "counts": [1],
+      "expected": {
+        "counted": [
+          {
+            "rule": "metered",
+            "limit": "rate_limit",
+            "key": "00000000-0000-4000-8000-000000000001:rate:29333333:ip:198.51.100.20",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "metered",
+          "type": "allow"
+        }
+      }
+    }
+  ]
+}
