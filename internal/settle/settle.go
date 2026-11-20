@@ -78,25 +78,33 @@ type Settler struct {
 	MinIdle       time.Duration
 	MaxDeliveries int64
 	SettleTimeout time.Duration
+	HeldGrace     time.Duration // default DefaultHeldGrace
+	ResolveEvery  time.Duration // default DefaultResolveEvery
 	Now           func() time.Time
 }
 
 // Run settles until ctx is done. It creates the group if needed, claims what an idle
-// consumer left behind on start and then every ClaimEvery, and otherwise blocks on
-// new jobs.
+// consumer left behind on start and then every ClaimEvery, resolves the filter's held
+// Sync payments on start and then every ResolveEvery (held.go), and otherwise blocks
+// on new jobs.
 func (s *Settler) Run(ctx context.Context) error {
 	if err := s.ensureGroup(ctx); err != nil {
 		return err
 	}
 	s.claim(ctx)
+	s.resolveHeld(ctx)
 	t := time.NewTicker(s.claimEvery())
 	defer t.Stop()
+	h := time.NewTicker(s.resolveEvery())
+	defer h.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
 			s.claim(ctx)
+		case <-h.C:
+			s.resolveHeld(ctx)
 		default:
 		}
 		if _, err := s.step(ctx); err != nil && ctx.Err() == nil {

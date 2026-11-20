@@ -57,14 +57,17 @@ pay it. So far only our own buyer has been tested against it; `radius-cli wallet
 Envoy gives an external filter a fixed budget per message: 200 ms by default. A filter
 that runs out gets the request failed (504), or, if it fails open, **releases the
 response unpaid**. A facilitator takes 0.3–0.4 s to verify and about 0.5–1 s to settle
-(measured). So the filter **verifies locally in milliseconds on the request**, and
+(measured). So the filter **verifies locally in milliseconds on the request**, asks the
+facilitator's `/verify` as the gate standard requires (`-facilitator-verify`, on by
+default), and
 settles **on the response, while Envoy holds it** (`captureMode: Sync`, the default)
 ([design note](docs/design/request-path-budget.md)):
 
 ```
 request_headers   no payment  → 402 + PAYMENT-REQUIRED          (backend never sees it)
                   payment     → verify the signature locally (~0.1 ms),
-                                check the cached balance, RESERVE in Redis
+                                check the cached balance, RESERVE in Redis,
+                                then the facilitator's /verify (~0.3–0.4 s)
 response          2xx or 3xx  → hold it: check on chain the payment is unspent,
                   (not 304)     settle through the facilitator, then
                                   settled → release, with the transaction
@@ -85,9 +88,11 @@ Measured on GKE on 2026-11-19, on Radius testnet and Base Sepolia: the held resp
 took about 0.55 s at the median (p99 under 1 s, n=100 at four concurrent buyers);
 refused settlements, replays, a deleted Redis record, a facilitator slow by 3 s or 8 s,
 a hung or unreachable facilitator and a rolling restart mid-settle all ended with
-nobody served unpaid and nobody charged without a response. The one case left: a filter
-pod killed outright mid-settle charges the buyer and returns a 503; a record of those,
-for refunds, is next ([results](docs/design/request-path-budget.md)).
+nobody served unpaid and nobody charged without a response. The one case where a buyer
+can still pay and get a 503 is a filter pod killed outright mid-settle; the filter
+records every payment before settling it, and the settler lists any that were charged
+without a confirmed delivery, for a refund ([results](docs/design/request-path-budget.md),
+[how to list them](deploy/k8s/README.md)).
 
 `captureMode: Async` is the opt-in fast path: the response goes out at once and the
 `x402-settler` settles about a second later. The payer can cancel or move the funds in

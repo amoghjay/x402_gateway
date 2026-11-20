@@ -26,6 +26,7 @@ package extproc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -137,6 +138,22 @@ type Payments struct {
 	RPCs          map[string]*radius.RPC // by CAIP-2 network
 	SettleTimeout time.Duration          // per held response; default DefaultSettleTimeout
 	ConfirmWait   time.Duration          // after an unclear settle; default DefaultConfirmWait
+	// FacilitatorVerify: on a Sync route, also ask the facilitator's /verify on the
+	// request, after the local checks and the reservation. The gate standard requires
+	// it; it costs one facilitator round trip before the backend is called.
+	FacilitatorVerify bool
+	VerifyTimeout     time.Duration // default DefaultVerifyTimeout
+}
+
+// DefaultVerifyTimeout bounds the facilitator's /verify on a Sync route's request. Envoy
+// allows a Sync route 10 s per message, so it has room; a slow facilitator gets a 503.
+const DefaultVerifyTimeout = 2 * time.Second
+
+func (p *Payments) verifyTimeout() time.Duration {
+	if p.VerifyTimeout > 0 {
+		return p.VerifyTimeout
+	}
+	return DefaultVerifyTimeout
 }
 
 // Server is the ext_proc server.
@@ -175,6 +192,7 @@ type request struct {
 	released bool
 	settled  bool // Sync: the transfer is on chain
 	unknown  bool // Sync: the settle's outcome is not known; the in-flight amount stays until its TTL
+	held     bool // Sync: the payment's record (reserve.Held) is written and not yet cleared
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -197,10 +215,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		if err := stream.Send(resp); err != nil {
 			if st.settled {
 				// Paid for and not delivered: Envoy (or the client) went away while the
-				// response was held. Rare, and the seller should hear about it.
+				// response was held. The record stays, so the settler lists it for a refund.
 				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", paymentID(st.res), "err", err)
 			}
 			return err
+		}
+		if st.settled {
+			// Envoy has the paid response: delivered, so the record can go. Only now, so
+			// a crash between the settle and this point leaves it for the settler.
+			s.unhold(st)
 		}
 	}
 }
@@ -291,6 +314,7 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 // the filter's deadline. A refusal is a 402 with the reason; our own slowness is a 503
 // with Retry-After, never a charge.
 func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hdr string) *extprocv3.ProcessingResponse {
+	stream := ctx // the facilitator's /verify has its own budget, not the request deadline
 	ctx, cancel := context.WithTimeout(ctx, s.pay.deadline())
 	defer cancel()
 	entry, log := st.entry, st.log
@@ -344,6 +368,12 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 			fmt.Errorf("balance %s (%s, %s old) minus in-flight is below the price %s", bal.Value, bal.Source, bal.Age.Round(time.Millisecond), entry.Price))
 	}
 	st.res, st.rsv, st.payment, st.pp, st.pw = res, rsv, hdr, pp, pw
+
+	if entry.Sync() && s.pay.FacilitatorVerify {
+		if refused := s.facilitatorVerify(stream, st, pw); refused != nil {
+			return refused
+		}
+	}
 
 	log.Info("payment accepted", "decision", PaymentAccepted, "paymentId", paymentID(res), "amount", entry.Price.String(),
 		"balance", bal.Value.String(), "balanceSource", bal.Source, "inflight", rsv.Inflight.String(), "ms", time.Since(t0).Milliseconds())
@@ -469,6 +499,45 @@ func (s *Server) refuse(st *request, pw paywall.Request, reason string, d Decisi
 	}
 	st.log.Info("payment refused", "decision", d, "reason", reason, "cause", cause.Error())
 	return immediate(resp.Status, resp.Headers, resp.Body, d)
+}
+
+// facilitatorVerify asks the route's facilitator whether the payment is valid. A no is
+// a 402 with its reason; no answer is a 503. Either way the reservation is released
+// (nothing was charged) and the nonce stays claimed, as for any refused payment.
+func (s *Server) facilitatorVerify(ctx context.Context, st *request, pw paywall.Request) *extprocv3.ProcessingResponse {
+	fac := s.pay.Facilitators[st.entry.Network.Network()] // not nil: checked for Sync routes above
+	ctx, cancel := context.WithTimeout(ctx, s.pay.verifyTimeout())
+	defer cancel()
+	t0 := time.Now()
+	vr, err := fac.Verify(ctx, st.pp, st.entry.Requirements)
+	ms := time.Since(t0).Milliseconds()
+	var fs *facilitator.Status
+	switch {
+	case err == nil && vr.IsValid && (vr.Payer == "" || strings.EqualFold(vr.Payer, st.res.Payer.String())):
+		st.log.Debug("facilitator verified the payment", "ms", ms)
+		return nil
+	case err == nil && vr.IsValid:
+		s.release(st, DependencyUnavailable)
+		st.log.Error("facilitator verified a different payer; not charged", "decision", DependencyUnavailable, "facilitatorPayer", vr.Payer, "ms", ms)
+		return retryLater(DependencyUnavailable)
+	case err == nil, errors.As(err, &fs) && fs.Definite():
+		reason := vr.InvalidReason
+		if reason == "" && fs != nil {
+			var body x402.VerifyResponse
+			if json.Unmarshal([]byte(fs.Body), &body) == nil {
+				reason = body.InvalidReason
+			}
+		}
+		if reason == "" {
+			reason = x402.ReasonUnexpectedVerify
+		}
+		s.release(st, PaymentInvalid)
+		return s.refuse(st, pw, reason, PaymentInvalid, fmt.Errorf("facilitator /verify said no in %d ms: %s", ms, reason))
+	default:
+		s.release(st, DependencyUnavailable)
+		st.log.Error("facilitator /verify gave no answer; not charged", "decision", DependencyUnavailable, "err", err, "ms", ms)
+		return retryLater(DependencyUnavailable)
+	}
 }
 
 // retryLater is the answer when our side, not the buyer, failed: 503 with Retry-After,

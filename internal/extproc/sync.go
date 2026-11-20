@@ -10,8 +10,10 @@ import (
 
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 
+	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
+	"github.com/amoghjay/x402_gateway/internal/reserve"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 )
 
@@ -89,10 +91,34 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 		return s.withhold(st, ReasonReplay, Replay, nil, time.Since(t0).Milliseconds())
 	}
 
+	// Write the record before anything can be charged (reserve.Held): if this request
+	// ends without a confirmed outcome, even by this process dying, the settler finds it.
+	if err := s.hold(ctx, st); err != nil {
+		s.release(st, DependencyUnavailable)
+		st.log.Error("could not record the payment before settling: response withheld, not charged", "decision", DependencyUnavailable, "paymentId", id, "err", err)
+		return retryLater(DependencyUnavailable)
+	}
+
 	sctx, cancel := context.WithTimeout(ctx, s.pay.settleTimeout())
 	resp, err := fac.Settle(sctx, st.pp, entry.Requirements)
-	for noWalletFree(err) && wait(sctx, walletRetry) == nil {
-		resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+	retried := false
+	for {
+		if noWalletFree(err) && wait(sctx, walletRetry) == nil {
+			resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+			continue
+		}
+		// A refusal that can pass (the facilitator's transaction failed) is tried once
+		// more, but only while the chain shows the payment unspent: a nonce settles at
+		// most once, so a second try can never charge twice.
+		if refused, reason := refusal(resp, err); refused && !retried && passingRefusal(reason) && sctx.Err() == nil {
+			if used, cerr := s.usedOnChain(ctx, st); cerr == nil && !used {
+				retried = true
+				st.log.Warn("settle refused for a reason that can pass, and the payment is unspent: settling once more", "paymentId", id, "reason", reason)
+				resp, err = fac.Settle(sctx, st.pp, entry.Requirements)
+				continue
+			}
+		}
+		break
 	}
 	cancel()
 	ms := time.Since(t0).Milliseconds()
@@ -103,10 +129,12 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	// A definite no is believed as it is. (If the nonce is used by now, another copy of
 	// this payment settled in the meantime; that copy's request is the one that paid.)
 	if refused, reason := refusal(resp, err); refused {
+		s.unhold(st)
 		return s.withhold(st, reason, SettleRefused, err, ms)
 	}
 	// Nothing reached the facilitator, so nothing can settle later: not charged.
 	if neverSent(err) {
+		s.unhold(st)
 		s.release(st, DependencyUnavailable)
 		st.log.Error("facilitator unreachable: response withheld, not charged", "decision", DependencyUnavailable, "paymentId", id,
 			"status", code, "settleErr", errText(err), "ms", ms)
@@ -123,7 +151,8 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 	}
 	// Unknown. The reservation is not released (the money may have moved; the in-flight
 	// TTL clears it) and nothing retries the settle: a later success would charge for a
-	// response that was never delivered.
+	// response that was never delivered. The record stays: the settler resolves it from
+	// the chain once validBefore has passed or the transfer shows.
 	st.unknown = true
 	st.log.Error("settlement outcome unknown: response withheld", "decision", SettlementUnknown, "paymentId", id,
 		"status", code, "settleErr", errText(err), "chainErr", errText(cerr), "ms", ms)
@@ -198,6 +227,15 @@ func refusal(resp x402.SettleResponse, err error) (bool, string) {
 	return false, ""
 }
 
+// passingRefusal reports whether a refusal says the attempt failed rather than the
+// payment: the facilitator's own transaction failed or it hit an unexpected error. Seen
+// once in 30 Base Sepolia payments on 2026-11-19 (invalid_exact_evm_transaction_failed)
+// for a buyer who could pay. Insufficient funds, a bad signature or a used nonce are
+// about the payment and are never retried.
+func passingRefusal(reason string) bool {
+	return reason == "invalid_exact_evm_transaction_failed" || reason == x402.ReasonUnexpectedSettle
+}
+
 // noWalletFree is the facilitator saying its own signer pool is busy: nothing was
 // submitted, and its documented answer is to ask again shortly.
 func noWalletFree(err error) bool {
@@ -216,6 +254,42 @@ func (s *Server) usedOnChain(ctx context.Context, st *request) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chainCheckTimeout)
 	defer cancel()
 	return rpc.AuthorizationState(ctx, st.entry.Network.TokenAddress(), st.res.Payer, st.res.Authorization.Nonce)
+}
+
+// holdTimeout bounds each write of the record; Redis answers in well under a ms.
+const holdTimeout = 250 * time.Millisecond
+
+// hold writes the payment's record (reserve.Held) before /settle.
+func (s *Server) hold(ctx context.Context, st *request) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), holdTimeout)
+	defer cancel()
+	auth := st.res.Authorization
+	err := s.pay.Reserve.Hold(ctx, reserve.Held{
+		PaymentID: paymentID(st.res), Payer: st.res.Payer.String(), Nonce: evm.Hex(auth.Nonce[:]),
+		Network: st.entry.Network.Network(), Token: st.entry.Network.TokenAddress().String(),
+		Route: st.entry.Key, Amount: st.entry.Price.String(), ValidBefore: st.res.Expires.Unix(),
+		HeldAt: s.pay.now(),
+	})
+	if err == nil {
+		st.held = true
+	}
+	return err
+}
+
+// unhold removes the record once the outcome is known for good. A failure only leaves
+// it for the settler, which then reads the chain: harmless for a refusal (unused, so
+// dropped), a false alarm for a delivered response (recorded as unconfirmed).
+func (s *Server) unhold(st *request) {
+	if !st.held {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), holdTimeout)
+	defer cancel()
+	if err := s.pay.Reserve.Unhold(ctx, paymentID(st.res)); err != nil {
+		st.log.Warn("could not clear the payment's record; the settler will check it on chain", "paymentId", paymentID(st.res), "err", err)
+		return
+	}
+	st.held = false
 }
 
 // usedBeforeSettle is usedOnChain, asked again if the first read fails or times out.

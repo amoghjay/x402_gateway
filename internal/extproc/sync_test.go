@@ -2,6 +2,7 @@ package extproc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,10 @@ type fakeFacilitator struct {
 	calls  atomic.Int32
 	last   atomic.Value // the last request body, string
 	onCall atomic.Value // func(), run on each /settle before answering
+
+	verifyStatus atomic.Int64 // /verify; 0 = 200
+	verifyBody   atomic.Value // string; unset = {"isValid":true}
+	verifyCalls  atomic.Int32
 }
 
 func (f *fakeFacilitator) answer(status int, body string) {
@@ -57,11 +62,24 @@ func syncPrices(t *testing.T) *pricing.Store {
 	return s
 }
 
-func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitator) {
+func setupSync(t *testing.T, settleTimeout time.Duration, opts ...func(*Payments)) (*paid, *fakeFacilitator) {
 	t.Helper()
 	f := &fakeFacilitator{}
 	f.answer(200, `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/verify" {
+			f.verifyCalls.Add(1)
+			code, body := int(f.verifyStatus.Load()), `{"isValid":true}`
+			if code == 0 {
+				code = 200
+			}
+			if b, ok := f.verifyBody.Load().(string); ok {
+				body = b
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+			return
+		}
 		if r.URL.Path != "/settle" {
 			http.NotFound(w, r)
 			return
@@ -83,6 +101,9 @@ func setupSync(t *testing.T, settleTimeout time.Duration) (*paid, *fakeFacilitat
 		pay.RPCs = map[string]*radius.RPC{radius.Testnet.Network(): node}
 		pay.SettleTimeout = settleTimeout
 		pay.ConfirmWait = 300 * time.Millisecond // the default would add 2.5 s to every unclear case
+		for _, o := range opts {
+			o(pay)
+		}
 	})
 	return p, f
 }
@@ -402,6 +423,197 @@ func TestSyncUnreachableFacilitatorAnswersAtOnce(t *testing.T) {
 		t.Errorf("in-flight = %q, want released: nothing was charged", p.inflight())
 	}
 	p.decided(DependencyUnavailable)
+}
+
+// held counts the payments recorded before /settle and not yet cleared.
+func (p *paid) held() int {
+	p.t.Helper()
+	n, err := p.store.Redis.ZCard(p.t.Context(), reserve.HeldSet).Result()
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	return int(n)
+}
+
+// The record written before /settle: cleared once the response is handed to Envoy or
+// the settle is refused, kept when the outcome is unknown (the settler resolves it).
+func TestSyncHeldRecord(t *testing.T) {
+	t.Run("delivered: cleared", func(t *testing.T) {
+		p, _ := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir != nil {
+			t.Fatalf("not released: %v", ir)
+		}
+		// Cleared just after the server's Send returns, so poll briefly.
+		deadline := time.Now().Add(time.Second)
+		for p.held() != 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if n := p.held(); n != 0 {
+			t.Errorf("%d records left after a delivered response", n)
+		}
+	})
+	t.Run("refused: cleared", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		f.answer(400, `{"success":false,"errorReason":"invalid_exact_evm_insufficient_balance","transaction":"","network":"eip155:72344"}`)
+		stream, _ := p.request(p.payment())
+		p.respond(stream, "200")
+		if n := p.held(); n != 0 {
+			t.Errorf("%d records left after a refusal", n)
+		}
+	})
+	t.Run("unknown: kept with the details", func(t *testing.T) {
+		p, f := setupSync(t, 100*time.Millisecond)
+		f.answer(502, `bad gateway`)
+		stream, _ := p.request(p.payment())
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir.GetStatus().GetCode() != 503 {
+			t.Fatalf("response phase = %v", ir)
+		}
+		hs, err := p.store.HeldBefore(t.Context(), time.Now().Add(time.Minute), 10)
+		if err != nil || len(hs) != 1 {
+			t.Fatalf("held = %+v, %v; want the one payment", hs, err)
+		}
+		if h := hs[0]; h.Payer != p.w.Address().String() || h.Amount != "1000" || h.Route != "httproute/demo/httpbin" || h.Nonce != h.PaymentID || h.ValidBefore == 0 {
+			t.Errorf("record = %+v", h)
+		}
+	})
+	t.Run("record cannot be written: nothing settled", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.redis.SetError("READONLY drill") // Redis refuses writes from here on
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 503 || ir.GetDetails() != "x402_dependency_unavailable" {
+			t.Fatalf("response phase = %v %q, want a 503", ir.GetStatus().GetCode(), ir.GetDetails())
+		}
+		if f.calls.Load() != 0 {
+			t.Errorf("/settle called %d times without a record", f.calls.Load())
+		}
+	})
+}
+
+// A refusal that can pass is settled once more while the payment is unspent; one about
+// the payment, or a payment already spent, is not.
+func TestSyncPassingRefusalIsTriedOnceMore(t *testing.T) {
+	const failed = `{"success":false,"errorReason":"invalid_exact_evm_transaction_failed","transaction":"","network":"eip155:72344"}`
+	const ok = `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`
+	for name, c := range map[string]struct {
+		first     string
+		then      string
+		spent     bool // the nonce is used on chain by the time of the second look
+		wantCode  int32
+		wantCalls int32
+	}{
+		"transaction failed, then settles": {failed, ok, false, 0, 2},
+		"transaction failed twice":         {failed, failed, false, 402, 2},
+		"transaction failed, nonce spent":  {failed, ok, true, 402, 1},
+		"insufficient balance: never retried": {
+			`{"success":false,"errorReason":"invalid_exact_evm_insufficient_balance","transaction":"","network":"eip155:72344"}`, ok, false, 402, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, f := setupSync(t, 0)
+			f.onCall.Store(func() {
+				if f.calls.Load() == 1 {
+					f.answer(400, c.first)
+					p.node.used.Store(c.spent)
+					return
+				}
+				f.answer(200, c.then)
+			})
+			stream, _ := p.request(p.payment())
+			resp := p.respond(stream, "200")
+			if code := resp.GetImmediateResponse().GetStatus().GetCode(); int32(code) != c.wantCode {
+				t.Errorf("response phase = %v, want %d (0 = released)", code, c.wantCode)
+			}
+			if n := f.calls.Load(); n != c.wantCalls {
+				t.Errorf("/settle calls = %d, want %d", n, c.wantCalls)
+			}
+		})
+	}
+}
+
+// The payer cancels the authorization (cancelAuthorization) while the request is in
+// flight. On chain a cancelled nonce reads as used, so: cancelled before the response
+// phase → caught by the read before /settle (402, never settled); cancelled while the
+// settle runs → the facilitator refuses it (402). Either way nothing is served.
+func TestSyncCancelledAuthorizationIsNeverServed(t *testing.T) {
+	t.Run("before the response phase", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.node.used.Store(true) // cancelAuthorization lands while the backend works
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 402 || f.calls.Load() != 0 {
+			t.Errorf("response phase = %v, /settle calls = %d; want 402 and no settle", ir.GetStatus().GetCode(), f.calls.Load())
+		}
+	})
+	t.Run("during the settle", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		f.answer(400, `{"success":false,"errorReason":"invalid_transaction_state","transaction":"","network":"eip155:72344"}`)
+		f.onCall.Store(func() { p.node.used.Store(true) })
+		stream, _ := p.request(p.payment())
+		ir := p.respond(stream, "200").GetImmediateResponse()
+		if ir.GetStatus().GetCode() != 402 {
+			t.Errorf("response phase = %v, want 402", ir.GetStatus().GetCode())
+		}
+	})
+}
+
+// With FacilitatorVerify, a Sync route's payment is also checked by the facilitator's
+// /verify on the request, before the backend is called.
+func TestSyncFacilitatorVerify(t *testing.T) {
+	on := func(p *Payments) { p.FacilitatorVerify = true }
+	t.Run("valid: forwarded and settled", func(t *testing.T) {
+		p, f := setupSync(t, 0, on)
+		stream, resp := p.request(p.payment())
+		if resp.GetImmediateResponse() != nil {
+			t.Fatalf("request phase refused: %v", resp)
+		}
+		if ir := p.respond(stream, "200").GetImmediateResponse(); ir != nil {
+			t.Fatalf("response phase = %v", ir)
+		}
+		if f.verifyCalls.Load() != 1 || f.calls.Load() != 1 {
+			t.Errorf("/verify calls %d, /settle calls %d; want 1 and 1", f.verifyCalls.Load(), f.calls.Load())
+		}
+	})
+	for name, c := range map[string]struct {
+		status  int64
+		body    string
+		code    int32
+		details string
+		reason  string
+	}{
+		"says no":           {200, `{"isValid":false,"invalidReason":"invalid_exact_evm_insufficient_balance"}`, 402, "x402_payment_invalid", "invalid_exact_evm_insufficient_balance"},
+		"says no with 400":  {400, `{"isValid":false,"invalidReason":"invalid_exact_evm_payload_signature"}`, 402, "x402_payment_invalid", "invalid_exact_evm_payload_signature"},
+		"5xx":               {503, `down`, 503, "x402_dependency_unavailable", ""},
+		"a different payer": {200, `{"isValid":true,"payer":"0x0000000000000000000000000000000000000001"}`, 503, "x402_dependency_unavailable", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, f := setupSync(t, 0, on)
+			f.verifyStatus.Store(c.status)
+			f.verifyBody.Store(c.body)
+			_, resp := p.request(p.payment())
+			ir := resp.GetImmediateResponse()
+			if int32(ir.GetStatus().GetCode()) != c.code || ir.GetDetails() != c.details {
+				t.Fatalf("request phase = %v %q, want %d %q", ir.GetStatus().GetCode(), ir.GetDetails(), c.code, c.details)
+			}
+			if c.reason != "" && !strings.Contains(string(ir.GetBody())+fmt.Sprint(ir.GetHeaders()), c.reason) {
+				t.Errorf("402 does not carry the facilitator's reason %q", c.reason)
+			}
+			if p.inflight() != "" {
+				t.Errorf("in-flight = %q, want released", p.inflight())
+			}
+			if f.calls.Load() != 0 {
+				t.Errorf("/settle called %d times", f.calls.Load())
+			}
+		})
+	}
+	t.Run("off: not called", func(t *testing.T) {
+		p, f := setupSync(t, 0)
+		stream, _ := p.request(p.payment())
+		p.respond(stream, "200")
+		if f.verifyCalls.Load() != 0 {
+			t.Errorf("/verify called %d times with FacilitatorVerify off", f.verifyCalls.Load())
+		}
+	})
 }
 
 // A definite refusal is believed even if the nonce turns out used: another copy of the
