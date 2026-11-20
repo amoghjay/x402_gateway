@@ -31,7 +31,8 @@ const (
 	RuleAllowed       Decision = "rule_allowed"       // continue: the deciding rule, or the policy's default, allows it
 	RuleDenied        Decision = "rule_denied"        // the rule's status and {"code"}: a deny action, a rate limit, or no matching rule
 	PolicyUnavailable Decision = "policy_unavailable" // 503: no compiled policy was ever loaded and noPolicy is deny
-	ChargeNotBuilt    Decision = "charge_not_built"   // 503: the rule asks for payment; paid platform rules come with the next filter version
+	// A charge rule's requests take the paid path's decisions (payment_required,
+	// payment_accepted, settled, ...), as on a priced route.
 )
 
 // sourceAddressAttr is the downstream peer's address ("ip:port"), which client_ip:
@@ -50,7 +51,7 @@ func (s *Server) WithCounters(c *counter.Store) *Server {
 }
 
 // platformRequest decides a request on a platform route.
-func (s *Server) platformRequest(ctx context.Context, req *extprocv3.ProcessingRequest, h map[string]string, st *request, table *pricing.Prices, pr pricing.PlatformRoute) *extprocv3.ProcessingResponse {
+func (s *Server) platformRequest(ctx context.Context, req *extprocv3.ProcessingRequest, h map[string]string, st *request, key string, table *pricing.Prices, pr pricing.PlatformRoute) *extprocv3.ProcessingResponse {
 	st.log = st.log.With("project", pr.Project)
 	pol := table.Policy(pr.Project)
 	if pol == nil {
@@ -70,11 +71,17 @@ func (s *Server) platformRequest(ctx context.Context, req *extprocv3.ProcessingR
 		}, remote),
 		Now: uint64(s.now().Unix()), //nolint:gosec // a wall clock after 1970
 	}
-	done, count := policy.Select(pol, r)
-	if done != nil {
-		return s.respondRule(st, *done, pol.Version)
+	var d policy.Decision
+	if done, count := policy.Select(pol, r); done != nil {
+		d = *done
+	} else {
+		d = policy.Decide(pol, count, s.count(ctx, st, count))
 	}
-	return s.respondRule(st, policy.Decide(pol, count, s.count(ctx, st, count)), pol.Version)
+	if d.Type == policy.TypePaymentRequired {
+		st.log = st.log.With("policyVersion", pol.Version, "rule", d.Rule)
+		return withRuleHeaders(s.platformCharge(ctx, h, st, key, d, table), d.Headers)
+	}
+	return s.respondRule(st, d, pol.Version)
 }
 
 // count adds the request to the rule's counters. A failure reads every counter as failed; the
@@ -122,9 +129,9 @@ func (s *Server) respondRule(st *request, d policy.Decision, version uint64) *ex
 		log.Info("denied", "decision", decision, "status", d.Status, "code", d.Code)
 		return immediate(d.Status, hdr, append(body, '\n'), decision)
 
-	default: // payment_required
-		log.Error("the rule asks for payment, which this filter version does not take on platform routes; refused", "decision", ChargeNotBuilt)
-		return plain(http.StatusServiceUnavailable, "x402 filter: this route's paid rules are not supported by this filter version\n", ChargeNotBuilt)
+	default: // payment_required is answered by platformCharge; anything else is a bug
+		log.Error("unknown decision type; refused", "decision", PolicyInvalid, "type", d.Type)
+		return plain(http.StatusServiceUnavailable, "x402 filter: this route's policy could not be applied\n", PolicyInvalid)
 	}
 }
 

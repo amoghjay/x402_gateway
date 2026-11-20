@@ -77,7 +77,7 @@ const ReasonSettlementUnknown = "settlement_unknown"
 // settleHeld settles a Sync route's payment while Envoy holds the backend's response.
 func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extprocv3.ProcessingResponse {
 	entry, id := st.entry, paymentID(st.res)
-	fac := s.pay.Facilitators[entry.Network.Network()] // not nil: accept refused the request otherwise
+	fac := s.facilitator(st) // not nil: accept refused the request otherwise
 	t0 := time.Now()
 
 	// Already used on chain: this signature paid for something once, somewhere, and is

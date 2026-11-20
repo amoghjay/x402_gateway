@@ -136,6 +136,21 @@ type Prices struct {
 	blocked  map[string]string                 // route key → why it is refused
 	platform map[string]PlatformRoute          // route key → its project
 	policies map[string]*compiledpolicy.Policy // project → its loaded compiled policy (Watcher)
+	networks []radius.Profile                  // the networks this filter charges on, as passed to Parse
+}
+
+// Network returns the profile of a network this filter charges on, by CAIP-2 name. It is
+// safe on a nil *Prices.
+func (p *Prices) Network(caip2 string) (radius.Profile, bool) {
+	if p == nil {
+		return radius.Profile{}, false
+	}
+	for _, n := range p.networks {
+		if n.Network() == caip2 {
+			return n, true
+		}
+	}
+	return radius.Profile{}, false
 }
 
 // Platform returns the project that governs a route, if one does. It is safe on a nil
@@ -246,7 +261,7 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 		}
 	}
 
-	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}, platform: map[string]PlatformRoute{}}
+	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}, platform: map[string]PlatformRoute{}, networks: networks}
 	for k, why := range blocked {
 		if rk, ok := RouteKey(k + "/"); !ok || rk != k {
 			return nil, fmt.Errorf("pricing: blocked route %q: key must be \"httproute/<namespace>/<name>\"", k)
