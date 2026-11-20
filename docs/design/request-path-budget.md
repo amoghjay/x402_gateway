@@ -260,6 +260,24 @@ request budget. Not charged; a known request-phase limit, not new.
 **Not run:** cancelAuthorization mid-request (needs gas in the payer wallet; the chain
 read treats a cancelled nonce as used, which the replay drill covers).
 
+**Third round: M6a complete, images `f1d39c699d7c`, 2026-11-20.** On the cluster: Sync
+by default (all three demo routes), the held-payment record (#78), the retry after a
+passing refusal (#79) and the facilitator's `/verify` on the request (#80).
+
+| Check | Result |
+|---|---|
+| 6 paid requests on each Sync route (`/anything`, `/anything/sync` on Radius, `/anything/base` on Base) | 18 × 200, exactly one price each |
+| Request phase with `/verify` (balance + reserve + facilitator) | Radius p50 210 ms, max 733 (n=12); Base p50 189 ms, max 419 (n=6); was ~1 ms without |
+| Held response (chain read + settle) | Radius p50 632 ms, max 937; Base p50 600 ms, max 968 |
+| Both filter pods force-killed 2 s into an 8 s settle (`fac-shim`, `-facilitator-verify=false` for the drill) | client 503 in 2.9 s, buyer charged; the payment was in `held`; **57 s later on the `outcomes` stream as `charged_unconfirmed`** with payer, route, amount, and logged by the settler |
+| Normal paid requests | leave nothing in `held` |
+| A policy with a zero `payTo` on the free route | `Accepted=False Invalid`, its EnvoyExtensionPolicy kept, the route answered **503 `policy_invalid`**; deleted, the route was free again (200) |
+
+With this, every drill on the M6 plan's list has run or is covered by a unit test
+(cancelAuthorization), no response was released unpaid, and the one way a buyer can still
+pay without getting the response (the filter dies mid-settle) ends on the seller's
+refund list instead of nowhere.
+
 **Revised 2026-11-07: the window is not bounded.** Between our 200 and the settlement, the
 payer can call `cancelAuthorization` on SBC (present on Radius, checked by `eth_call`) or
 move the wallet's funds in one transaction, and every response served in that window goes
