@@ -1,0 +1,194 @@
+{
+  "description": "Overlapping endpoints under unmatched: deny. When none of the most specific endpoint's rules holds (none has rules, or their ip_in doesn't), the request gets defaults.unmatched from <slug>/_unmatched, never a less specific endpoint's rule.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 2,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-29T12:00:00Z",
+    "mode": "production",
+    "defaults": {
+      "unmatched": "deny",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": "remote_addr",
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "get-reports-latest/partners",
+        "match": {
+          "endpoint": {
+            "slug": "get-reports-latest",
+            "methods": ["GET"],
+            "path": "/reports/latest"
+          },
+          "ip_in": ["203.0.113.0/24"]
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "id": "get-reports-latest/_unmatched",
+        "match": {
+          "endpoint": {
+            "slug": "get-reports-latest",
+            "methods": ["GET"],
+            "path": "/reports/latest"
+          }
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "id": "get-reports-summary/_unmatched",
+        "match": {
+          "endpoint": {
+            "slug": "get-reports-summary",
+            "methods": ["GET"],
+            "path": "/reports/summary"
+          }
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000004",
+        "id": "get-reports-id/charge",
+        "match": {
+          "endpoint": {
+            "slug": "get-reports-id",
+            "methods": ["GET"],
+            "path": "/reports/:id"
+          }
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.004",
+          "description": "Report",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "4000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "a partner reads the latest report free",
+      "request": {
+        "method": "GET",
+        "path": "/reports/latest",
+        "client_ip": "203.0.113.9",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-reports-latest/partners",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "when the endpoint's only rule's ip_in doesn't hold, the request gets defaults.unmatched, not the :id endpoint's charge",
+      "request": {
+        "method": "GET",
+        "path": "/reports/latest",
+        "client_ip": "198.51.100.7",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-reports-latest/_unmatched",
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      }
+    },
+    {
+      "name": "an endpoint without rules gets defaults.unmatched, not the :id endpoint's charge",
+      "request": {
+        "method": "GET",
+        "path": "/reports/summary",
+        "client_ip": "198.51.100.7",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-reports-summary/_unmatched",
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      }
+    },
+    {
+      "name": "other reports pay",
+      "request": {
+        "method": "GET",
+        "path": "/reports/q3",
+        "client_ip": "198.51.100.7",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "get-reports-id/charge",
+          "type": "payment_required",
+          "price": "0.004",
+          "description": "Report",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "4000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a request no endpoint matches is denied without a rule",
+      "request": {
+        "method": "GET",
+        "path": "/status",
+        "client_ip": "198.51.100.7",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "deny",
+          "status": 403,
+          "code": "no_matching_rule"
+        }
+      }
+    }
+  ]
+}

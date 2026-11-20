@@ -7,14 +7,20 @@
 // overlap for a moment, never has two writers. Liveness and readiness are plain HTTP on
 // the health address. The filter does not depend on this process: if it is down, the
 // last price table and the existing EnvoyExtensionPolicies keep working as they are.
+//
+// A PaymentPolicy may instead name a Radius Platform project (spec.platform). The leader
+// then polls that project's compiled policy and stores it beside the price table; the
+// controller is the only part of the gate that talks to the Platform.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -26,6 +32,7 @@ import (
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/buildinfo"
 	"github.com/amoghjay/x402_gateway/internal/controller"
+	"github.com/amoghjay/x402_gateway/internal/platform"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
 
@@ -41,6 +48,8 @@ func main() {
 	filterName := flag.String("filter-service", "x402-filter", "name of the filter's Service")
 	filterPort := flag.Int64("filter-port", 9002, "ext_proc port of the filter's Service")
 	networks := flag.String("networks", "testnet", "comma-separated networks a policy may charge on (testnet, mainnet)")
+	platformURL := flag.String("platform-api-url", platform.DefaultBaseURL, "the Radius Platform API that spec.platform projects are read from")
+	pollInterval := flag.Duration("platform-poll-interval", controller.DefaultPollInterval, "how often each Radius Platform project's compiled policy is fetched (±10 %); at least 1s")
 	debug := flag.Bool("debug", false, "debug logging")
 	flag.Parse()
 
@@ -57,15 +66,18 @@ func main() {
 	// controller-runtime logs through logr; route it to the same JSON stream.
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
-	if err := run(log, *healthAddr, *metricsAddr, *leaderElect, *pricesNamespace, *pricesName, *grantName, *filterNamespace, *filterName, *filterPort, *networks); err != nil {
+	if err := run(log, *healthAddr, *metricsAddr, *leaderElect, *pricesNamespace, *pricesName, *grantName, *filterNamespace, *filterName, *filterPort, *networks, *platformURL, *pollInterval); err != nil {
 		log.Error("exit", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, healthAddr, metricsAddr string, leaderElect bool, pricesNamespace, pricesName, grantName, filterNamespace, filterName string, filterPort int64, networks string) error {
+func run(log *slog.Logger, healthAddr, metricsAddr string, leaderElect bool, pricesNamespace, pricesName, grantName, filterNamespace, filterName string, filterPort int64, networks, platformURL string, pollInterval time.Duration) error {
 	if pricesNamespace == "" {
 		return fmt.Errorf("-prices-namespace is empty and POD_NAMESPACE is unset")
+	}
+	if pollInterval < time.Second {
+		return fmt.Errorf("-platform-poll-interval %v: the gate standard allows at most one fetch a second", pollInterval)
 	}
 	if filterNamespace == "" {
 		filterNamespace = pricesNamespace
@@ -109,6 +121,24 @@ func run(log *slog.Logger, healthAddr, metricsAddr string, leaderElect bool, pri
 		return err
 	}
 
+	// Radius Platform projects: credentials are Secrets in this namespace, read by name with
+	// the uncached reader, so the controller never lists or watches Secrets.
+	if _, err := (platform.Project{BaseURL: platformURL, OrganizationID: "o", ProjectID: "p"}).URL(); err != nil {
+		return fmt.Errorf("-platform-api-url: %w", err)
+	}
+	poller := controller.NewPoller()
+	poller.BaseURL = platformURL
+	poller.Policies = mgr.GetClient()
+	poller.Secrets = mgr.GetAPIReader()
+	poller.Namespace = pricesNamespace
+	poller.Interval = pollInterval
+	poller.Log = log
+	poller.Fetcher = &platform.Client{
+		HTTP:      &http.Client{Timeout: platform.DefaultTimeout},
+		UserAgent: "x402-envoy-gate/" + buildinfo.Version,
+		Instance:  os.Getenv("POD_NAME"),
+	}
+
 	r := &controller.Reconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
@@ -118,11 +148,12 @@ func run(log *slog.Logger, healthAddr, metricsAddr string, leaderElect bool, pri
 		PricesName:      pricesName,
 		GrantName:       grantName,
 		Networks:        profiles,
+		Poller:          poller,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("controller: %w", err)
 	}
 
-	log.Info("starting", "prices", pricesNamespace+"/"+pricesName, "filter", filterNamespace+"/"+filterName, "networks", networks, "leaderElection", leaderElect)
+	log.Info("starting", "prices", pricesNamespace+"/"+pricesName, "filter", filterNamespace+"/"+filterName, "networks", networks, "leaderElection", leaderElect, "platformAPI", platformURL)
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

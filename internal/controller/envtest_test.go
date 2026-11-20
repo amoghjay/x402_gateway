@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +31,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
+	"github.com/amoghjay/x402_gateway/internal/platform"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
@@ -87,6 +90,15 @@ func TestReconciler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A Radius Platform stand-in over TLS (spec.platform.apiURL must be https), polled every
+	// second so the platform subtests run quickly.
+	fp := newFakePlatform(t)
+	poller := NewPoller()
+	poller.Policies, poller.Secrets, poller.Namespace, poller.BaseURL = mgr.GetClient(), mgr.GetAPIReader(), "x402-system", fp.URL
+	poller.Fetcher = &platform.Client{HTTP: fp.Client(), UserAgent: "x402-envoy-gate/test"}
+	poller.Interval = time.Second
+	poller.Log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn + 8}))
+
 	r := &Reconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          scheme,
@@ -96,6 +108,7 @@ func TestReconciler(t *testing.T) {
 		PricesName:      "x402-prices",
 		GrantName:       "extension-policies-to-filter",
 		Networks:        []radius.Profile{radius.Testnet},
+		Poller:          poller,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
@@ -297,6 +310,166 @@ func TestReconciler(t *testing.T) {
 			t.Errorf("targetRef change: err = %v, want immutable", err)
 		}
 	})
+
+	// A route governed by a Radius Platform project: the controller fetches, validates and
+	// stores the document, lists the route under the table's platform section, and reports
+	// on the document in Synced.
+	docKey := pricing.PolicyKey(testProject)
+	t.Run("platform policy", func(t *testing.T) {
+		h.t = t
+		h.create(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "x402-system", Name: "radius-platform", Labels: map[string]string{CredentialsLabel: "true"}},
+			StringData: map[string]string{"apiKey": testKey},
+		})
+		h.create(h.httpRoute("shop", "metered"))
+		h.create(platformPolicy("shop", "metered", "radius-platform"))
+
+		h.eventually("accepted", func() error { return h.accepted("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonAccepted) })
+		h.eventually("synced at version 2", func() error {
+			return h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "version 2 ")
+		})
+		h.eventually("document in the ConfigMap", func() error { return h.document(docKey, docVersion(t, 2)) })
+		h.eventually("route on the project in the table", func() error {
+			prices, err := h.prices()
+			if err != nil {
+				return err
+			}
+			if r, ok := prices.Platform("httproute/shop/metered"); !ok || r.Project != testProject || r.NoPolicy != "deny" {
+				return fmt.Errorf("platform route = %+v, %v", r, ok)
+			}
+			return nil
+		})
+		eep := h.get(eepGVK, "shop", "x402-metered")
+		raw, _ := json.Marshal(eep.Object["spec"])
+		for _, want := range []string{`"messageTimeout":"10s"`, `"attributes":["xds.route_name","source.address"]`} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("a platform route's EnvoyExtensionPolicy lacks %s: %s", want, raw)
+			}
+		}
+
+		fp.set(docVersion(t, 3), 0)
+		h.eventually("version 3 reaches the ConfigMap", func() error { return h.document(docKey, docVersion(t, 3)) })
+		h.eventually("synced at version 3", func() error {
+			return h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "version 3 ")
+		})
+
+		fp.set([]byte(strings.Replace(string(docVersion(t, 4)), `"type": "deny"`, `"type": "redirect"`, 1)), 0)
+		h.eventually("invalid version 4 refused", func() error {
+			return h.synced("shop", "metered", metav1.ConditionFalse, v1alpha1.ReasonRefused, "version 3 stays in force")
+		})
+		if err := h.document(docKey, docVersion(t, 3)); err != nil {
+			t.Errorf("the refused document replaced the good one: %v", err)
+		}
+
+		fp.set(nil, http.StatusServiceUnavailable)
+		h.eventually("Platform down", func() error {
+			return h.synced("shop", "metered", metav1.ConditionFalse, v1alpha1.ReasonFetchFailed, "503")
+		})
+		if err := h.document(docKey, docVersion(t, 3)); err != nil {
+			t.Errorf("the document was dropped while the Platform is down: %v", err)
+		}
+		fp.set(docVersion(t, 3), 0)
+		h.eventually("back up", func() error {
+			return h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "version 3 ")
+		})
+	})
+
+	t.Run("platform conflict", func(t *testing.T) {
+		h.t = t
+		h.create(h.httpRoute("shop", "other"))
+		pp := platformPolicy("shop", "other", "another-secret")
+		h.create(pp)
+		h.eventually("Invalid", func() error { return h.accepted("shop", "other", metav1.ConditionFalse, v1alpha1.ReasonInvalid) })
+		h.eventually("its route blocked for the conflict", func() error {
+			prices, err := h.prices()
+			if err != nil {
+				return err
+			}
+			if why, ok := prices.Blocked("httproute/shop/other"); !ok || !strings.Contains(why, "shop/metered") {
+				return fmt.Errorf("blocked = %v (%q)", ok, why)
+			}
+			return nil
+		})
+		if err := h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "version 3 "); err != nil {
+			t.Errorf("the first policy was disturbed: %v", err)
+		}
+		h.must(c.Delete(ctx, pp))
+	})
+
+	t.Run("platform schema refuses", func(t *testing.T) {
+		h.t = t
+		cases := []struct {
+			name string
+			edit func(*v1alpha1.PaymentPolicy)
+			want string
+		}{
+			{"platform and a price", func(p *v1alpha1.PaymentPolicy) { p.Spec.Price = "1000" }, "set either platform"},
+			{"neither", func(p *v1alpha1.PaymentPolicy) { p.Spec.Platform = nil }, "set either platform"},
+			{"async", func(p *v1alpha1.PaymentPolicy) { p.Spec.CaptureMode = "Async" }, "captureMode must be Sync"},
+			{"project not a UUID", func(p *v1alpha1.PaymentPolicy) { p.Spec.Platform.ProjectID = "my-project" }, "spec.platform.projectId"},
+			{"noPolicy", func(p *v1alpha1.PaymentPolicy) { p.Spec.Platform.NoPolicy = "Maybe" }, "spec.platform.noPolicy"},
+		}
+		for _, cs := range cases {
+			p := platformPolicy("shop", "bad-"+strings.ReplaceAll(cs.name, " ", "-"), "radius-platform")
+			cs.edit(p)
+			err := c.Create(ctx, p)
+			if err == nil || !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), cs.want) {
+				t.Errorf("%s: err = %v, want Invalid mentioning %s", cs.name, err, cs.want)
+			}
+		}
+		var pp v1alpha1.PaymentPolicy
+		h.must(c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "metered"}, &pp))
+		if pp.Spec.Platform.NoPolicy != "Deny" || pp.Spec.Platform.CredentialsSecretRef.Key != "apiKey" {
+			t.Errorf("defaults: noPolicy %q, key %q", pp.Spec.Platform.NoPolicy, pp.Spec.Platform.CredentialsSecretRef.Key)
+		}
+	})
+
+	t.Run("platform policy deleted", func(t *testing.T) {
+		h.t = t
+		h.must(c.Delete(ctx, platformPolicy("shop", "metered", "")))
+		h.eventually("document removed from the ConfigMap", func() error {
+			cm, err := h.tryGet(configMapGVK, "x402-system", "x402-prices")
+			if err != nil {
+				return err
+			}
+			if _, ok, _ := unstructured.NestedString(cm.Object, "data", docKey); ok {
+				return errors.New("still there")
+			}
+			return nil
+		})
+	})
+}
+
+// synced checks a platform policy's Synced condition; the message must contain msg.
+func (h *harness) synced(ns, name string, status metav1.ConditionStatus, reason, msg string) error {
+	var pp v1alpha1.PaymentPolicy
+	if err := h.c.Get(h.ctx, client.ObjectKey{Namespace: ns, Name: name}, &pp); err != nil {
+		return err
+	}
+	if len(pp.Status.Ancestors) != 1 {
+		return fmt.Errorf("ancestors = %d", len(pp.Status.Ancestors))
+	}
+	cond := meta.FindStatusCondition(pp.Status.Ancestors[0].Conditions, v1alpha1.ConditionSynced)
+	if cond == nil || cond.Status != status || cond.Reason != reason || !strings.Contains(cond.Message, msg) {
+		return fmt.Errorf("Synced = %+v, want %s/%s containing %q", cond, status, reason, msg)
+	}
+	return nil
+}
+
+// document checks the ConfigMap holds exactly this compiled policy under key.
+func (h *harness) document(key string, want []byte) error {
+	cm, err := h.tryGet(configMapGVK, "x402-system", "x402-prices")
+	if err != nil {
+		return err
+	}
+	got, ok, _ := unstructured.NestedString(cm.Object, "data", key)
+	if !ok {
+		return fmt.Errorf("no %s key", key)
+	}
+	if got != string(want) {
+		return fmt.Errorf("%s holds another document (%d bytes, want %d)", key, len(got), len(want))
+	}
+	return nil
 }
 
 // policy is a PaymentPolicy as a user would write it: the schema fills the defaults.

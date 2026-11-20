@@ -40,8 +40,10 @@ import (
 
 	"github.com/amoghjay/x402_gateway/internal/balance"
 	"github.com/amoghjay/x402_gateway/internal/buildinfo"
+	"github.com/amoghjay/x402_gateway/internal/counter"
 	"github.com/amoghjay/x402_gateway/internal/extproc"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/rdb"
@@ -186,9 +188,12 @@ func run(log *slog.Logger, c config) error {
 			Facilitators: facs, RPCs: rpcs, SettleTimeout: c.settleTimeout,
 			FacilitatorVerify: c.facilitatorVerify, VerifyTimeout: c.verifyTimeout,
 		})
+		// Radius Platform rules' rate limits and free quotas: one shared count in Redis.
+		server.WithCounters(counter.New(redisClient))
 	} else {
-		log.Warn("payments are off (-redis is empty): every priced request gets the 402")
+		log.Warn("payments are off (-redis is empty): every priced request gets the 402, and platform rules' counters read as failed")
 	}
+	log.Info("Radius Platform compiled policies accepted", "schemas", policy.Schemas)
 
 	srv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(srv, server)

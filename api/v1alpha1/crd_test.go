@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/yaml"
@@ -36,8 +37,16 @@ func TestGeneratedCRD(t *testing.T) {
 	}
 
 	spec := path(v, "schema", "openAPIV3Schema", "properties", "spec").(map[string]any)
-	if got := spec["required"]; !reflect.DeepEqual(got, []any{"network", "payTo", "price", "targetRef"}) {
+	// network, price and payTo are required unless spec.platform is set: a CEL rule, below.
+	if got := spec["required"]; !reflect.DeepEqual(got, []any{"targetRef"}) {
 		t.Errorf("spec.required = %v", got)
+	}
+	var specRules []string
+	for _, r := range spec["x-kubernetes-validations"].([]any) {
+		specRules = append(specRules, path(r, "rule").(string))
+	}
+	if len(specRules) != 2 || !strings.HasPrefix(specRules[0], "has(self.platform) ? ") || !strings.Contains(specRules[1], "self.captureMode == 'Sync'") {
+		t.Errorf("spec rules = %q", specRules)
 	}
 	props := spec["properties"].(map[string]any)
 
@@ -60,6 +69,7 @@ func TestGeneratedCRD(t *testing.T) {
 		{"captureMode", "enum", []any{"Async", "Sync"}},
 		{"captureMode", "default", "Sync"},
 		{"description", "maxLength", float64(256)},
+		{"platform", "required", []any{"credentialsSecretRef", "organizationId", "projectId"}},
 	}
 	for _, c := range checks {
 		if got := path(props, c.field, c.key); !reflect.DeepEqual(got, c.want) {
@@ -80,6 +90,25 @@ func TestGeneratedCRD(t *testing.T) {
 	if got := path(props, "help", "properties", "message", "maxLength"); got != float64(200) {
 		t.Errorf("help.message.maxLength = %v", got)
 	}
+	platform := path(props, "platform", "properties").(map[string]any)
+	if _, ok := platform["apiURL"]; ok {
+		t.Error("spec.platform.apiURL exists: the API a credential is sent to must be the operator's choice")
+	}
+	for _, c := range []struct {
+		field, key string
+		want       any
+	}{
+		{"noPolicy", "enum", []any{"Allow", "Deny"}},
+		{"noPolicy", "default", "Deny"},
+		{"projectId", "pattern", "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+	} {
+		if got := path(platform, c.field, c.key); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("spec.platform.%s.%s = %#v, want %#v", c.field, c.key, got, c.want)
+		}
+	}
+	if got := path(platform, "credentialsSecretRef", "properties", "key", "default"); got != "apiKey" {
+		t.Errorf("credentialsSecretRef.key default = %v", got)
+	}
 
 	// Status is the Gateway API PolicyStatus: ancestors, capped at 16 (GEP-713).
 	status := path(v, "schema", "openAPIV3Schema", "properties", "status").(map[string]any)
@@ -92,7 +121,7 @@ func TestGeneratedCRD(t *testing.T) {
 	for _, c := range cols {
 		names = append(names, path(c, "name"))
 	}
-	if want := []any{"Route", "Network", "Price", "Accepted", "Reason", "Age"}; !reflect.DeepEqual(names, want) {
+	if want := []any{"Route", "Network", "Price", "Project", "Accepted", "Reason", "Synced", "Age"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("printer columns = %v, want %v", names, want)
 	}
 }

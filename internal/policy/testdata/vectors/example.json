@@ -1,0 +1,578 @@
+{
+  "description": "The radius.policy/0.1 example (tests/fixtures/example.yaml), compiled.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 7,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-17T12:00:00Z",
+    "mode": "production",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": {
+        "header": "cf-connecting-ip"
+      },
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "0aa0f278-082e-5be5-a199-6e247d63c5a3",
+        "id": "deny-abusive",
+        "match": {
+          "ip_in": ["203.0.113.0/24"]
+        },
+        "action": {
+          "type": "deny",
+          "status": 403,
+          "code": "source_blocked"
+        }
+      },
+      {
+        "uid": "6dbb8d87-ce49-585c-bcb2-60cd6dacf728",
+        "id": "first-party",
+        "match": {
+          "ip_in": ["10.0.0.0/8"]
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "36407ce5-3253-555e-875a-011880ca19db",
+        "id": "address-balance/freemium",
+        "match": {
+          "endpoint": {
+            "slug": "address-balance",
+            "methods": ["GET"],
+            "path": "/address/:address/balance"
+          }
+        },
+        "free_quota": {
+          "key": "ip",
+          "quota": 30,
+          "window_s": 60
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.0005",
+          "description": "Address balance, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "500",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      },
+      {
+        "uid": "4e6e1f50-3351-5735-a265-706cbc872bd7",
+        "id": "price/free",
+        "match": {
+          "endpoint": {
+            "slug": "price",
+            "methods": ["GET"],
+            "path": "/price/*"
+          }
+        },
+        "rate_limit": {
+          "key": "ip",
+          "quota": 60,
+          "window_s": 60
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "95350948-1b73-53b5-a1c2-1d3bd231b46f",
+        "id": "tx-lookup/freemium",
+        "match": {
+          "endpoint": {
+            "slug": "tx-lookup",
+            "methods": ["GET"],
+            "path": "/tx/:hash"
+          }
+        },
+        "rate_limit": {
+          "key": "ip",
+          "quota": 60,
+          "window_s": 60
+        },
+        "free_quota": {
+          "key": "ip",
+          "quota": 20,
+          "window_s": 300
+        },
+        "action": {
+          "type": "charge",
+          "price": "0.001",
+          "description": "Transaction lookup, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "an address in a blocked range is denied without counting",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "203.0.113.9"
+      },
+      "expected": {
+        "decision": {
+          "rule": "deny-abusive",
+          "type": "deny",
+          "status": 403,
+          "code": "source_blocked"
+        }
+      }
+    },
+    {
+      "name": "an IPv4-mapped IPv6 address matches an IPv4 range",
+      "request": {
+        "method": "GET",
+        "path": "/price/btc",
+        "now": 1760000000,
+        "client_ip": "::ffff:203.0.113.200"
+      },
+      "expected": {
+        "decision": {
+          "rule": "deny-abusive",
+          "type": "deny",
+          "status": 403,
+          "code": "source_blocked"
+        }
+      }
+    },
+    {
+      "name": "a request from our own network is allowed before any limit",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "10.1.2.3"
+      },
+      "expected": {
+        "decision": {
+          "rule": "first-party",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "a request from outside our network falls through to the endpoint's rule",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7",
+        "caller": {
+          "id": "someone"
+        }
+      },
+      "counts": [1, 1],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "59",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "the last request within the quota is allowed",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [20, 20],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "40",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "the first request over the quota must pay",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [21, 21],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "payment_required",
+          "price": "0.001",
+          "description": "Transaction lookup, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ],
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "39",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "past the rate limit, a request is denied before its free quota is checked",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [61, 5],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "40",
+            "Retry-After": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "over a deny limit, the denial says when to retry",
+      "request": {
+        "method": "GET",
+        "path": "/price/btc/usd",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [61],
+      "expected": {
+        "counted": [
+          {
+            "rule": "price/free",
+            "limit": "rate_limit",
+            "key": "4e6e1f50-3351-5735-a265-706cbc872bd7:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "price/free",
+          "type": "deny",
+          "status": 429,
+          "code": "rate_limited",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "40",
+            "Retry-After": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "a wildcard endpoint matches its base path",
+      "request": {
+        "method": "GET",
+        "path": "/price",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [60],
+      "expected": {
+        "counted": [
+          {
+            "rule": "price/free",
+            "limit": "rate_limit",
+            "key": "4e6e1f50-3351-5735-a265-706cbc872bd7:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "price/free",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "over the balance allowance must pay the smaller price",
+      "request": {
+        "method": "GET",
+        "path": "/address/0xdef/balance?block=latest",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [31],
+      "expected": {
+        "counted": [
+          {
+            "rule": "address-balance/freemium",
+            "limit": "free_quota",
+            "key": "36407ce5-3253-555e-875a-011880ca19db:free:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          }
+        ],
+        "decision": {
+          "rule": "address-balance/freemium",
+          "type": "payment_required",
+          "price": "0.0005",
+          "description": "Address balance, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:723487",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "500",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.radiustech.xyz"
+            }
+          ],
+          "headers": {
+            "RateLimit-Limit": "30",
+            "RateLimit-Remaining": "0",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "a trailing slash still matches",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc/",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counts": [2, 2],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "58",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "without a client address, ip limits share one unknown counter",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000
+      },
+      "counts": [3, 3],
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:unknown",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:unknown",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "allow",
+          "headers": {
+            "RateLimit-Limit": "60",
+            "RateLimit-Remaining": "57",
+            "RateLimit-Reset": "40"
+          }
+        }
+      }
+    },
+    {
+      "name": "a method the endpoint doesn't take is unmatched and allowed",
+      "request": {
+        "method": "POST",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "a path no rule names is unmatched and allowed",
+      "request": {
+        "method": "GET",
+        "path": "/health",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": null,
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "counter_error within: a failed counter allows, without rate limit headers",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "counter_error": true,
+      "expected": {
+        "counted": [
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "rate_limit",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:rate:29333333:ip:198.51.100.7",
+            "reset_s": 40
+          },
+          {
+            "rule": "tx-lookup/freemium",
+            "limit": "free_quota",
+            "key": "95350948-1b73-53b5-a1c2-1d3bd231b46f:free:5866666:ip:198.51.100.7",
+            "reset_s": 100
+          }
+        ],
+        "decision": {
+          "rule": "tx-lookup/freemium",
+          "type": "allow"
+        }
+      }
+    }
+  ]
+}

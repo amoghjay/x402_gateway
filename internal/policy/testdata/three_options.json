@@ -1,0 +1,208 @@
+{
+  "defaults": {
+    "client_ip": "remote_addr",
+    "failure": {
+      "counter_error": "within",
+      "no_policy": "allow"
+    },
+    "headers": {
+      "ratelimit": true,
+      "retry_after": true
+    },
+    "unmatched": "allow"
+  },
+  "generated_at": "2026-11-20T15:24:18.843473981Z",
+  "mode": "test",
+  "project_id": "00000000-0000-4000-8000-0000000000aa",
+  "rules": [
+    {
+      "action": {
+        "code": "not_for_sale",
+        "status": 403,
+        "type": "deny"
+      },
+      "id": "get-anything-platform-blocked/deny",
+      "match": {
+        "endpoint": {
+          "methods": [
+            "GET"
+          ],
+          "path": "/anything/platform/blocked",
+          "slug": "get-anything-platform-blocked"
+        }
+      },
+      "uid": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "action": {
+        "type": "allow"
+      },
+      "id": "get-anything-platform-free/allow",
+      "match": {
+        "endpoint": {
+          "methods": [
+            "GET"
+          ],
+          "path": "/anything/platform/free",
+          "slug": "get-anything-platform-free"
+        }
+      },
+      "uid": "00000000-0000-4000-8000-000000000002"
+    },
+    {
+      "action": {
+        "type": "allow"
+      },
+      "id": "get-anything-platform-limited/limit",
+      "match": {
+        "endpoint": {
+          "methods": [
+            "GET"
+          ],
+          "path": "/anything/platform/limited",
+          "slug": "get-anything-platform-limited"
+        }
+      },
+      "rate_limit": {
+        "key": "global",
+        "quota": 5,
+        "window_s": 60
+      },
+      "uid": "00000000-0000-4000-8000-000000000003"
+    },
+    {
+      "action": {
+        "accepts": [
+          {
+            "amount": "1000",
+            "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "eip3009",
+              "name": "Stable Coin",
+              "version": "1"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:72344",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact"
+          },
+          {
+            "amount": "1000",
+            "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "eip3009",
+              "name": "USDC",
+              "version": "2"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:84532",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact"
+          },
+          {
+            "amount": "1000",
+            "asset": "0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "permit2",
+              "name": "Stable Coin",
+              "version": "1"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:84532",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact"
+          }
+        ],
+        "description": "Metered item: three free a minute, then paid",
+        "price": "0.001",
+        "type": "charge"
+      },
+      "free_quota": {
+        "key": "ip",
+        "quota": 3,
+        "window_s": 60
+      },
+      "id": "get-anything-platform-metered/freemium",
+      "match": {
+        "endpoint": {
+          "methods": [
+            "GET"
+          ],
+          "path": "/anything/platform/metered",
+          "slug": "get-anything-platform-metered"
+        }
+      },
+      "uid": "00000000-0000-4000-8000-000000000004"
+    },
+    {
+      "action": {
+        "accepts": [
+          {
+            "amount": "1000",
+            "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "eip3009",
+              "name": "Stable Coin",
+              "version": "1"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:72344",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact",
+            "futureField": {
+              "kept": true
+            }
+          },
+          {
+            "amount": "1000",
+            "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "eip3009",
+              "name": "USDC",
+              "version": "2"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:84532",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact"
+          },
+          {
+            "amount": "1000",
+            "asset": "0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16",
+            "decimals": 6,
+            "extra": {
+              "assetTransferMethod": "permit2",
+              "name": "Stable Coin",
+              "version": "1"
+            },
+            "facilitator": "https://facilitator.testnet.radiustech.xyz",
+            "network": "eip155:84532",
+            "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "scheme": "exact"
+          }
+        ],
+        "description": "One paid item through the Envoy gate",
+        "price": "0.001",
+        "type": "charge"
+      },
+      "id": "get-anything-platform-paid-id/charge",
+      "match": {
+        "endpoint": {
+          "methods": [
+            "GET"
+          ],
+          "path": "/anything/platform/paid/:id",
+          "slug": "get-anything-platform-paid-id"
+        }
+      },
+      "uid": "00000000-0000-4000-8000-000000000005"
+    }
+  ],
+  "schema": "radius.policy/0.1",
+  "version": 2
+}

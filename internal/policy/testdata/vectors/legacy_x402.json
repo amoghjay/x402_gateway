@@ -1,0 +1,76 @@
+{
+  "description": "A document compiled before the charge action was renamed: its tag is still x402, which evaluators read as charge until the window in docs/gates/changes.md ends.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 3,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-20T12:00:00Z",
+    "mode": "test",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": { "no_policy": "allow", "counter_error": "within" },
+      "client_ip": "remote_addr",
+      "headers": { "ratelimit": true, "retry_after": true }
+    },
+    "rules": [
+      {
+        "uid": "7f2b1c0e-4d3a-5e6f-8a9b-0c1d2e3f4a5b",
+        "id": "tx-lookup/paid",
+        "match": {
+          "endpoint": { "slug": "tx-lookup", "methods": ["GET"], "path": "/tx/:hash" }
+        },
+        "action": {
+          "type": "x402",
+          "price": "0.001",
+          "description": "Transaction lookup, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:72344",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.testnet.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "an x402-tagged charge still requires payment",
+      "request": {
+        "method": "GET",
+        "path": "/tx/0xabc",
+        "client_ip": "198.51.100.7",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "tx-lookup/paid",
+          "type": "payment_required",
+          "price": "0.001",
+          "description": "Transaction lookup, per call",
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:72344",
+              "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+              "decimals": 6,
+              "amount": "1000",
+              "pay_to": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+              "facilitator": "https://facilitator.testnet.radiustech.xyz"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "other requests are unmatched as usual",
+      "request": { "method": "POST", "path": "/tx/0xabc", "now": 1760000000 },
+      "expected": { "decision": { "rule": null, "type": "allow" } }
+    }
+  ]
+}

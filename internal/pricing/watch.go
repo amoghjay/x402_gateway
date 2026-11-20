@@ -2,7 +2,9 @@ package pricing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,6 +14,7 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
+	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
 
@@ -94,12 +97,13 @@ func (w *Watcher) apply(obj any) {
 		w.done(false)
 		return
 	}
+	p.LoadPolicies(cm.Data, w.Store.Load(), log)
 	w.Store.Set(p)
 	if blocked := p.BlockedKeys(); len(blocked) > 0 {
 		// Loaded: the blocked routes answer 503 until their policy is fixed.
-		log.Error("price table loaded with blocked routes; they answer 503", "routes", p.Len(), "blocked", blocked, "err", errText(err))
+		log.Error("price table loaded with blocked routes; they answer 503", "routes", p.Len(), "platformRoutes", p.PlatformLen(), "blocked", blocked, "err", errText(err))
 	} else {
-		log.Info("price table loaded", "routes", p.Len())
+		log.Info("price table loaded", "routes", p.Len(), "platformRoutes", p.PlatformLen())
 	}
 	w.done(true)
 }
@@ -115,4 +119,55 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// LoadPolicies reads the compiled policy of each project the table names, from the
+// ConfigMap's data, the table's own key aside. Call it once, before the table is stored. A document replaces the one already loaded only when it validates, is the
+// project's, and is not older: the controller never writes an older one, and a filter that
+// cannot read a newer one (a schema it does not know) keeps enforcing what it had. A project
+// with nothing loadable and nothing loaded before has no policy: its routes answer per
+// noPolicy.
+func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Logger) {
+	out := map[string]*compiledpolicy.Policy{}
+	defer func() { p.policies = out }()
+	for _, r := range p.platform {
+		if _, done := out[r.Project]; done {
+			continue
+		}
+		old := prev.Policy(r.Project)
+		keep := func(why string, err error) {
+			if old != nil {
+				out[r.Project] = old
+			}
+			log.Error("compiled policy not loaded; "+why, "project", r.Project, "err", errText(err), "version", versionOf(old))
+		}
+		doc, ok := data[PolicyKey(r.Project)]
+		if !ok {
+			if old != nil {
+				out[r.Project] = old
+			}
+			continue // not fetched yet; the controller's Synced condition says why
+		}
+		pol, err := compiledpolicy.Parse([]byte(doc))
+		switch {
+		case err != nil:
+			keep("keeping the one in force", err)
+		case !strings.EqualFold(pol.ProjectID, r.Project):
+			keep("keeping the one in force", fmt.Errorf("the document is for project %q", pol.ProjectID))
+		case old != nil && pol.Version < old.Version:
+			keep("it is older than the one in force", fmt.Errorf("version %d", pol.Version))
+		default:
+			out[r.Project] = pol
+			if old == nil || pol.Version != old.Version {
+				log.Info("compiled policy loaded", "project", r.Project, "version", pol.Version, "schema", pol.Schema, "rules", len(pol.Rules))
+			}
+		}
+	}
+}
+
+func versionOf(p *compiledpolicy.Policy) uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.Version
 }

@@ -1,0 +1,272 @@
+{
+  "description": "Match fields: endpoint methods, IP ranges, AND and OR, empty matches.",
+  "policy": {
+    "schema": "radius.policy/0.1",
+    "version": 3,
+    "project_id": "0199b3c2-7d4e-7a10-9b2f-3c4d5e6f7a8c",
+    "generated_at": "2026-10-17T12:00:00Z",
+    "mode": "test",
+    "defaults": {
+      "unmatched": "allow",
+      "failure": {
+        "no_policy": "allow",
+        "counter_error": "within"
+      },
+      "client_ip": {
+        "header": "cf-connecting-ip"
+      },
+      "headers": {
+        "ratelimit": true,
+        "retry_after": true
+      }
+    },
+    "rules": [
+      {
+        "uid": "00000000-0000-4000-8000-000000000001",
+        "id": "partners-on-quotes",
+        "match": {
+          "endpoint": {
+            "slug": "quote",
+            "methods": [],
+            "path": "/quote/:id"
+          },
+          "ip_in": ["198.51.100.0/24"]
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000002",
+        "id": "office",
+        "match": {
+          "ip_in": ["10.0.0.0/8", "2001:db8:1::/48", "::ffff:192.0.2.0/120"]
+        },
+        "action": {
+          "type": "allow"
+        }
+      },
+      {
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "id": "everything-else",
+        "match": {},
+        "action": {
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "an endpoint with any method matches every method",
+      "request": {
+        "method": "DELETE",
+        "path": "/quote/7",
+        "now": 1760000000,
+        "client_ip": "198.51.100.7"
+      },
+      "expected": {
+        "decision": {
+          "rule": "partners-on-quotes",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "match fields are ANDed: the endpoint from outside the range doesn't match",
+      "request": {
+        "method": "GET",
+        "path": "/quote/7",
+        "now": 1760000000,
+        "client_ip": "203.0.113.1"
+      },
+      "expected": {
+        "decision": {
+          "rule": "everything-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "list values are ORed: either range matches",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000,
+        "client_ip": "2001:db8:1:ff::1"
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "an IPv4 range matches",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000,
+        "client_ip": "10.200.3.4"
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "an ip_in match needs a client address",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "everything-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "an empty match matches everything",
+      "request": {
+        "method": "PUT",
+        "path": "/",
+        "now": 1760000000
+      },
+      "expected": {
+        "decision": {
+          "rule": "everything-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "client_ip header: the first address in the header is the client's",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "203.0.113.50",
+        "headers": {
+          "cf-connecting-ip": "10.1.2.3, 172.16.0.1"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "client_ip header: without the header there's no client address, even with a connection",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "10.1.2.3",
+        "headers": {}
+      },
+      "expected": {
+        "decision": {
+          "rule": "everything-else",
+          "type": "deny",
+          "status": 401,
+          "code": "sign_in"
+        }
+      }
+    },
+    {
+      "name": "an IPv4-mapped range matches IPv4 addresses in it",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000,
+        "client_ip": "192.0.2.9"
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "client_ip header: an address with a port is the address",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "203.0.113.50",
+        "headers": {
+          "cf-connecting-ip": "10.1.2.3:4711"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "client_ip header: a bracketed IPv6 address is the address",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "203.0.113.50",
+        "headers": {
+          "cf-connecting-ip": "[2001:db8:1::5]"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    },
+    {
+      "name": "client_ip header: a bracketed IPv6 address with a port is the address",
+      "request": {
+        "method": "GET",
+        "path": "/x",
+        "now": 1760000000
+      },
+      "transport": {
+        "remote_addr": "203.0.113.50",
+        "headers": {
+          "cf-connecting-ip": "[2001:db8:1::5]:443"
+        }
+      },
+      "expected": {
+        "decision": {
+          "rule": "office",
+          "type": "allow"
+        }
+      }
+    }
+  ]
+}

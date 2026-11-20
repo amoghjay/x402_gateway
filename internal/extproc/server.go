@@ -43,6 +43,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/amoghjay/x402_gateway/internal/balance"
+	"github.com/amoghjay/x402_gateway/internal/counter"
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
@@ -159,17 +160,19 @@ func (p *Payments) verifyTimeout() time.Duration {
 // Server is the ext_proc server.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	log    *slog.Logger
-	delay  time.Duration
-	prices *pricing.Store
-	pay    *Payments
+	log      *slog.Logger
+	delay    time.Duration
+	prices   *pricing.Store
+	pay      *Payments
+	counters *counter.Store   // platform routes' limits; nil reads every counter as failed
+	now      func() time.Time // the policy's clock: counter windows; tests set it
 }
 
 // NewServer returns a Server that prices requests from prices and logs one decision per
 // request. delay holds each request phase that long before answering; it exists for the
 // timeout drill and is 0 otherwise.
 func NewServer(log *slog.Logger, delay time.Duration, prices *pricing.Store) *Server {
-	return &Server{log: log, delay: delay, prices: prices}
+	return &Server{log: log, delay: delay, prices: prices, now: time.Now}
 }
 
 // WithPayments wires the paid path.
@@ -193,6 +196,8 @@ type request struct {
 	settled  bool // Sync: the transfer is on chain
 	unknown  bool // Sync: the settle's outcome is not known; the in-flight amount stays until its TTL
 	held     bool // Sync: the payment's record (reserve.Held) is written and not yet cleared
+
+	ruleHeaders map[string]string // platform route, allowed: limit headers for the response
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -286,6 +291,9 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 		// 402 would ask for a payment that cannot be right: refuse until it is fixed.
 		log.Error("route's payment policy is invalid; refused", "decision", PolicyInvalid, "reason", why)
 		return plain(http.StatusServiceUnavailable, "x402 filter: this route's payment policy is invalid\n", PolicyInvalid)
+	}
+	if pr, ok := table.Platform(key); ok {
+		return s.platformRequest(ctx, req, h, st, table, pr)
 	}
 	entry, ok := table.Lookup(key)
 	if !ok {
@@ -398,7 +406,9 @@ func chargeable(code int) bool { return code >= 200 && code <= 399 && code != ht
 // timeout, which after a served response would turn a 200 into a 504.
 func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
 	if st.rsv == nil {
-		return continueResponse(nil) // unpriced, or nothing was reserved
+		// Unpriced, or nothing was reserved; a platform rule's allowed request may carry
+		// limit headers for the response.
+		return continueResponse(ruleResponseHeaders(st.ruleHeaders))
 	}
 	code, _ := strconv.Atoi(h[":status"])
 	if !chargeable(code) {
