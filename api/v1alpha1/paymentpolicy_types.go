@@ -19,15 +19,33 @@ const (
 	ReasonConflicted     = gatewayv1.PolicyReasonConflicted
 )
 
+// The Synced condition: whether a platform policy's compiled policy is current. Only
+// policies with spec.platform carry it.
+const (
+	ConditionSynced = "Synced"
+
+	ReasonSynced      = "Synced"      // the latest version is loaded
+	ReasonPending     = "Pending"     // no fetch has finished yet
+	ReasonFetchFailed = "FetchFailed" // the last fetch failed; the loaded version, if any, stays in force
+	ReasonRefused     = "Refused"     // the Platform served a document this gate will not enforce
+)
+
 // PaymentPolicySpec says what one HTTPRoute costs. It states intent only: the price and
 // who is paid. Everything Envoy needs (timeouts, failOpen, the filter address) is the
 // controller's, so an app team cannot weaken enforcement by editing its own policy.
+//
+// A policy either prices the route itself (network, price, payTo) or hands it to a Radius
+// Platform project (platform), whose compiled policy then decides each request by method
+// and path: free, denied, rate limited, or paid in any of the project's payment options.
 //
 // Validation here is the schema's (pattern, enum, bounds): it is checked by the API
 // server before the controller ever sees the object, so `kubectl apply` reports a
 // mistake at once. The same rules run again in internal/pricing when the controller
 // projects the policy into the price table, so the filter can never load a table the
 // schema would have refused.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.platform) ? !(has(self.network) || has(self.price) || has(self.payTo)) : (has(self.network) && has(self.price) && has(self.payTo))",message="set either platform, or all of network, price and payTo"
+// +kubebuilder:validation:XValidation:rule="!has(self.platform) || !has(self.captureMode) || self.captureMode == 'Sync'",message="a platform policy always settles before releasing the response: captureMode must be Sync"
 type PaymentPolicySpec struct {
 	// The HTTPRoute, in this namespace, that this policy prices. Immutable: to price a
 	// different route, create another policy.
@@ -40,7 +58,8 @@ type PaymentPolicySpec struct {
 	// addresses that could be mistyped. Testnets only until the Phase 6 soak gate passes,
 	// and only the networks the filter was started with (-networks).
 	// +kubebuilder:validation:Enum=testnet;base-sepolia
-	Network string `json:"network"`
+	// +optional
+	Network string `json:"network,omitempty"`
 
 	// Price per request in atomic units of the network's token (6 decimals on both
 	// networks): "1000" is 0.001 SBC or 0.001 USDC. A
@@ -48,11 +67,20 @@ type PaymentPolicySpec struct {
 	// At most 15 digits: the filter's Redis arithmetic is exact below 2^53.
 	// +kubebuilder:validation:Pattern=`^[0-9]+$`
 	// +kubebuilder:validation:MaxLength=15
-	Price string `json:"price"`
+	// +optional
+	Price string `json:"price,omitempty"`
 
 	// The address that receives every payment for this route.
 	// +kubebuilder:validation:Pattern=`^0x[0-9a-fA-F]{40}$`
-	PayTo string `json:"payTo"`
+	// +optional
+	PayTo string `json:"payTo,omitempty"`
+
+	// A Radius Platform project whose compiled policy governs the route, instead of
+	// network, price and payTo. The controller polls the project and the filter enforces
+	// its rules. assetTransferMethod, maxTimeoutSeconds, description, mimeType and help do
+	// not apply: the document carries its own.
+	// +optional
+	Platform *Platform `json:"platform,omitempty"`
 
 	// How the buyer authorizes the transfer. Only EIP-3009 is built (no approve
 	// transaction, no gas for the buyer); Permit2 is a backlog item.
@@ -123,6 +151,47 @@ type TargetRef struct {
 	Name string `json:"name"`
 }
 
+// Platform names a Radius Platform project and how to read its compiled policy.
+type Platform struct {
+	// The organization the project belongs to.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+$`
+	// +kubebuilder:validation:MaxLength=128
+	OrganizationID string `json:"organizationId"`
+
+	// The project, a UUID.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	ProjectID string `json:"projectId"`
+
+	// The Secret holding the API key, in the controller's namespace (x402-system), never
+	// the policy's: an app team names a credential the platform team put there and cannot
+	// read it. The controller reads only Secrets labelled x402.dev/platform-credentials:
+	// "true", so a policy cannot have some other Secret sent to the Platform. A connector
+	// key from the project's Gate page is enough. Which Platform API is called is the
+	// controller's configuration (-platform-api-url), not the policy's, for the same reason.
+	CredentialsSecretRef SecretKeyRef `json:"credentialsSecretRef"`
+
+	// What the route answers while no compiled policy has ever been loaded for the project:
+	// Deny (503 policy_unavailable) or Allow (served free). Once one is loaded, a failed
+	// fetch keeps it in force and this no longer applies.
+	// +kubebuilder:validation:Enum=Allow;Deny
+	// +kubebuilder:default=Deny
+	// +optional
+	NoPolicy string `json:"noPolicy,omitempty"`
+}
+
+// SecretKeyRef is one key of a Secret.
+type SecretKeyRef struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:default=apiKey
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
 // Help overrides the how-to-pay defaults of the route's network.
 type Help struct {
 	// Where the 402's Link: rel="help" points. https only.
@@ -149,8 +218,10 @@ type Help struct {
 // +kubebuilder:printcolumn:name="Route",type=string,JSONPath=`.spec.targetRef.name`
 // +kubebuilder:printcolumn:name="Network",type=string,JSONPath=`.spec.network`
 // +kubebuilder:printcolumn:name="Price",type=string,JSONPath=`.spec.price`
+// +kubebuilder:printcolumn:name="Project",type=string,JSONPath=`.spec.platform.projectId`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.ancestors[0].conditions[?(@.type=="Accepted")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.ancestors[0].conditions[?(@.type=="Accepted")].reason`,priority=1
+// +kubebuilder:printcolumn:name="Synced",type=string,JSONPath=`.status.ancestors[0].conditions[?(@.type=="Synced")].status`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type PaymentPolicy struct {
 	metav1.TypeMeta   `json:",inline"`

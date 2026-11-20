@@ -81,6 +81,12 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Radius Platform API keys (PaymentPolicy spec.platform.credentialsSecretRef), read one
+  # at a time by name, in this namespace only. No list or watch: the controller never
+  # caches Secrets, and an app team names a key here without being able to read it.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -134,6 +140,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Sent to the Radius Platform as Radius-Gate-Instance with each policy fetch.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: GOMEMLIMIT
               value: 100MiB
           ports:

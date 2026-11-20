@@ -26,11 +26,18 @@ spec:
     - jsonPath: .spec.price
       name: Price
       type: string
+    - jsonPath: .spec.platform.projectId
+      name: Project
+      type: string
     - jsonPath: .status.ancestors[0].conditions[?(@.type=="Accepted")].status
       name: Accepted
       type: string
     - jsonPath: .status.ancestors[0].conditions[?(@.type=="Accepted")].reason
       name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.ancestors[0].conditions[?(@.type=="Synced")].status
+      name: Synced
       priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
@@ -66,6 +73,10 @@ spec:
               PaymentPolicySpec says what one HTTPRoute costs. It states intent only: the price and
               who is paid. Everything Envoy needs (timeouts, failOpen, the filter address) is the
               controller's, so an app team cannot weaken enforcement by editing its own policy.
+
+              A policy either prices the route itself (network, price, payTo) or hands it to a Radius
+              Platform project (platform), whose compiled policy then decides each request by method
+              and path: free, denied, rate limited, or paid in any of the project's payment options.
 
               Validation here is the schema's (pattern, enum, bounds): it is checked by the API
               server before the controller ever sees the object, so `kubectl apply` reports a
@@ -153,6 +164,58 @@ spec:
                 description: The address that receives every payment for this route.
                 pattern: ^0x[0-9a-fA-F]{40}$
                 type: string
+              platform:
+                description: |-
+                  A Radius Platform project whose compiled policy governs the route, instead of
+                  network, price and payTo. The controller polls the project and the filter enforces
+                  its rules. assetTransferMethod, maxTimeoutSeconds, description, mimeType and help do
+                  not apply: the document carries its own.
+                properties:
+                  credentialsSecretRef:
+                    description: |-
+                      The Secret holding the API key, in the controller's namespace (x402-system), never
+                      the policy's: an app team names a credential the platform team put there and cannot
+                      read it. The controller reads only Secrets labelled x402.dev/platform-credentials:
+                      "true", so a policy cannot have some other Secret sent to the Platform. A connector
+                      key from the project's Gate page is enough. Which Platform API is called is the
+                      controller's configuration (-platform-api-url), not the policy's, for the same reason.
+                    properties:
+                      key:
+                        default: apiKey
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  noPolicy:
+                    default: Deny
+                    description: |-
+                      What the route answers while no compiled policy has ever been loaded for the project:
+                      Deny (503 policy_unavailable) or Allow (served free). Once one is loaded, a failed
+                      fetch keeps it in force and this no longer applies.
+                    enum:
+                    - Allow
+                    - Deny
+                    type: string
+                  organizationId:
+                    description: The organization the project belongs to.
+                    maxLength: 128
+                    pattern: ^[A-Za-z0-9_-]+$
+                    type: string
+                  projectId:
+                    description: The project, a UUID.
+                    pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+                    type: string
+                required:
+                - credentialsSecretRef
+                - organizationId
+                - projectId
+                type: object
               price:
                 description: |-
                   Price per request in atomic units of the network's token (6 decimals on both
@@ -188,11 +251,16 @@ spec:
                 - message: targetRef is immutable
                   rule: self == oldSelf
             required:
-            - network
-            - payTo
-            - price
             - targetRef
             type: object
+            x-kubernetes-validations:
+            - message: set either platform, or all of network, price and payTo
+              rule: 'has(self.platform) ? !(has(self.network) || has(self.price) ||
+                has(self.payTo)) : (has(self.network) && has(self.price) && has(self.payTo))'
+            - message: 'a platform policy always settles before releasing the response:
+                captureMode must be Sync'
+              rule: '!has(self.platform) || !has(self.captureMode) || self.captureMode
+                == ''Sync'''
           status:
             description: |-
               Status is the Gateway API policy status (GEP-713): one ancestor entry per

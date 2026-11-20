@@ -190,11 +190,17 @@ func desiredGrant(filter Backend, name string, from []string) *unstructured.Unst
 	return u
 }
 
-// desiredConfigMap is the price table as the filter watches it.
-func desiredConfigMap(namespace, name string, table []byte) *unstructured.Unstructured {
+// desiredConfigMap is the price table as the filter watches it, with each named Radius
+// Platform project's compiled policy beside it. Applied with Server-Side Apply, a document
+// key the controller no longer sets (no policy names the project) is removed.
+func desiredConfigMap(namespace, name string, table []byte, docs map[string]string) *unstructured.Unstructured {
+	data := map[string]any{pricing.ConfigMapKey: string(table)}
+	for k, v := range docs {
+		data[k] = v
+	}
 	u := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": name, "namespace": namespace},
-		"data":     map[string]any{pricing.ConfigMapKey: string(table)},
+		"data":     data,
 	}}
 	u.SetGroupVersionKind(configMapGVK)
 	return u
@@ -224,5 +230,8 @@ func eepAccepted(u *unstructured.Unstructured) (status metav1.ConditionStatus, r
 
 // describe is the Accepted=True message: what the route now costs.
 func describe(pp *v1alpha1.PaymentPolicy) string {
+	if p := pp.Spec.Platform; p != nil {
+		return fmt.Sprintf("%s follows the compiled policy of Radius Platform project %s (organization %s)", routeKey(pp), p.ProjectID, p.OrganizationID)
+	}
 	return fmt.Sprintf("%s priced at %s atomic units on %s, paid to %s", routeKey(pp), pp.Spec.Price, pp.Spec.Network, pp.Spec.PayTo)
 }

@@ -2,10 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -46,6 +48,7 @@ type Reconciler struct {
 	PricesName      string           // the ConfigMap the filter watches
 	GrantName       string           // the ReferenceGrant in PricesNamespace
 	Networks        []radius.Profile // networks a policy may charge on
+	Poller          *Poller          // reads Radius Platform projects; nil disables spec.platform
 }
 
 // SetupWithManager registers the index and the three watches: the policies themselves,
@@ -62,12 +65,19 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	eep.SetGroupVersionKind(eepGVK)
 	route := &metav1.PartialObjectMetadata{}
 	route.SetGroupVersionKind(httpRouteGVK)
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named("paymentpolicy").
 		For(&v1alpha1.PaymentPolicy{}).
 		Owns(eep).
-		WatchesMetadata(route, handler.EnqueueRequestsFromMapFunc(r.policiesForRoute)).
-		Complete(r)
+		WatchesMetadata(route, handler.EnqueueRequestsFromMapFunc(r.policiesForRoute))
+	if r.Poller != nil {
+		// A project's new version or fetch error re-reconciles the policies naming it.
+		b = b.WatchesRawSource(r.Poller.Source())
+		if err := mgr.Add(r.Poller); err != nil {
+			return err
+		}
+	}
+	return b.Complete(r)
 }
 
 func (r *Reconciler) policiesForRoute(ctx context.Context, route client.Object) []reconcile.Request {
@@ -95,25 +105,82 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	cond, err := r.reconcilePolicy(ctx, &pp)
+	var all v1alpha1.PaymentPolicyList
+	if err := r.List(ctx, &all); err != nil {
+		return ctrl.Result{}, err
+	}
+	cond, err := r.reconcilePolicy(ctx, &pp, all.Items)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.setAccepted(ctx, &pp, cond); err != nil {
+	if pp.Spec.Platform != nil {
+		// After a restart, resume from the document the filter enforces before reporting
+		// on it, so the status does not flap to Pending while the first fetch runs.
+		if _, err := r.policyDocuments(ctx, map[string]bool{projectID(pp.Spec.Platform): true}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	synced := r.syncedCondition(&pp)
+	if err := r.setConditions(ctx, &pp, cond, synced); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.Log.Info("reconciled", "policy", req.String(), "accepted", cond.Status, "reason", cond.Reason)
 	return ctrl.Result{}, r.project(ctx)
 }
 
+// syncedCondition is a platform policy's Synced condition, from the Poller's state of its
+// project; nil for a policy without spec.platform.
+func (r *Reconciler) syncedCondition(pp *v1alpha1.PaymentPolicy) *metav1.Condition {
+	if pp.Spec.Platform == nil {
+		return nil
+	}
+	c := &metav1.Condition{Type: v1alpha1.ConditionSynced, Status: metav1.ConditionFalse}
+	id := pp.Spec.Platform.ProjectID
+	if r.Poller == nil {
+		c.Reason, c.Message = string(v1alpha1.ReasonInvalid), "this controller was started without Radius Platform support"
+		return c
+	}
+	st, ok := r.Poller.State(id)
+	if !ok || !st.Tried {
+		r.Poller.Kick()
+	}
+	enforcing := "no compiled policy loaded yet, so the route answers per noPolicy"
+	if st.Version > 0 {
+		enforcing = fmt.Sprintf("version %d stays in force", st.Version)
+	}
+	switch {
+	case st.Err != "":
+		c.Reason, c.Message = st.Reason, st.Err+"; "+enforcing
+	case st.Version == 0:
+		c.Reason, c.Message = v1alpha1.ReasonPending, "waiting for the first fetch of project "+id
+	default:
+		c.Status, c.Reason = metav1.ConditionTrue, v1alpha1.ReasonSynced
+		c.Message = fmt.Sprintf("version %d of project %s loaded", st.Version, id)
+		if len(st.Warnings) > 0 {
+			c.Message += "; " + strings.Join(st.Warnings, "; ")
+		}
+	}
+	c.Message = clipMessage(c.Message)
+	return c
+}
+
+// clipMessage keeps a condition message under the API's 32 KiB limit, with room to spare.
+func clipMessage(s string) string {
+	const limit = 4096
+	if len(s) > limit {
+		return s[:limit] + "…"
+	}
+	return s
+}
+
 // reconcilePolicy decides one policy's Accepted condition and writes or removes its
 // EnvoyExtensionPolicy accordingly.
-func (r *Reconciler) reconcilePolicy(ctx context.Context, pp *v1alpha1.PaymentPolicy) (metav1.Condition, error) {
+func (r *Reconciler) reconcilePolicy(ctx context.Context, pp *v1alpha1.PaymentPolicy, all []v1alpha1.PaymentPolicy) (metav1.Condition, error) {
 	accepted := func(status metav1.ConditionStatus, reason gatewayv1.PolicyConditionReason, msg string) metav1.Condition {
 		return metav1.Condition{Type: string(gatewayv1.PolicyConditionAccepted), Status: status, Reason: string(reason), Message: msg}
 	}
 
-	invalid := validate(pp, r.Networks)
+	invalid := r.validate(pp, all)
 
 	route := &metav1.PartialObjectMetadata{}
 	route.SetGroupVersionKind(httpRouteGVK)
@@ -177,10 +244,26 @@ func (r *Reconciler) removeEEP(ctx context.Context, pp *v1alpha1.PaymentPolicy) 
 	return client.IgnoreNotFound(r.Delete(ctx, eep))
 }
 
-// setAccepted writes the policy's status: one ancestor, the HTTPRoute, with the Accepted
-// condition. The existing conditions are kept so lastTransitionTime only moves when the
-// status does; nothing is written when nothing changed.
-func (r *Reconciler) setAccepted(ctx context.Context, pp *v1alpha1.PaymentPolicy, cond metav1.Condition) error {
+// validate checks one policy as project does: its own spec, and for a platform policy, that
+// the controller can read platforms and no other policy names its project differently.
+func (r *Reconciler) validate(pp *v1alpha1.PaymentPolicy, all []v1alpha1.PaymentPolicy) error {
+	if pp.Spec.Platform == nil {
+		return validate(pp, r.Networks)
+	}
+	if r.Poller == nil {
+		return errors.New("spec.platform: this controller was started without Radius Platform support")
+	}
+	if why := platformConflict(pp, all); why != "" {
+		return errors.New("spec.platform: " + why)
+	}
+	return nil
+}
+
+// setConditions writes the policy's status: one ancestor, the HTTPRoute, with the Accepted
+// condition and, for a platform policy, the Synced condition (removed when synced is nil).
+// The existing conditions are kept so lastTransitionTime only moves when the status does;
+// nothing is written when nothing changed.
+func (r *Reconciler) setConditions(ctx context.Context, pp *v1alpha1.PaymentPolicy, cond metav1.Condition, synced *metav1.Condition) error {
 	cond.ObservedGeneration = pp.Generation
 	want := gatewayv1.PolicyAncestorStatus{
 		AncestorRef: gatewayv1.ParentReference{
@@ -196,7 +279,14 @@ func (r *Reconciler) setAccepted(ctx context.Context, pp *v1alpha1.PaymentPolicy
 	if have {
 		want.Conditions = slices.Clone(pp.Status.Ancestors[0].Conditions)
 	}
-	if !meta.SetStatusCondition(&want.Conditions, cond) && have {
+	changed := meta.SetStatusCondition(&want.Conditions, cond)
+	if synced != nil {
+		synced.ObservedGeneration = pp.Generation
+		changed = meta.SetStatusCondition(&want.Conditions, *synced) || changed
+	} else {
+		changed = meta.RemoveStatusCondition(&want.Conditions, v1alpha1.ConditionSynced) || changed
+	}
+	if !changed && have {
 		return nil
 	}
 	pp.Status.Ancestors = []gatewayv1.PolicyAncestorStatus{want}
@@ -214,6 +304,7 @@ func (r *Reconciler) project(ctx context.Context) error {
 	routes := map[string]pricing.Route{}
 	blocked := map[string]string{}
 	namespaces := map[string]bool{}
+	projects := map[string]bool{} // platform projects named by a policy on an existing route
 	for i := range list.Items {
 		pp := &list.Items[i]
 		route := &metav1.PartialObjectMetadata{}
@@ -225,8 +316,15 @@ func (r *Reconciler) project(ctx context.Context) error {
 			return err
 		}
 		namespaces[pp.Namespace] = true // the EnvoyExtensionPolicy is there either way
-		if err := validate(pp, r.Networks); err != nil {
+		if err := r.validate(pp, list.Items); err != nil {
 			blocked[routeKey(pp)] = pp.Name + ": " + err.Error()
+			continue
+		}
+		if pp.Spec.Platform != nil {
+			projects[projectID(pp.Spec.Platform)] = true
+			// The filter does not enforce a compiled policy yet (M6b step 4). Until it does,
+			// the route is refused rather than left out of the table, which would serve it free.
+			blocked[routeKey(pp)] = pp.Name + ": Radius Platform policies are not enforced by this filter version; the route answers 503"
 			continue
 		}
 		rt, _ := routeOf(pp) // validate has called it
@@ -239,7 +337,11 @@ func (r *Reconciler) project(ctx context.Context) error {
 		// last good table stays in place and the error surfaces in the log.
 		return fmt.Errorf("price table would not load: %w", err)
 	}
-	cm := desiredConfigMap(r.PricesNamespace, r.PricesName, table)
+	docs, err := r.policyDocuments(ctx, projects)
+	if err != nil {
+		return err
+	}
+	cm := desiredConfigMap(r.PricesNamespace, r.PricesName, table, docs)
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(cm), client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
 		return fmt.Errorf("apply price table: %w", err)
 	}
@@ -254,4 +356,41 @@ func (r *Reconciler) project(ctx context.Context) error {
 	}
 	r.Log.Debug("projected", "routes", len(routes), "blocked", len(blocked), "namespaces", len(namespaces))
 	return nil
+}
+
+// policyDocuments is the compiled policy of each named project, by ConfigMap key, as the
+// Poller holds it. A project the Poller has nothing for yet (just after a restart) keeps the
+// document already in the ConfigMap, which is offered to the Poller as its starting point:
+// dropping it would turn the route to noPolicy until the first fetch.
+func (r *Reconciler) policyDocuments(ctx context.Context, projects map[string]bool) (map[string]string, error) {
+	docs := map[string]string{}
+	if len(projects) == 0 || r.Poller == nil {
+		return docs, nil
+	}
+	var current map[string]any
+	for _, id := range slices.Sorted(maps.Keys(projects)) {
+		st, _ := r.Poller.State(id)
+		if st.Version == 0 {
+			if current == nil {
+				cm := &unstructured.Unstructured{}
+				cm.SetGroupVersionKind(configMapGVK)
+				err := r.Get(ctx, client.ObjectKey{Namespace: r.PricesNamespace, Name: r.PricesName}, cm)
+				if err != nil && !apierrors.IsNotFound(err) {
+					return nil, err
+				}
+				current, _, _ = unstructured.NestedMap(cm.Object, "data")
+				if current == nil {
+					current = map[string]any{}
+				}
+			}
+			if old, ok := current[pricing.PolicyKey(id)].(string); ok {
+				r.Poller.Seed(id, []byte(old))
+				st, _ = r.Poller.State(id)
+			}
+		}
+		if st.Version > 0 {
+			docs[pricing.PolicyKey(id)] = string(st.Body)
+		}
+	}
+	return docs, nil
 }

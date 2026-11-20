@@ -44,6 +44,10 @@ const SchemaVersion = 1
 // ConfigMapKey is the ConfigMap data key that holds the table.
 const ConfigMapKey = "prices.json"
 
+// PolicyKey is the ConfigMap data key holding a Radius Platform project's compiled policy,
+// beside the table: one key per project that a PaymentPolicy names, the document as served.
+func PolicyKey(projectID string) string { return "policy-" + strings.ToLower(projectID) + ".json" }
+
 // The modes that are built. Open is in the schema already (backlog) and is refused
 // until it exists, rather than silently treated as the default.
 const (
