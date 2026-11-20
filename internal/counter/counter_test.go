@@ -19,7 +19,7 @@ func setup(t *testing.T) (*miniredis.Miniredis, *redis.Client, *Store) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	c := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() { _ = c.Close() })
 	return mr, c, New(c)
 }
 
@@ -84,7 +84,9 @@ func TestAddRepairsAMissingExpiry(t *testing.T) {
 	mr, _, s := setup(t)
 	cs := counters(1_760_000_010)[:1]
 	k, _ := Key(cs[0])
-	mr.Set(k, "7")
+	if err := mr.Set(k, "7"); err != nil {
+		t.Fatal(err)
+	}
 	got, err := s.Add(context.Background(), cs)
 	if err != nil || got[0].Count != 8 {
 		t.Fatalf("readings %+v, %v", got, err)
