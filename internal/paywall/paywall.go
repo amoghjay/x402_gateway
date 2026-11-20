@@ -56,6 +56,10 @@ type Request struct {
 	// §9 where one exists) leads the `error` line, so a client that prints the 402's
 	// error says why, and the how-to-pay hint still follows for the retry.
 	Refused string
+	// Accepts, when set, is every way to pay, offered in this order in place of the
+	// entry's one requirement (a Radius Platform rule with several payment options). The
+	// entry still supplies the how-to-pay text, for the first option.
+	Accepts []x402.Requirements
 }
 
 // Response is the 402 to send.
@@ -111,6 +115,9 @@ func Render(e *pricing.Entry, req Request) (Response, error) {
 		Error:       hint(help, req),
 		Resource:    x402.Resource{URL: req.URL, Description: e.Route.Description, MimeType: e.Route.MimeType},
 		Accepts:     []x402.Requirements{e.Requirements},
+	}
+	if len(req.Accepts) > 0 {
+		pr.Accepts = req.Accepts
 	}
 	header, err := pr.Encode()
 	if err != nil {

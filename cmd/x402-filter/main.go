@@ -187,6 +187,8 @@ func run(log *slog.Logger, c config) error {
 			Deadline:     c.deadline,
 			Facilitators: facs, RPCs: rpcs, SettleTimeout: c.settleTimeout,
 			FacilitatorVerify: c.facilitatorVerify, VerifyTimeout: c.verifyTimeout,
+			// Facilitators that Radius Platform payment options name, by URL.
+			FacilitatorHTTP: facilitatorHTTP,
 		})
 		// Radius Platform rules' rate limits and free quotas: one shared count in Redis.
 		server.WithCounters(counter.New(redisClient))
