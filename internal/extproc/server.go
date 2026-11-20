@@ -227,6 +227,7 @@ type request struct {
 
 	ruleHeaders map[string]string   // platform route: the decision's limit headers, for the response
 	fac         *facilitator.Client // platform route: the facilitator the paid option names
+	remote      *remotePayment      // platform route: a payment on the facilitator-only path
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -250,7 +251,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if st.settled {
 				// Paid for and not delivered: Envoy (or the client) went away while the
 				// response was held. The record stays, so the settler lists it for a refund.
-				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", paymentID(st.res), "err", err)
+				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", st.paymentID(), "err", err)
 			}
 			return err
 		}
@@ -440,6 +441,10 @@ func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *r
 }
 
 func (s *Server) respond(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
+	if st.remote != nil {
+		code, _ := strconv.Atoi(h[":status"])
+		return s.settleRemote(ctx, code, st)
+	}
 	if st.rsv == nil {
 		return continueResponse(nil) // unpriced, or nothing was reserved
 	}
@@ -519,6 +524,14 @@ func (s *Server) release(st *request, why Decision) {
 // paymentID identifies a payment by its nonce: unique per signature (the replay guard
 // sees to that), and the same value the chain's AuthorizationUsed event carries.
 func paymentID(res verify.Result) string { return evm.Hex(res.Authorization.Nonce[:]) }
+
+// paymentID is the request's payment id on either paid path.
+func (st *request) paymentID() string {
+	if st.remote != nil {
+		return st.remote.id
+	}
+	return paymentID(st.res)
+}
 
 // paywall answers 402 with how to pay.
 func (s *Server) paywall(st *request, pw paywall.Request, d Decision) *extprocv3.ProcessingResponse {

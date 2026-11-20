@@ -153,6 +153,23 @@ func (s *Store) Reserve(ctx context.Context, payer evm.Address, nonce [32]byte, 
 }
 
 // Release gives the amount back to the payer's in-flight sum: the request failed
+
+// MaxClaim bounds a claim's life when a payment does not say when it expires.
+const MaxClaim = 24 * time.Hour
+
+// Claim marks a payment, by its identity (x402.Identify), as used, until it expires plus the
+// nonce margin (MaxClaim when it does not say). It reports false when it was claimed already.
+// It is the replay guard of the facilitator-only path, where the filter reads nothing on
+// chain: like the nonce claim of Reserve, it is never released, so a refused request costs the
+// buyer a new signature.
+func (s *Store) Claim(ctx context.Context, id string, expires time.Time) (bool, error) {
+	ttl := MaxClaim
+	if !expires.IsZero() {
+		ttl = min(max(time.Until(expires), 0)+s.nonceMargin(), MaxClaim)
+	}
+	return s.Redis.SetNX(ctx, "claim:{"+id+"}", "1", ttl).Result()
+}
+
 // before anything was served, or the settlement is done. The nonce stays claimed.
 func (s *Store) Release(ctx context.Context, payer evm.Address, amount *big.Int) error {
 	if err := releaseScript.Run(ctx, s.Redis, []string{inflightKey(payer)}, amount.String()).Err(); err != nil {
