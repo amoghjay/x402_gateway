@@ -93,6 +93,7 @@ var SBCToken = Token{Symbol: DisplayAsset, Address: SBC, Name: SBCName, Version:
 type Profile struct {
 	Name        string // the name a PaymentPolicy and the -networks flag use
 	Display     string // for people: "Radius testnet"
+	Chain       string // the chain without its side, for the 402 page: "Radius", "Base"
 	ChainID     uint64
 	RPC         string // JSON-RPC over HTTPS; on Radius an API key is appended to the path
 	Facilitator string // x402 facilitator base URL (/verify, /settle, /supported)
@@ -112,6 +113,7 @@ type Profile struct {
 var Testnet = Profile{
 	Name:        "testnet",
 	Display:     "Radius testnet",
+	Chain:       "Radius",
 	ChainID:     72344,
 	RPC:         "https://rpc.testnet.radiustech.xyz",
 	Facilitator: "https://facilitator.testnet.radiustech.xyz",
@@ -128,6 +130,7 @@ var Testnet = Profile{
 var Mainnet = Profile{
 	Name:        "mainnet",
 	Display:     "Radius mainnet",
+	Chain:       "Radius",
 	ChainID:     723487,
 	RPC:         "https://rpc.radiustech.xyz",
 	Facilitator: "https://facilitator.radiustech.xyz",
@@ -147,6 +150,7 @@ var Mainnet = Profile{
 var BaseSepolia = Profile{
 	Name:        "base-sepolia",
 	Display:     "Base Sepolia",
+	Chain:       "Base",
 	ChainID:     84532,
 	RPC:         "https://sepolia.base.org",
 	Facilitator: "https://x402.org/facilitator",

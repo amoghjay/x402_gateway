@@ -5,69 +5,138 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payment required</title>
 <style>
-  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafafa; --card: #ffffff; --line: #e2e2e2; --code: #f1f1f1; }
-  @media (prefers-color-scheme: dark) { :root { --fg: #ececec; --muted: #a3a3a3; --bg: #141414; --card: #1d1d1d; --line: #2f2f2f; --code: #262626; } }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, sans-serif; }
-  main { max-width: 44rem; margin: 3rem auto; padding: 0 1rem; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-  .price { font-size: 2rem; font-weight: 600; margin: .75rem 0 0; }
-  .muted { color: var(--muted); }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 1rem 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; overflow-wrap: anywhere; }
-  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
-  ol { padding-left: 1.25rem; } li { margin: .5rem 0; } li .muted { font-size: .875rem; }
-  pre { background: var(--code); border-radius: 8px; padding: .75rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; margin: .25rem 0; }
-  .copyable { display: flex; gap: .5rem; align-items: flex-start; }
-  .copyable pre { flex: 1; min-width: 0; }
-  button.copy { font: inherit; font-size: .875rem; margin-top: .25rem; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); cursor: pointer; white-space: nowrap; }
-  .table { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; font-size: .875rem; }
-  th, td { text-align: left; vertical-align: top; padding: .375rem .5rem; border-bottom: 1px solid var(--line); }
-  td code { overflow-wrap: anywhere; }
-  a { color: inherit; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --card: #ffffff; --fg: #1b1b1a; --muted: #67665f; --line: #e4e3de;
+    --code-bg: #f1f0ec; --code-fg: #1b1b1a; --accent: #1f5eff; --accent-fg: #ffffff;
+    --test-bg: #fff2cc; --test-fg: #6b4a00; --ok-bg: #e6f4ea; --ok-fg: #1e5b31; --other-bg: #eeeef0; --other-fg: #4a4a52;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121211; --card: #1b1b1a; --fg: #ecebe6; --muted: #a09f97; --line: #2e2d2a;
+      --code-bg: #0d0d0c; --code-fg: #ecebe6; --accent: #6f95ff; --accent-fg: #0d0d0c;
+      --test-bg: #3a2c06; --test-fg: #f3c859; --ok-bg: #16301f; --ok-fg: #8fd6a4; --other-bg: #2a2a2e; --other-fg: #c4c4cc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 42rem; margin: 0 auto; padding: 2.5rem 1rem 3rem; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+
+  .top { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: space-between; margin-bottom: .75rem; }
+  .eyebrow { font-size: .8125rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .badge { display: inline-block; font-size: .75rem; font-weight: 600; padding: .2rem .55rem; border-radius: 999px; white-space: nowrap; }
+  .badge.test { background: var(--test-bg); color: var(--test-fg); }
+  .badge.cli { background: var(--ok-bg); color: var(--ok-fg); }
+  .badge.other { background: var(--other-bg); color: var(--other-fg); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.25rem 1.25rem 1.375rem; margin-bottom: 1rem; }
+  .resource { margin: 0; font-size: .9375rem; overflow-wrap: anywhere; }
+  .resource .host { color: var(--muted); }
+  .resource .path { font-weight: 600; }
+  .desc { margin: .25rem 0 0; color: var(--muted); }
+  .price { margin: 1rem 0 0; display: flex; align-items: baseline; gap: .4rem; flex-wrap: wrap; }
+  .price .amount { font-size: 2.5rem; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+  .price .unit { font-size: 1.25rem; font-weight: 600; }
+  .price .per { color: var(--muted); }
+  .also { margin: .375rem 0 0; color: var(--muted); font-size: .9375rem; }
+  .reassure { margin: .875rem 0 0; font-size: .875rem; color: var(--muted); }
+
+  h2 { font-size: 1.0625rem; margin: 0 0 .25rem; }
+  .lead { margin: 0 0 .875rem; color: var(--muted); font-size: .9375rem; }
+
+  .code { position: relative; margin: .5rem 0; }
+  .code pre { margin: 0; background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--line); border-radius: 10px;
+              padding: .875rem 5.25rem .875rem .875rem; font-size: .875rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .code.primary pre { border-color: var(--accent); }
+  .code.agent pre { max-height: 9rem; overflow: auto; font-size: .8125rem; }
+  button.copy { position: absolute; top: .5rem; right: .5rem; font: inherit; font-size: .8125rem; font-weight: 600; padding: .35rem .7rem;
+                border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  button.copy:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+
+  details { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .75rem; }
+  summary { cursor: pointer; font-weight: 600; font-size: .9375rem; }
+  ol.steps { margin: .75rem 0 0; padding-left: 1.25rem; }
+  ol.steps li { margin: 0 0 .75rem; }
+  .hint { margin: .25rem 0 0; font-size: .8125rem; color: var(--muted); }
+
+  ul.options { list-style: none; margin: .5rem 0 0; padding: 0; }
+  ul.options li { padding: .75rem 0; border-top: 1px solid var(--line); }
+  ul.options li:first-child { border-top: 0; padding-top: .25rem; }
+  .opt-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .6rem; }
+  .opt-head strong { font-size: 1rem; }
+  .opt-meta { margin: .25rem 0 0; font-size: .8125rem; color: var(--muted); overflow-wrap: anywhere; }
+  .opt-meta code { font-size: .8125rem; color: var(--fg); }
+
+  footer { margin-top: 1.5rem; font-size: .8125rem; color: var(--muted); }
+  footer p { margin: .25rem 0; }
+  @media (max-width: 30rem) { main { padding-top: 1.5rem; } .price .amount { font-size: 2rem; } }
 </style>
 </head>
 <body>
 <main>
-  <div class="card">
-    <h1>Payment required</h1>
-    <p class="muted">This resource is paid per request with x402; nothing has been charged.{{if .Description}} {{.Description}}{{end}}</p>
-    <div class="price">{{.Price}} {{.Asset}}</div>
-    <p class="muted">on {{.Network}}{{if gt (len .Options) 1}}, or one of the other payment options below{{end}}</p>
-    <dl>
-      <dt>Resource</dt><dd><code>{{.URL}}</code></dd>
-    </dl>
+  <div class="top">
+    <span class="eyebrow">402 · Payment required</span>
+    {{if .Testnet}}<span class="badge test">Test network · no real money</span>{{end}}
+  </div>
+
+  <section class="card">
+    <p class="resource"><span class="host">{{.Host}}</span><span class="path">{{.Path}}</span></p>
+    {{if .Description}}<p class="desc">{{.Description}}</p>{{end}}
+    <div class="price"><span class="amount">{{.First.Price}}</span><span class="unit">{{.First.Token}}</span><span class="per">per request on {{.First.Chain}}</span></div>
+    {{if .Others}}<p class="also">Also accepted: {{range $i, $o := .Others}}{{if $i}} · {{end}}{{$o.Price}} {{$o.Token}} on {{$o.Chain}}{{end}}</p>{{end}}
     {{if .Message}}<p>{{.Message}}</p>{{end}}
+    <p class="reassure">Nothing has been charged. Each request is paid on its own; pay this one and it goes through.</p>
+  </section>
 
-    <h2>Pay</h2>
-    {{if .Commands}}{{range .Commands}}<div class="copyable"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
-    {{end}}<p class="muted">radius-cli signs the payment, retries the request and prints the response. First time? The steps below set it up.</p>
-    {{else}}<p>radius-cli pays none of the options here. Any x402 v2 client pays it: it reads the <code>PAYMENT-REQUIRED</code> header, signs one of the offered terms and retries.</p>
+  {{if .Commands}}
+  <section class="card">
+    <h2>Pay from your terminal</h2>
+    <p class="lead">One command signs the payment, sends the request again and prints the response. It pays on whichever network your wallet has funds on, and never more than the price.</p>
+    {{range .Commands}}<div class="code primary"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
     {{end}}
-
-    <h2>Steps</h2>
-    <ol>
-      {{range .Steps}}<li><pre>{{.Run}}</pre>{{if .Note}}<span class="muted">{{.Note}}</span>{{end}}</li>
+    <details>
+      <summary>First time? Set up radius-cli</summary>
+      <ol class="steps">
+        {{range .Setup}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
+        {{end}}
+      </ol>
+    </details>
+  </section>
+  {{else}}
+  <section class="card">
+    <h2>Pay with an x402 client</h2>
+    <p class="lead">Any x402 v2 client pays this: it reads the <code>PAYMENT-REQUIRED</code> header of this response, signs one of the offered payments and sends the request again.</p>
+    <ol class="steps">
+      {{range .Steps}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
       {{end}}
     </ol>
+  </section>
+  {{end}}
 
-    <h2>Hand this to your agent</h2>
-    <div class="copyable"><pre>{{.AgentPrompt}}</pre><button type="button" class="copy">Copy</button></div>
+  <section class="card">
+    <h2>Using an AI agent?</h2>
+    <p class="lead">Copy this into your agent. It says what to run, and that it may not pay more than the price without asking you.</p>
+    <div class="code agent"><pre>{{.AgentPrompt}}</pre><button type="button" class="copy">Copy</button></div>
+  </section>
 
-    <h2>Payment options</h2>
-    <div class="table"><table>
-      <thead><tr><th>Price</th><th>Network</th><th>Pay to</th><th>Method</th><th>Pay with</th></tr></thead>
-      <tbody>
-      {{range .Options}}<tr><td>{{.PriceLabel}}</td><td>{{.Network}}</td><td><code>{{.PayTo}}</code></td><td>{{.MethodName}}</td><td>{{.PayWith}}</td></tr>
-      {{end}}</tbody>
-    </table></div>
+  <section class="card">
+    <h2>{{if .Others}}All payment options{{else}}Payment details{{end}}</h2>
+    <ul class="options">
+      {{range .Options}}<li>
+        <div class="opt-head"><strong>{{.Price}} {{.Token}}</strong><span>on {{.Chain}}</span>{{if and $.SomeTestnet .Testnet}}<span class="badge test">test network</span>{{end}}{{if eq .PayWith "radius-cli"}}<span class="badge cli">radius-cli</span>{{else}}<span class="badge other">another x402 client</span>{{end}}</div>
+        <p class="opt-meta">Pay to <code>{{.PayTo}}</code> · {{.MethodName}}{{if not .KnownToken}} · token <code>{{.AssetAddress}}</code>{{end}}</p>
+        {{if ne .PayWith "radius-cli"}}<p class="opt-meta">Pay with {{.PayWith}}.</p>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
 
-    <h2>Pay from code</h2>
-    <p>Use <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (package <code>{{.SDK.Package}}</code>): {{.SDK.Note}}.</p>
-    <p><a href="{{.Docs}}">How to pay with x402: documentation</a></p>
-  </div>
+  <footer>
+    <p>From code: <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (npm <code>{{.SDK.Package}}</code>) pays this inside your app. <a href="{{.Docs}}">Documentation</a></p>
+    <p>The machine-readable terms are in this response's <code>PAYMENT-REQUIRED</code> header (x402 v2).</p>
+  </footer>
 </main>
 <script>
   document.querySelectorAll("button.copy").forEach(function (b) {
@@ -77,7 +146,7 @@
       var select = function () {
         var r = document.createRange(); r.selectNodeContents(el);
         var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-        label("Press Ctrl+C");
+        label(/Mac/.test(navigator.platform) ? "Press ⌘C" : "Press Ctrl+C");
       };
       if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(el.textContent).then(function () { label("Copied"); }, select);
