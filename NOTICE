@@ -1,0 +1,20 @@
+x402 Gateway
+Copyright 2026 Amogh Jay
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes software developed by Radius Technology Systems
+(https://github.com/radiustechsystems/radius-payment-gateway), used under
+the MIT License, Copyright (c) 2026 Radius Technology Systems:
+
+  - internal/policy/policy.go and internal/policy/eval.go are a Go port of
+    that project's reference policy evaluator.
+  - internal/policy/testdata/vectors/*.json are its conformance vectors,
+    copied unchanged.
+
+The MIT License text for that software is in
+internal/policy/testdata/vectors/LICENSE, and its provenance is recorded in
+internal/policy/testdata/vectors/SOURCE.md.
+
+Third-party code under legacy/llm-gateway/contracts/lib/ keeps the licence
+in its own directory.

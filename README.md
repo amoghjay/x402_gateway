@@ -162,3 +162,9 @@ closest open-source neighbour (it settles before releasing the response).
 experimental x402 pay door. This project's point on that map: inside the cluster's own
 Envoy, no facilitator call on the request path, and app teams price their own routes
 with a policy. The comparison is in [ROADMAP.md](ROADMAP.md#prior-art-stated-up-front).
+
+## License
+
+[Apache License 2.0](LICENSE). Versions published before this change were under the MIT
+License and remain available under it. The policy evaluator and its conformance vectors
+are ported from MIT-licensed code; the attribution is in [NOTICE](NOTICE).
