@@ -103,26 +103,86 @@ that gap and the seller carries the loss, capped per wallet but not in total.
 ```
 app team ─kubectl apply─► PaymentPolicy ─► x402-controller ─► EnvoyExtensionPolicy + price table
 
-buyer ─► GCP LB ─► Envoy Gateway ─ext_proc─► x402-filter ─► Redis (nonce, in-flight, balance cache)
-                        │                                      │ settle stream
-                        ▼                                      ▼
-                 unmodified backend                       x402-settler ─/settle─► Radius facilitator
+buyer ─► GCP LB ─► Envoy Gateway ─ext_proc─► x402-filter ─/verify, /settle (Sync)─► facilitator
+                        │                        │                                          ▲
+                        ▼                        ▼                                          │ /settle
+                 unmodified backend          Redis (nonce, in-flight, ─settle stream─► x402-settler
+                                             balance cache)               (Async)
 ```
 
-Three Go binaries: the filter, the controller and the settler. The request path never
-calls the facilitator or the Kubernetes API. The cluster holds **no private keys**:
+Three Go binaries: the filter, the controller and the settler. On a `captureMode: Sync`
+route, the default, the filter calls the facilitator itself: `/verify` on the request,
+`/settle` while Envoy holds the response. The settler settles `Async` routes from the
+Redis stream, and lists payments charged without a confirmed delivery. The request path
+never calls the Kubernetes API. The cluster holds **no private keys**:
 buyers sign, and the facilitator submits the transfer. The full map, the three flows and
 the reasoning are in [docs/architecture.md](docs/architecture.md).
 
+## Conformance
+
+Routes governed by a Radius Platform project
+([`deploy/k8s/demo-platform/`](deploy/k8s/demo-platform/README.md)) follow the
+Platform's gate standard, with the deviations listed below.
+
+- **Format versions.** The gate accepts compiled policies with `schema`
+  `radius.policy/0.1` and `radius.policy/0.2` (`policy.Schemas` in
+  [`internal/policy/policy.go`](internal/policy/policy.go)). A document with any other
+  `schema` is refused whole, and the last good version stays in force.
+- **Startup log lines.** The filter logs
+  `{"msg":"Radius Platform compiled policies accepted",…,"schemas":["radius.policy/0.1","radius.policy/0.2"]}`.
+  The controller's leader logs `polling Radius Platform projects` with the same `schemas`.
+- **Vectors.** The standard's conformance vectors are in
+  [`internal/policy/testdata/vectors/`](internal/policy/testdata/vectors/SOURCE.md),
+  copied unchanged at a pinned commit: 73 cases in nine files, 16 of them in `agent.json`
+  (`0.2`) and 57 in the eight `0.1` files. `go test ./internal/policy/` runs them; 73 of 73
+  pass (2026-11-23).
+
+Deliberate deviations, each explained in the code that makes it:
+
+- **Paths are matched after Envoy normalizes them** (dot segments removed, slashes
+  merged). The standard (§4.1) says to compare the path as the client sent it. The
+  normalized path is the one Envoy routes on and the backend receives, so a rule cannot
+  be dodged with `/free/../paid`
+  ([`internal/extproc/platform.go`](internal/extproc/platform.go)).
+- **The gate keeps a record of payments.** §6.2 says a gate keeps none and reads nothing
+  of the payload beyond `x402Version` and `accepted`. This gate claims every payment in
+  Redis against replay, and on the EIP-3009 path it also checks the signature and the
+  payer's balance itself, keeps a held-payment record, and reads the authorization's state
+  on chain before settling. The reason: the Radius testnet facilitator answered a repeated
+  `/settle` with success (re-tested 2026-11-20), so the facilitator alone does not stop a
+  replay ([`charge.go`](internal/extproc/charge.go),
+  [`facilitated.go`](internal/extproc/facilitated.go)).
+- **A redirect is charged.** §6.2 settles on a 2xx. This gate also settles on a 3xx
+  other than 304, because a redirect's `Location` can be the content itself, such as a
+  presigned download URL (`chargeable` in
+  [`internal/extproc/server.go`](internal/extproc/server.go)).
+- **Rules that match an agent `category` never match.** The standard takes the category
+  only from a source the client cannot forge, such as Cloudflare's verified bot category;
+  this gate has none. It loads such a rule instead of refusing the document (§9.2), the
+  rule never matches, and the controller says so on the `PaymentPolicy`'s `Synced`
+  condition ([`internal/controller/poller.go`](internal/controller/poller.go)). Rules on a
+  Web Bot Auth `signature_agent` are verified and do match.
+
+Not a deviation, but easy to trip on: a rule that lists methods never matches `HEAD` or
+`OPTIONS`, as in the reference evaluator (the Platform's SDK differs). A `HEAD` to a
+`GET`-only endpoint is decided by a later rule or the policy's default
+([`internal/policy/policy.go`](internal/policy/policy.go)).
+
+[`tools/drills/platform.sh`](tools/drills/platform.sh) reruns the live checks of a
+Platform route (allow, deny, charge, free quota, rate limit, a payment per option and a
+replay) against a gateway.
+
 ## Why Radius
 
-Settling after the response means the seller holds unsettled revenue until settlement
-lands, and the rail decides how long that is. On Radius a transfer is final in about
-110 ms (measured), there are no reorgs, and a settlement costs a fixed ~$0.0001 in
-stablecoin. The window shrinks to roughly the length of the request, one receipt is
-final, and a $0.001 call is still economic. Whether the spec's synchronous *settle,
-then respond* ordering can also fit is an open question this project measures. The
-argument and its evidence are in [ROADMAP.md](ROADMAP.md#why-radius).
+The gate holds a paid response while its payment settles, so the rail decides how long
+a paying caller waits. Through a facilitator the held response took about 0.55 s at the
+median on both Radius testnet and Base Sepolia (GKE, 2026-11-19, n=100), and most of
+that is the facilitator round trip, not the chain. On Radius a self-submitted transfer
+reached its final receipt in 91 ms at the median from GKE (500 settles, 2026-11-19),
+there are no reorgs, and a transfer costs a fixed $0.0001, so a $0.001 call is still
+economic. Whether Radius is measurably faster for a held response stays open until the
+fast lane runs end to end. The argument and its evidence are in
+[ROADMAP.md](ROADMAP.md#why-radius).
 
 ## Run it yourself
 
@@ -140,7 +200,7 @@ then our CRD, Redis, the filter, the controller, the settler and the demo.
 | `internal/` | the ext_proc server, the local verifier, the Redis reserve and settle stream, the controller ([map](docs/architecture.md#repository-map)) |
 | `deploy/` | Terraform for GKE, Kubernetes manifests |
 | `docs/` | [architecture](docs/architecture.md), the [request-path budget](docs/design/request-path-budget.md) and its measurements, design notes |
-| `tools/` | the demo walkthrough, latency probes, GKE pause/resume |
+| `tools/` | the demo walkthrough, [drill scripts](tools/drills/README.md), latency probes, GKE pause/resume |
 | `legacy/llm-gateway/` | where this started: an app-level pay-per-prompt gateway and the [audit findings](legacy/llm-gateway/REPORT.md) that moved enforcement into the data plane |
 
 ## Development
@@ -160,8 +220,9 @@ in waitlist, and [traefik-x402](https://github.com/lukaszraczylo/traefik-x402) i
 closest open-source neighbour (it settles before releasing the response).
 [Anteroom](https://anteroom.dev) gates a single app behind proof-of-work, with an
 experimental x402 pay door. This project's point on that map: inside the cluster's own
-Envoy, no facilitator call on the request path, and app teams price their own routes
-with a policy. The comparison is in [ROADMAP.md](ROADMAP.md#prior-art-stated-up-front).
+Envoy, the response held until its payment has settled, replay and overdraft state
+shared by every replica, and routes priced by a `PaymentPolicy` or by a Radius Platform
+project's policy. The comparison is in [ROADMAP.md](ROADMAP.md#prior-art-stated-up-front).
 
 ## License
 
