@@ -71,6 +71,11 @@ func (d Dictionary) Get(key string) (Member, bool) {
 
 var errSyntax = errors.New("structured field syntax")
 
+// maxMembers bounds a dictionary's members and one parameter list. Repeated keys are found
+// by scanning, so without a bound a 60 KiB field of distinct keys costs tens of milliseconds
+// to parse, on a request nobody has signed. Signature fields hold a handful.
+const maxMembers = 64
+
 type parser struct {
 	s string
 	i int
@@ -123,6 +128,9 @@ func ParseDictionary(field string) (Dictionary, error) {
 			}
 		}
 		if !replaced {
+			if len(d) == maxMembers {
+				return nil, fmt.Errorf("%w: more than %d members", errSyntax, maxMembers)
+			}
 			d = append(d, DictEntry{Key: key, Value: m})
 		}
 		p.skipOWS()
@@ -219,6 +227,9 @@ func (p *parser) params() (Params, error) {
 			}
 		}
 		if !replaced {
+			if len(ps) == maxMembers {
+				return nil, fmt.Errorf("%w: more than %d parameters", errSyntax, maxMembers)
+			}
 			ps = append(ps, Param{Key: key, Value: v})
 		}
 	}

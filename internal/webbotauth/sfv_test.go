@@ -2,6 +2,8 @@ package webbotauth
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +67,33 @@ func TestParseErrors(t *testing.T) {
 	}
 	if _, err := ParseItem(`"a" x`); err == nil {
 		t.Error("trailing characters accepted")
+	}
+}
+
+// A field of many distinct keys is refused rather than scanned: repeated keys are found by a
+// linear search, and the field arrives on requests nobody has signed.
+func TestParseBoundsMembersAndParameters(t *testing.T) {
+	members := func(n int, sep string) string {
+		keys := make([]string, n)
+		for i := range keys {
+			keys[i] = fmt.Sprintf("k%d", i)
+		}
+		return strings.Join(keys, sep)
+	}
+	if d, err := ParseDictionary(members(maxMembers, ", ")); err != nil || len(d) != maxMembers {
+		t.Errorf("%d members: %d, %v", maxMembers, len(d), err)
+	}
+	if _, err := ParseDictionary(members(maxMembers+1, ", ")); err == nil {
+		t.Errorf("%d members accepted", maxMembers+1)
+	}
+	if _, err := ParseDictionary("a;" + members(maxMembers, ";")); err != nil {
+		t.Errorf("%d parameters: %v", maxMembers, err)
+	}
+	if _, err := ParseDictionary("a;" + members(maxMembers+1, ";")); err == nil {
+		t.Errorf("%d parameters accepted", maxMembers+1)
+	}
+	// A repeated key takes no room.
+	if _, err := ParseDictionary(strings.Repeat("a=1, ", 4*maxMembers) + "a=2"); err != nil {
+		t.Errorf("repeated key: %v", err)
 	}
 }
