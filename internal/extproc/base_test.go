@@ -82,7 +82,9 @@ func TestBaseSepoliaRouteIsPricedInUSDC(t *testing.T) {
 		a.Extra == nil || a.Extra.Name != "USDC" || a.Extra.Version != "2" {
 		t.Errorf("offer = %+v (extra %+v), want USDC on Base Sepolia with its EIP-712 domain", a, a.Extra)
 	}
-	if !strings.Contains(pr.Error, "0.001 USDC on Base Sepolia") || strings.Contains(pr.Error, "radius-cli") {
+	// radius-cli 0.8.0 pays USDC on Base: its testnet side, Base as the network.
+	if !strings.Contains(pr.Error, "0.001 USDC on Base Sepolia") || !strings.Contains(pr.Error, "radius-cli --network testnet wallet pay get") ||
+		!strings.Contains(pr.Error, "--networks base --threshold 0.001") {
 		t.Errorf("error line = %q", pr.Error)
 	}
 }

@@ -144,6 +144,12 @@ func TestChargeOffersEveryOption(t *testing.T) {
 	if pr.Resource.Description != "One paid item through the Envoy gate" {
 		t.Errorf("description %q", pr.Resource.Description)
 	}
+	// One radius-cli command pays the two options it can, Base Sepolia included although
+	// this filter does not take that network itself; the Permit2 SBC option is left out.
+	if !strings.Contains(pr.Error, "radius-cli --network testnet wallet pay get") ||
+		!strings.Contains(pr.Error, "--networks radius,base --threshold 0.001 (3 payment options; see the response body)") {
+		t.Errorf("error line %q", pr.Error)
+	}
 	p.decided(PaymentRequired)
 }
 

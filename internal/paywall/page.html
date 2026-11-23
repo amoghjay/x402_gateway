@@ -8,10 +8,10 @@
   :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafafa; --card: #ffffff; --line: #e2e2e2; --code: #f1f1f1; }
   @media (prefers-color-scheme: dark) { :root { --fg: #ececec; --muted: #a3a3a3; --bg: #141414; --card: #1d1d1d; --line: #2f2f2f; --code: #262626; } }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, sans-serif; }
-  main { max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  main { max-width: 44rem; margin: 3rem auto; padding: 0 1rem; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem; }
   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-  .price { font-size: 2rem; font-weight: 600; margin: .75rem 0; }
+  .price { font-size: 2rem; font-weight: 600; margin: .75rem 0 0; }
   .muted { color: var(--muted); }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 1rem 0; }
   dt { color: var(--muted); }
@@ -19,6 +19,13 @@
   h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
   ol { padding-left: 1.25rem; } li { margin: .5rem 0; } li .muted { font-size: .875rem; }
   pre { background: var(--code); border-radius: 8px; padding: .75rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; margin: .25rem 0; }
+  .copyable { display: flex; gap: .5rem; align-items: flex-start; }
+  .copyable pre { flex: 1; min-width: 0; }
+  button.copy { font: inherit; font-size: .875rem; margin-top: .25rem; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); cursor: pointer; white-space: nowrap; }
+  .table { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .875rem; }
+  th, td { text-align: left; vertical-align: top; padding: .375rem .5rem; border-bottom: 1px solid var(--line); }
+  td code { overflow-wrap: anywhere; }
   a { color: inherit; }
 </style>
 </head>
@@ -26,25 +33,59 @@
 <main>
   <div class="card">
     <h1>Payment required</h1>
-    <p class="muted">This resource is paid per request with x402.{{if .Description}} {{.Description}}{{end}}</p>
+    <p class="muted">This resource is paid per request with x402; nothing has been charged.{{if .Description}} {{.Description}}{{end}}</p>
     <div class="price">{{.Price}} {{.Asset}}</div>
+    <p class="muted">on {{.Network}}{{if gt (len .Options) 1}}, or one of the other payment options below{{end}}</p>
     <dl>
-      <dt>Network</dt><dd>{{.Network}}</dd>
-      <dt>Pay to</dt><dd><code>{{.PayTo}}</code></dd>
       <dt>Resource</dt><dd><code>{{.URL}}</code></dd>
     </dl>
     {{if .Message}}<p>{{.Message}}</p>{{end}}
 
-    <h2>Pay from a terminal or an agent</h2>
+    <h2>Pay</h2>
+    {{if .Commands}}{{range .Commands}}<div class="copyable"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
+    {{end}}<p class="muted">radius-cli signs the payment, retries the request and prints the response. First time? The steps below set it up.</p>
+    {{else}}<p>radius-cli pays none of the options here. Any x402 v2 client pays it: it reads the <code>PAYMENT-REQUIRED</code> header, signs one of the offered terms and retries.</p>
+    {{end}}
+
+    <h2>Steps</h2>
     <ol>
       {{range .Steps}}<li><pre>{{.Run}}</pre>{{if .Note}}<span class="muted">{{.Note}}</span>{{end}}</li>
       {{end}}
     </ol>
 
+    <h2>Hand this to your agent</h2>
+    <div class="copyable"><pre>{{.AgentPrompt}}</pre><button type="button" class="copy">Copy</button></div>
+
+    <h2>Payment options</h2>
+    <div class="table"><table>
+      <thead><tr><th>Price</th><th>Network</th><th>Pay to</th><th>Method</th><th>Pay with</th></tr></thead>
+      <tbody>
+      {{range .Options}}<tr><td>{{.PriceLabel}}</td><td>{{.Network}}</td><td><code>{{.PayTo}}</code></td><td>{{.MethodName}}</td><td>{{.PayWith}}</td></tr>
+      {{end}}</tbody>
+    </table></div>
+
     <h2>Pay from code</h2>
     <p>Use <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> (package <code>{{.SDK.Package}}</code>): {{.SDK.Note}}.</p>
-    <p><a href="{{.Docs}}">x402 on {{.Network}}: documentation</a></p>
+    <p><a href="{{.Docs}}">How to pay with x402: documentation</a></p>
   </div>
 </main>
+<script>
+  document.querySelectorAll("button.copy").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var el = b.previousElementSibling;
+      var label = function (s) { b.textContent = s; setTimeout(function () { b.textContent = "Copy"; }, 2000); };
+      var select = function () {
+        var r = document.createRange(); r.selectNodeContents(el);
+        var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        label("Press Ctrl+C");
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(el.textContent).then(function () { label("Copied"); }, select);
+      } else {
+        select();
+      }
+    });
+  });
+</script>
 </body>
 </html>
