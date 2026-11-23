@@ -136,8 +136,12 @@ func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Lo
 		p.policies = out
 		p.origins = map[string]map[string]bool{}
 		for project, pol := range out {
-			if o := signatureOrigins(pol); len(o) > 0 {
-				p.origins[project] = o
+			if o, _ := SignatureOrigins(pol); len(o) > 0 {
+				set := make(map[string]bool, len(o))
+				for _, origin := range o {
+					set[origin] = true
+				}
+				p.origins[project] = set
 			}
 		}
 	}()
@@ -176,24 +180,36 @@ func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Lo
 	}
 }
 
-// signatureOrigins is the set of origins a policy names in signature_agent rules,
-// normalised as the verifier reports them.
-func signatureOrigins(pol *compiledpolicy.Policy) map[string]bool {
-	var out map[string]bool
+// MaxSignatureOrigins bounds how many signature_agent origins one policy can have verified.
+// Each origin is a directory the controller fetches and keeps in the price-table ConfigMap,
+// which every route shares and which holds 1 MiB.
+const MaxSignatureOrigins = 16
+
+// SignatureOrigins lists the origins a policy names in signature_agent rules, normalised as
+// the verifier reports them, in rule order. A value that is not an https origin is left out
+// (it can never match a verified agent). Only the first MaxSignatureOrigins are kept; the
+// rest are returned as skipped, and signatures for them are not verified. The controller and
+// the filter both call this, so they agree on which origins count.
+func SignatureOrigins(pol *compiledpolicy.Policy) (origins, skipped []string) {
+	seen := map[string]bool{}
 	for _, r := range pol.Rules {
 		if r.Match.Agent == nil {
 			continue
 		}
 		for _, o := range r.Match.Agent.SignatureAgent {
-			if n, err := webbotauth.Origin(webbotauth.Item{Value: o}); err == nil {
-				if out == nil {
-					out = map[string]bool{}
-				}
-				out[n] = true
+			n, err := webbotauth.Origin(webbotauth.Item{Value: o})
+			if err != nil || seen[n] {
+				continue
+			}
+			seen[n] = true
+			if len(origins) < MaxSignatureOrigins {
+				origins = append(origins, n)
+			} else {
+				skipped = append(skipped, n)
 			}
 		}
 	}
-	return out
+	return origins, skipped
 }
 
 // LoadAgents reads the key directories the controller fetched. Call it after LoadPolicies.

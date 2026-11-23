@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
+	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
@@ -242,6 +244,28 @@ func TestSignatureOrigins(t *testing.T) {
 	w := warnings(pol)
 	if len(w) != 1 || !strings.Contains(w[0], `"https://Agent.example:443/"`) || !strings.Contains(w[0], `"http://plain.example"`) ||
 		strings.Contains(w[0], `"https://agent.example"`) {
+		t.Errorf("warnings %q", w)
+	}
+}
+
+// A policy has at most pricing.MaxSignatureOrigins origins fetched; the rest are named in a
+// warning, since their rules never match.
+func TestSignatureOriginsCapped(t *testing.T) {
+	var origins []string
+	for i := range pricing.MaxSignatureOrigins + 2 {
+		origins = append(origins, fmt.Sprintf("https://agent%d.example", i))
+	}
+	pol, err := compiled.Parse(agentDoc(t, 2, origins...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := signatureOrigins(pol)
+	if len(got) != pricing.MaxSignatureOrigins || got[0] != origins[0] {
+		t.Fatalf("%d origins, first %q", len(got), got[0])
+	}
+	w := warnings(pol)
+	if len(w) != 1 || !strings.Contains(w[0], origins[pricing.MaxSignatureOrigins]) || !strings.Contains(w[0], origins[pricing.MaxSignatureOrigins+1]) ||
+		strings.Contains(w[0], origins[0]+",") {
 		t.Errorf("warnings %q", w)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
+	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
@@ -95,25 +96,11 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("64:ff9b:1::/48"),
 }
 
-// signatureOrigins lists the origins a policy names in signature_agent rules, normalised;
-// a value that is not an https origin is skipped (it can never match a verified agent).
+// signatureOrigins lists the origins whose directories a policy has fetched: the first
+// pricing.MaxSignatureOrigins it names, as the filter counts them.
 func signatureOrigins(pol *compiled.Policy) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, r := range pol.Rules {
-		if r.Match.Agent == nil {
-			continue
-		}
-		for _, o := range r.Match.Agent.SignatureAgent {
-			n, err := webbotauth.Origin(webbotauth.Item{Value: o})
-			if err != nil || seen[n] {
-				continue
-			}
-			seen[n] = true
-			out = append(out, n)
-		}
-	}
-	return out
+	origins, _ := pricing.SignatureOrigins(pol)
+	return origins
 }
 
 // fetchDirectory GETs an origin's directory. It returns the keys and how long to keep them.

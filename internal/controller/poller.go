@@ -21,6 +21,7 @@ import (
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
+	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
@@ -406,6 +407,9 @@ func warnings(pol *compiled.Policy) []string {
 	}
 	if len(origin) > 0 {
 		out = append(out, "signature_agent values that are not a plain https origin never match: "+strings.Join(origin, ", "))
+	}
+	if _, skipped := pricing.SignatureOrigins(pol); len(skipped) > 0 {
+		out = append(out, fmt.Sprintf("more than %d signature agents; never matched: %s", pricing.MaxSignatureOrigins, strings.Join(skipped, ", ")))
 	}
 	return out
 }
