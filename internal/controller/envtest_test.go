@@ -34,6 +34,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // The reconciler against a real kube-apiserver and etcd (envtest), with the real CRDs:
@@ -97,6 +98,8 @@ func TestReconciler(t *testing.T) {
 	poller.Policies, poller.Secrets, poller.Namespace, poller.BaseURL = mgr.GetClient(), mgr.GetAPIReader(), "x402-system", fp.URL
 	poller.Fetcher = &platform.Client{HTTP: fp.Client(), UserAgent: "x402-envoy-gate/test"}
 	poller.Interval = time.Second
+	fd := newFakeDirectory(t) // a Web Bot Auth key directory a policy can name
+	poller.DirectoryClient = fd.client()
 	poller.Log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn + 8}))
 
 	r := &Reconciler{
@@ -422,6 +425,44 @@ func TestReconciler(t *testing.T) {
 		if pp.Spec.Platform.NoPolicy != "Deny" || pp.Spec.Platform.CredentialsSecretRef.Key != "apiKey" {
 			t.Errorf("defaults: noPolicy %q, key %q", pp.Spec.Platform.NoPolicy, pp.Spec.Platform.CredentialsSecretRef.Key)
 		}
+	})
+
+	// A policy naming a signature agent: the controller fetches that origin's key directory
+	// into the ConfigMap for the filter, says so in Synced, and drops it when no policy
+	// names the origin any more.
+	t.Run("signature agent keys", func(t *testing.T) {
+		h.t = t
+		fp.set(agentDoc(t, 5, fd.URL), 0)
+		h.eventually("keys in the ConfigMap", func() error {
+			cm, err := h.tryGet(configMapGVK, "x402-system", "x402-prices")
+			if err != nil {
+				return err
+			}
+			got, _, _ := unstructured.NestedString(cm.Object, "data", pricing.AgentsKey)
+			var dirs map[string]webbotauth.Directory
+			if err := json.Unmarshal([]byte(got), &dirs); err != nil {
+				return fmt.Errorf("%s: %w (%q)", pricing.AgentsKey, err, got)
+			}
+			if d := dirs[fd.URL]; len(d.Keys) != 1 || d.Keys[0].Thumbprint != dirKeyThumb {
+				return fmt.Errorf("%s = %s", pricing.AgentsKey, got)
+			}
+			return nil
+		})
+		h.eventually("Synced names the origin", func() error {
+			return h.synced("shop", "metered", metav1.ConditionTrue, v1alpha1.ReasonSynced, "signature agents: "+fd.URL+" 1 keys")
+		})
+
+		fp.set(docVersion(t, 6), 0)
+		h.eventually("keys removed with the rule", func() error {
+			cm, err := h.tryGet(configMapGVK, "x402-system", "x402-prices")
+			if err != nil {
+				return err
+			}
+			if _, ok, _ := unstructured.NestedString(cm.Object, "data", pricing.AgentsKey); ok {
+				return errors.New("still there")
+			}
+			return nil
+		})
 	})
 
 	t.Run("platform policy deleted", func(t *testing.T) {

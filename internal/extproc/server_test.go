@@ -142,6 +142,16 @@ func headers(kv ...string) *corev3.HeaderMap {
 // the attributes the policy asked for. route "" sends no attributes at all.
 func requestHeaders(route string, kv ...string) *extprocv3.ProcessingRequest {
 	base := []string{":method", "GET", ":scheme", "http", ":authority", "34.173.224.114", ":path", "/get?x=1"}
+	// A header the caller passes replaces the default rather than repeating it: the filter
+	// joins a repeated header's lines, as HTTP does, and Envoy never repeats a pseudo-header.
+	for i := 0; i+1 < len(kv); i += 2 {
+		for j := 0; j+1 < len(base); j += 2 {
+			if base[j] == kv[i] {
+				base = append(base[:j:j], base[j+2:]...)
+				break
+			}
+		}
+	}
 	req := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestHeaders{
 		RequestHeaders: &extprocv3.HttpHeaders{Headers: headers(append(base, kv...)...)},
 	}}

@@ -340,8 +340,9 @@ func TestWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Signature agents are verified (Web Bot Auth); only categories never match.
 	w := warnings(pol)
-	if len(w) != 2 || !strings.Contains(w[0], "get-anything-platform-free/allow") || !strings.Contains(w[1], "Web Bot Auth") {
+	if len(w) != 1 || !strings.Contains(w[0], "category") || !strings.Contains(w[0], "get-anything-platform-free/allow") {
 		t.Errorf("warnings %q", w)
 	}
 	pol, _ = compiled.Parse(docVersion(t, 2))

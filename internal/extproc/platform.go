@@ -14,6 +14,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/counter"
 	"github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 )
 
@@ -71,6 +72,9 @@ func (s *Server) platformRequest(ctx context.Context, req *extprocv3.ProcessingR
 		}, remote),
 		Now: uint64(s.now().Unix()), //nolint:gosec // a wall clock after 1970
 	}
+	if dirs := table.Directories(pr.Project); dirs != nil {
+		r.Agent = s.signatureAgent(h, dirs, st)
+	}
 	var d policy.Decision
 	if done, count := policy.Select(pol, r); done != nil {
 		d = *done
@@ -82,6 +86,32 @@ func (s *Server) platformRequest(ctx context.Context, req *extprocv3.ProcessingR
 		return withRuleHeaders(s.platformCharge(ctx, h, st, key, d, table), d.Headers)
 	}
 	return s.respondRule(st, d, pol.Version)
+}
+
+// signatureAgent verifies the request's Web Bot Auth signature against the directories of the
+// origins the policy names (gate standard §4.1). A request it cannot verify has no agent: its
+// agent rules do not match, and nothing is refused for it.
+func (s *Server) signatureAgent(h map[string]string, dirs webbotauth.Directories, st *request) *policy.Agent {
+	if _, signed := h["signature-agent"]; !signed {
+		return nil
+	}
+	r := webbotauth.Request{
+		Method:    h[":method"],
+		Scheme:    requestScheme(h),
+		Authority: h[":authority"],
+		Target:    h[":path"],
+		Header: func(name string) (string, bool) {
+			v, ok := h[name]
+			return v, ok
+		},
+	}
+	origin, err := webbotauth.Verify(r, dirs, s.now(), webbotauth.DefaultLimits)
+	if origin == "" {
+		st.log.Debug("signature agent not verified", "err", err)
+		return nil
+	}
+	st.log = st.log.With("signatureAgent", origin)
+	return &policy.Agent{SignatureAgent: origin}
 }
 
 // count adds the request to the rule's counters. A failure reads every counter as failed; the

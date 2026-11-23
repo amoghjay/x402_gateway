@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
+	"github.com/amoghjay/x402_gateway/internal/pricing"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // Poll pacing. The gate standard asks for every 30 to 60 s and never more than once a second.
@@ -50,12 +53,16 @@ type Poller struct {
 	Interval  time.Duration // DefaultPollInterval when zero
 	Log       *slog.Logger
 
+	// DirectoryClient fetches Web Bot Auth key directories; NewDirectoryClient when nil.
+	DirectoryClient *http.Client
+
 	now    func() time.Time // tests
 	events chan event.GenericEvent
 	kick   chan struct{}
 
 	mu       sync.Mutex
-	projects map[string]*project // by lower-case project ID
+	projects map[string]*project   // by lower-case project ID
+	dirs     map[string]*directory // by origin, for origins a loaded policy names
 }
 
 // project is one project's state.
@@ -64,9 +71,10 @@ type project struct {
 	version  uint64
 	body     []byte
 	warnings []string
-	err      string // the last fetch's failure; "" when it worked
-	reason   string // ReasonFetchFailed or ReasonRefused with err
-	tried    bool   // a fetch has finished, either way
+	origins  []string // the signature_agent origins the loaded policy names
+	err      string   // the last fetch's failure; "" when it worked
+	reason   string   // ReasonFetchFailed or ReasonRefused with err
+	tried    bool     // a fetch has finished, either way
 	next     time.Time
 	retry    time.Duration
 }
@@ -110,6 +118,7 @@ func NewPoller() *Poller {
 		events:   make(chan event.GenericEvent, 64),
 		kick:     make(chan struct{}, 1),
 		projects: map[string]*project{},
+		dirs:     map[string]*directory{},
 	}
 }
 
@@ -153,7 +162,7 @@ func (p *Poller) Seed(id string, body []byte) {
 		p.projects[strings.ToLower(id)] = pr
 	}
 	if pol.Version > pr.version {
-		pr.version, pr.body, pr.warnings = pol.Version, body, warnings(pol)
+		pr.version, pr.body, pr.warnings, pr.origins = pol.Version, body, warnings(pol), signatureOrigins(pol)
 	}
 }
 
@@ -221,6 +230,13 @@ func (p *Poller) pollDue(ctx context.Context) {
 			p.notify(named[id].policies)
 		}
 	}
+	if p.pollDirectories(ctx) {
+		// Keys changed: every platform policy's Reconcile rewrites the ConfigMap and the
+		// status, and there are few.
+		for _, ref := range named {
+			p.notify(ref.policies)
+		}
+	}
 }
 
 // poll fetches one project and reports whether its state changed.
@@ -260,7 +276,7 @@ func (p *Poller) poll(ctx context.Context, id string, s platformSettings) bool {
 		pr.err, pr.reason = "", ""
 		log.Debug("compiled policy unchanged", "version", pr.version)
 	case res.Policy.Version > pr.version:
-		pr.version, pr.body, pr.warnings = res.Policy.Version, res.Body, warnings(res.Policy)
+		pr.version, pr.body, pr.warnings, pr.origins = res.Policy.Version, res.Body, warnings(res.Policy), signatureOrigins(res.Policy)
 		pr.err, pr.reason = "", ""
 		log.Info("compiled policy loaded", "version", pr.version, "rules", len(res.Policy.Rules), "schema", res.Policy.Schema, "warnings", pr.warnings)
 	default:
@@ -368,14 +384,20 @@ func platformConflict(pp *v1alpha1.PaymentPolicy, items []v1alpha1.PaymentPolicy
 // warnings lists what a loaded document asks for that this gate does not do, so the operator
 // sees it on the policy's status rather than finding out from traffic.
 func warnings(pol *compiled.Policy) []string {
-	var category, signature []string
+	var category, origin []string
 	for _, r := range pol.Rules {
-		if a := r.Match.Agent; a != nil {
-			if len(a.Category) > 0 {
-				category = append(category, r.ID)
-			}
-			if len(a.SignatureAgent) > 0 {
-				signature = append(signature, r.ID)
+		a := r.Match.Agent
+		if a == nil {
+			continue
+		}
+		if len(a.Category) > 0 {
+			category = append(category, r.ID)
+		}
+		// A rule's origin is compared as written with the origin a signature verified for,
+		// which is always in the normal form: lower-case https, no default port, no path.
+		for _, o := range a.SignatureAgent {
+			if n, err := webbotauth.Origin(webbotauth.Item{Value: o}); err != nil || n != o {
+				origin = append(origin, fmt.Sprintf("%s (%q)", r.ID, o))
 			}
 		}
 	}
@@ -383,8 +405,11 @@ func warnings(pol *compiled.Policy) []string {
 	if len(category) > 0 {
 		out = append(out, "rules matching an agent category never match on this gate: "+strings.Join(category, ", "))
 	}
-	if len(signature) > 0 {
-		out = append(out, "rules matching a signature agent never match until Web Bot Auth is verified: "+strings.Join(signature, ", "))
+	if len(origin) > 0 {
+		out = append(out, "signature_agent values that are not a plain https origin never match: "+strings.Join(origin, ", "))
+	}
+	if _, skipped := pricing.SignatureOrigins(pol); len(skipped) > 0 {
+		out = append(out, fmt.Sprintf("more than %d signature agents; never matched: %s", pricing.MaxSignatureOrigins, strings.Join(skipped, ", ")))
 	}
 	return out
 }

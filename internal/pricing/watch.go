@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // Watcher keeps a Store in step with the price-table ConfigMap.
@@ -98,6 +100,7 @@ func (w *Watcher) apply(obj any) {
 		return
 	}
 	p.LoadPolicies(cm.Data, w.Store.Load(), log)
+	p.LoadAgents(cm.Data, w.Store.Load(), log)
 	w.Store.Set(p)
 	if blocked := p.BlockedKeys(); len(blocked) > 0 {
 		// Loaded: the blocked routes answer 503 until their policy is fixed.
@@ -129,7 +132,19 @@ func errText(err error) string {
 // noPolicy.
 func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Logger) {
 	out := map[string]*compiledpolicy.Policy{}
-	defer func() { p.policies = out }()
+	defer func() {
+		p.policies = out
+		p.origins = map[string]map[string]bool{}
+		for project, pol := range out {
+			if o, _ := SignatureOrigins(pol); len(o) > 0 {
+				set := make(map[string]bool, len(o))
+				for _, origin := range o {
+					set[origin] = true
+				}
+				p.origins[project] = set
+			}
+		}
+	}()
 	for _, r := range p.platform {
 		if _, done := out[r.Project]; done {
 			continue
@@ -163,6 +178,57 @@ func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Lo
 			}
 		}
 	}
+}
+
+// MaxSignatureOrigins bounds how many signature_agent origins one policy can have verified.
+// Each origin is a directory the controller fetches and keeps in the price-table ConfigMap,
+// which every route shares and which holds 1 MiB.
+const MaxSignatureOrigins = 16
+
+// SignatureOrigins lists the origins a policy names in signature_agent rules, normalised as
+// the verifier reports them, in rule order. A value that is not an https origin is left out
+// (it can never match a verified agent). Only the first MaxSignatureOrigins are kept; the
+// rest are returned as skipped, and signatures for them are not verified. The controller and
+// the filter both call this, so they agree on which origins count.
+func SignatureOrigins(pol *compiledpolicy.Policy) (origins, skipped []string) {
+	seen := map[string]bool{}
+	for _, r := range pol.Rules {
+		if r.Match.Agent == nil {
+			continue
+		}
+		for _, o := range r.Match.Agent.SignatureAgent {
+			n, err := webbotauth.Origin(webbotauth.Item{Value: o})
+			if err != nil || seen[n] {
+				continue
+			}
+			seen[n] = true
+			if len(origins) < MaxSignatureOrigins {
+				origins = append(origins, n)
+			} else {
+				skipped = append(skipped, n)
+			}
+		}
+	}
+	return origins, skipped
+}
+
+// LoadAgents reads the key directories the controller fetched. Call it after LoadPolicies.
+// An unreadable value keeps the directories already loaded, so signatures that verified keep
+// verifying; a missing one means no origin has keys yet.
+func (p *Prices) LoadAgents(data map[string]string, prev *Prices, log *slog.Logger) {
+	raw, ok := data[AgentsKey]
+	if !ok {
+		return
+	}
+	var dirs map[string]*webbotauth.Directory
+	if err := json.Unmarshal([]byte(raw), &dirs); err != nil {
+		if prev != nil {
+			p.agents = prev.agents
+		}
+		log.Error("key directories not loaded; keeping the ones in force", "err", err)
+		return
+	}
+	p.agents = dirs
 }
 
 func versionOf(p *compiledpolicy.Policy) uint64 {
