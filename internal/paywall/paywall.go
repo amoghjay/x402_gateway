@@ -179,6 +179,7 @@ type Option struct {
 	// easiest way to pay it.
 	PayWith    string `json:"payWith"`
 	knownToken bool
+	tokenName  string // for a token with no profile: the EIP-712 name the option gives, if any
 }
 
 // PriceLabel is the price with its token, for the tables: the contract stands in for a
@@ -187,7 +188,21 @@ func (o Option) PriceLabel() string {
 	if o.knownToken {
 		return o.Price + " " + o.Asset
 	}
+	if o.tokenName != "" {
+		return o.Price + " " + o.tokenName + " (token " + o.AssetAddress + ")"
+	}
 	return o.Price + " (token " + o.AssetAddress + ")"
+}
+
+// tokenName is an unknown token's EIP-712 name as the seller's option gives it ("Stable
+// Coin"), for people: one line, at most 32 characters. It is a label, not a symbol, so the
+// contract address stays beside it.
+func tokenName(name string) string {
+	name = strings.Join(strings.Fields(name), " ")
+	if r := []rune(name); len(r) > 32 {
+		name = string(r[:32])
+	}
+	return name
 }
 
 // MethodName is the transfer method for people.
@@ -372,6 +387,9 @@ func options(offers []Offer) []Option {
 			Price: o.Price, Asset: o.Symbol, AssetAddress: o.Requirements.Asset,
 			Network: o.network(), NetworkID: o.Requirements.Network, PayTo: o.Requirements.PayTo,
 			Method: method, PayWith: payWith, knownToken: o.KnownToken,
+		}
+		if !o.KnownToken && o.Requirements.Extra != nil {
+			out[i].tokenName = tokenName(o.Requirements.Extra.Name)
 		}
 	}
 	return out

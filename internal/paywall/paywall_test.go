@@ -440,7 +440,7 @@ func TestThreeOptionsOneCommand(t *testing.T) {
 	for _, want := range []string{
 		"```sh\n" + cmd + "\n```",
 		"| 0.0025 USDC | Base Sepolia (`eip155:84532`) | `" + seller + "` | EIP-3009 | radius-cli |",
-		"| 0.001 (token 0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16) | Base Sepolia (`eip155:84532`) | `" + seller + "` | Permit2 | an x402 v2 client",
+		"| 0.001 Stable Coin (token 0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16) | Base Sepolia (`eip155:84532`) | `" + seller + "` | Permit2 | an x402 v2 client",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown lacks %q:\n%s", want, md)
