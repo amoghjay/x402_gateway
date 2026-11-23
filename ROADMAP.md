@@ -54,8 +54,9 @@ if it runs long, so a phase is shortened before it is extended.
 What makes this gate more than a price per route: the seller's rules live in Radius
 Platform, and the gate pulls and enforces them.
 
-- Charge on policy routes with EIP-3009 options (in review, #91).
-- A facilitator-only path for Permit2 and tokens the gate does not know (in review, #92).
+- Charge on policy routes with EIP-3009 options (#91).
+- A facilitator-only path for Permit2 and tokens the gate does not know (#92).
+  Unit-tested; its live payment waits under *After v1.0*.
 - Bot-signature checks (Web Bot Auth) for rules that depend on who the caller is.
 - The 402 lists every payment option, as JSON, markdown or HTML by `Accept`.
 - Docs, drill scripts and demo manifests for policy routes; a check on GKE against a
@@ -63,8 +64,9 @@ Platform, and the gate pulls and enforces them.
 
 **Exit test.** On the cluster, one Platform project drives five routes: charged, free,
 denied, metered (free quota, then charged) and rate-limited. Each behaves as the policy
-says, a payment in each offered option settles, and editing the policy in Platform
-changes the gate's behaviour with no `kubectl`.
+says, a payment in each offered EIP-3009 option settles, and editing the policy in
+Platform changes the gate's behaviour with no `kubectl`. The Permit2 option is offered
+but not paid live: no client we can fund pays it yet (see *After v1.0*).
 
 **Cut first.** HTML rendering of the option list (JSON and markdown stay).
 
@@ -133,6 +135,7 @@ Ordered. Each item waits for its trigger, and none of them blocks v1.0.
 |---|---|---|
 | GKE Gateway and Google Cloud load balancers | The same filter as a Service Extensions callout. Starts with a logging-only filter to learn how the route is identified and whether the callout can answer 402 and hold a response. | v1.0 tagged |
 | The fast lane | An opt-in mode where the gate submits the settlement itself while still holding the response. The settle step alone measured a median of 91 ms on Radius from GKE; end to end it is unbuilt. Needs keys in the cluster and a pool of them. | The benchmark shows the facilitator is most of a paid request's wait |
+| Permit2 paid live | A payment in the Platform's Permit2 option (SBC on Base Sepolia) through the facilitator-only path, and a filter killed mid-settle on that path. The buyer script with the reference client is in [`tools/drills/permit2-buyer`](tools/drills/permit2-buyer/); [why it has not run](docs/design/request-path-budget.md#policy-routes-against-the-production-platform-2026-11-23). | SBC on Base Sepolia for our buyer, `radius-cli` able to pay that option, or a seller asking for Permit2 |
 | Facilitator failover | An ordered list of facilitators per option, with a cooldown after failures. | A facilitator outage during the soak, or a second mainnet facilitator in use |
 | kgateway | A second Envoy-based gateway through its own external-processing attachment. | GKE Gateway working, or a user asking |
 | Browser payment page | A page where a person connects a wallet and pays, with a short-lived pass afterwards. Needs its own threat review. | A seller with human traffic |

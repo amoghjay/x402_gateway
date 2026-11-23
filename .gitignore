@@ -39,3 +39,6 @@ legacy/llm-gateway/contracts/broadcast/**/dry-run/
 
 # Terraform backend config carries the project ID; kept out of the public repo.
 deploy/terraform/backend.hcl
+
+# npm install for the Permit2 drill buyer
+tools/drills/permit2-buyer/node_modules/
