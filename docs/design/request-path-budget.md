@@ -681,6 +681,61 @@ version 4, so the project's summary read `behind` although the only running gate
 current. A question for the Platform team: how gates are told apart, and whether a gate
 that stopped fetching should drop out of the summary sooner.
 
+## Phase 1 exit test on GKE (2026-11-23)
+
+Step 6 deployed (images `1b5b9a0373c3`: #105, #106, #107), then the exit test run in one
+pass with [`tools/drills/platform.sh all`](../../tools/drills/platform.sh) against the
+production Platform project from the sections above (policy version 8, three options per
+charge). `kubectl diff` of `deploy/k8s/x402-system/` against the cluster was empty after
+the rollout; Redis was not restarted.
+
+**`platform.sh all`: 10 checks, 0 failed.**
+
+| Check | Expected | Got |
+|---|---|---|
+| `/free` | 200 | 200 |
+| `/blocked` | 403 `not_for_sale` | 403 `not_for_sale` |
+| `/paid/42`, no payment | 402 listing 3 options | 402, the 3 options in the document's order |
+| `/metered` | 200 × 3, then 402 | 200 × 3 (`RateLimit-Remaining` 2, 1, 0), then 402 |
+| `/limited` | 200 × 5, then 429 with `Retry-After` | 200 × 5, then 429, `Retry-After: 24` |
+| pay, SBC on Radius testnet | 200 with a successful `PAYMENT-RESPONSE` | 200, [`0xa34b9705…8e9e`](https://testnet.radiustech.xyz/tx/0xa34b9705c74fb35363666bfd56c388b5d5e4650f7c0917716e33600dd8fb8e9e) |
+| the same payment again | 402 `payment_already_used`, 3 options | 402 `payment_already_used`, 3 options |
+| pay, USDC on Base Sepolia | 200 with a successful `PAYMENT-RESPONSE` | 200, [`0xabe8840f…32fd`](https://sepolia.basescan.org/tx/0xabe8840f7f8e854497e5f691afb0821c87870d7df9038502af48c425af5732fd) |
+| the same payment again | 402 `payment_already_used`, 3 options | 402 `payment_already_used`, 3 options |
+
+Both receipts read from the chain's RPC: status success, the option's token, 1000 atomic
+units from the buyer to the seller.
+
+**The policy edit with no `kubectl`** was not repeated on this build: it was shown on
+this project earlier the same day (`/blocked` changed to allow in the Platform, 200 about
+15 seconds later; changed back, 403 about 20 seconds later), and step 6 did not touch the
+controller's fetch path. With it, every part of the exit test has run on the cluster.
+Permit2 stays offered and unpaid, as the exit test allows.
+
+**The new 402, live.** `GET /paid/42` with no payment, by `Accept`:
+
+| `Accept` | Body |
+|---|---|
+| `*/*` (curl) | JSON |
+| Chrome's default | HTML |
+| `text/markdown, text/html;q=0.9, */*;q=0.8` | markdown |
+| `text/markdown, text/html` | markdown (a tie goes to markdown) |
+| `text/html;q=0.5, application/json` | JSON |
+
+Every answer carries `Vary: Accept`. The `error` line names one command for every option
+`radius-cli` can pay: `radius-cli --network testnet wallet pay get '<url>' --networks
+radius,base --threshold 0.001 (3 payment options; see the response body)`. The JSON's
+`options` give each option a `payWith`: `radius-cli` for SBC on Radius and USDC on Base
+Sepolia, and for SBC on Base Sepolia by Permit2, which `radius-cli` 0.8.0 refuses, "an
+x402 v2 client that supports Permit2, e.g. @x402/fetch".
+
+**That command, run as printed** (radius-cli 0.8.0, with `--private-key` added for our
+test wallets): the wallet holding SBC on Radius paid on Radius testnet, settled in 705 ms;
+the wallet holding only USDC on Base Sepolia paid on Base Sepolia, settled in 980 ms. Two
+requests show the path works; they are not a latency figure. Before #107 was built, the
+same command form was run four ways on the previous images (each network alone, and both
+with one funded): 4 of 4 paid on the network the wallet could cover.
+
 ## Sources
 
 - [Radius docs](https://docs.radiustech.xyz/llms-full.txt): `eth_sendRawTransactionSync` error codes (4 timed out, accepted; 5 not admitted; 6 nonce gap), the Turnstile

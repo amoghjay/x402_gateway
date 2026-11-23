@@ -1,10 +1,10 @@
 # Roadmap to v1.0
 
-**Status (2026-11-22).** The gate is live on GKE with Envoy Gateway, on Radius testnet
+**Status (2026-11-23).** The gate is live on GKE with Envoy Gateway, on Radius testnet
 and Base Sepolia. It holds each paid response until its payment has settled, and no
-failure drill has released a response unpaid. Reading seller policies from Radius
-Platform (allow, deny, rate limits, free quotas) is merged and unit-tested but has not
-yet run on the cluster; charging on those policies is in review. The gate is testnet
+failure drill has released a response unpaid. Phase 1 is done: a Radius Platform project's
+policy (allow, deny, rate limits, free quotas, bot signatures, several payment options)
+drives routes on the cluster, and its exit test passed on 2026-11-23. The gate is testnet
 only, its filter and settler export no metrics, and it installs only by following
 [`deploy/k8s/`](deploy/k8s/README.md).
 
@@ -41,7 +41,7 @@ v1.0 is done when all seven of these are true, each shown by a test anyone can r
 |---|---|---|
 | Core path (M1–M5) | The filter, the `PaymentPolicy` CRD and controller, the settler, replay and overdraft guards shared across replicas. Live on GKE since 2026-11-04. | [docs/architecture.md](docs/architecture.md#status) |
 | Money safety (M6a) | `captureMode: Sync` as the default: verify with the facilitator on the request, check on chain and settle while Envoy holds the response. A record of every payment before it settles, and a refund list for the one charged-but-unserved case. Chain, token and facilitator as a profile, with Radius testnet and Base Sepolia both drilled. | [docs/design/request-path-budget.md](docs/design/request-path-budget.md) |
-| Policy, first half (M6b) | The controller polls Radius Platform for a project's compiled policy and keeps the last good version. The filter evaluates path rules, allow and deny, rate limits and free quotas, with counters in Redis. 73 of 73 public conformance vectors pass. | `internal/policy`, `internal/counter`, `internal/platform` |
+| Policy (M6b) | The controller polls Radius Platform for a project's compiled policy and keeps the last good version. The filter evaluates path rules, allow and deny, rate limits, free quotas and Web Bot Auth signatures, with counters in Redis, and charges in every option a rule offers. The 402 lists every option and gives one `radius-cli` command that pays them. 73 of 73 public conformance vectors pass. | [Phase 1 exit test](docs/design/request-path-budget.md#phase-1-exit-test-on-gke-2026-11-23) |
 
 ## Phases to v1.0
 
@@ -49,7 +49,7 @@ One phase is in progress at a time, except the soak, which runs on its own once
 started. A phase closes when its exit test passes. Each phase names what gets cut first
 if it runs long, so a phase is shortened before it is extended.
 
-### Phase 1 — Policy (M6b), in progress
+### Phase 1 — Policy (M6b), done 2026-11-23
 
 What makes this gate more than a price per route: the seller's rules live in Radius
 Platform, and the gate pulls and enforces them.
@@ -59,9 +59,9 @@ Platform, and the gate pulls and enforces them.
   Unit-tested; its live payment waits under *After v1.0*.
 - Bot-signature checks (Web Bot Auth) for rules that depend on who the caller is (#100,
   #101; run on GKE 2026-11-23).
-- The 402 lists every payment option, as JSON, markdown or HTML by `Accept`.
+- The 402 lists every payment option, as JSON, markdown or HTML by `Accept` (#107).
 - Docs, drill scripts and demo manifests for policy routes; a check on GKE against a
-  real Platform project.
+  real Platform project (#106; exit test 2026-11-23).
 
 **Exit test.** On the cluster, one Platform project drives five routes: charged, free,
 denied, metered (free quota, then charged) and rate-limited. Each behaves as the policy
@@ -69,7 +69,12 @@ says, a payment in each offered EIP-3009 option settles, and editing the policy 
 Platform changes the gate's behaviour with no `kubectl`. The Permit2 option is offered
 but not paid live: no client we can fund pays it yet (see *After v1.0*).
 
-**Cut first.** HTML rendering of the option list (JSON and markdown stay).
+**Cut first.** HTML rendering of the option list (JSON and markdown stay). Not cut.
+
+**Result.** Passed on 2026-11-23, images `1b5b9a0373c3`:
+[`platform.sh all`](tools/drills/platform.sh) 10 of 10 on the five routes, a payment in
+each EIP-3009 option and its replay; the policy edit with no `kubectl` shown the same day
+on the same project. [Write-up](docs/design/request-path-budget.md#phase-1-exit-test-on-gke-2026-11-23).
 
 ### Phase 2 — Adoptable (M6c)
 
