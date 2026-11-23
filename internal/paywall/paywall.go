@@ -37,6 +37,7 @@ import (
 	"html/template"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	texttemplate "text/template"
 
@@ -321,6 +322,7 @@ func Render(e *pricing.Entry, req Request) (Response, error) {
 	h.Set("Access-Control-Expose-Headers", x402.HeaderPaymentRequired)
 
 	data := newPageData(help, req.Method, req.URL, commands, agentPrompt(help, commands, req))
+	data.Choices, data.Default = choices(offers, help.Options, help.Steps, commands, req.Method, req.URL)
 	var body bytes.Buffer
 	switch ct := negotiate(req.Accept); ct {
 	case typeHTML:
@@ -682,6 +684,68 @@ type pageData struct {
 	SomeTestnet bool     // some options are, so each row says which
 	Host, Path  string   // the resource, split for the heading
 	Method      string
+	Choices     []choice // what the visitor can pick on the page, in order
+	Default     int      // the choice selected when the page opens
+}
+
+// choice is one entry the visitor can select on the page, and what to run for it. The
+// first, when radius-cli pays more than one option, is "whichever you hold": the one
+// command that pays on any funded network.
+type choice struct {
+	Any      bool
+	Option   Option   // the option, when not Any
+	Chains   string   // for Any: "Radius or Base"
+	Amount   string   // for Any: the first option's
+	Commands []string // radius-cli commands that pay this choice; none when radius-cli pays none
+	Setup    []Step   // install, wallet, and the fund step for this choice
+}
+
+// choices lists what the page lets a visitor select. A single option is paid by a command
+// that names only its chain; when one chain carries two options radius-cli pays, that
+// command pays the first of them in the order offered.
+func choices(offers []Offer, opts []Option, steps []Step, commands []string, method, url string) ([]choice, int) {
+	var common, all []Step
+	for _, s := range steps {
+		switch s.Do {
+		case "install", "create-wallet":
+			common = append(common, s)
+		}
+		if s.Do != "pay" {
+			all = append(all, s)
+		}
+	}
+	var out []choice
+	var chains []string
+	cli := 0
+	for _, o := range offers {
+		if !o.RadiusCLI {
+			continue
+		}
+		cli++
+		if c := o.Profile.Chain; !slices.Contains(chains, c) {
+			chains = append(chains, c)
+		}
+	}
+	if cli > 1 {
+		out = append(out, choice{Any: true, Chains: strings.Join(chains, " or "), Amount: opts[0].Amount(), Commands: commands, Setup: all})
+	}
+	def := -1
+	for i, o := range offers {
+		c := choice{Option: opts[i]}
+		if o.RadiusCLI {
+			side := cliSide{name: o.side(), chains: []Offer{o}, dearest: o}
+			c.Commands = []string{side.command(method, url)}
+			c.Setup = append(append([]Step{}, common...), side.fund())
+			if def < 0 {
+				def = len(out)
+			}
+		}
+		out = append(out, c)
+	}
+	if cli > 1 || def < 0 {
+		def = 0
+	}
+	return out, def
 }
 
 // newPageData is what the HTML page shows: the same how-to-pay as the other formats,

@@ -252,7 +252,7 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		"radius-cli --network testnet wallet faucet",
 		`<pre>` + quoted + `</pre><button type="button" class="copy">Copy</button>`,
 		"Hand it to your agent", "Fetch this for me: GET",
-		"Test network · no real money", `<span class="badge cli">radius-cli</span>`,
+		"Test network · no real money", `id="opt0" checked>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("page lacks %q", want)
@@ -600,5 +600,30 @@ func TestOurBuyerPaysOurPaywall(t *testing.T) {
 	}
 	if _, err := verify.Verify(now, e.Requirements, w.Domain(), pp); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The page's options are a choice: "whichever you hold" first (radius-cli pays two of
+// them), then each option with the command that pays only it, shown by CSS when picked.
+func TestPageLetsTheVisitorPickAnOption(t *testing.T) {
+	reqs := threeOptions()
+	page := string(render(t, entry(t, nil), Request{Method: http.MethodGet, URL: url, Accept: browser.Accept, Offers: offers(reqs)}).Body)
+	q := func(s string) string { return strings.NewReplacer("'", "&#39;", "&", "&amp;").Replace(s) }
+	for _, want := range []string{
+		`id="opt0" checked>`, "Whichever you hold", "Radius or Base",
+		`id="opt1">`, `id="opt2">`, `id="opt3">`,
+		"body:has(#opt0:checked) #panel0 { display: block; }",
+		"body:has(#opt3:checked) #panel3 { display: block; }",
+		q("radius-cli --network testnet wallet pay get '" + url + "' --networks radius,base --threshold 0.0025"),
+		q("radius-cli --network testnet wallet pay get '" + url + "' --threshold 0.001"),
+		q("radius-cli --network testnet wallet pay get '" + url + "' --networks base --threshold 0.0025"),
+		"radius-cli does not pay this option yet",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Count(page, `class="pay panel"`) != 4 || strings.Count(page, "<script") != 1 {
+		t.Error("want one panel per choice and no script beyond the copy buttons")
 	}
 }

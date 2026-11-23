@@ -51,9 +51,14 @@
   .opts { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
   .opt { display: grid; grid-template-columns: auto 1fr auto; gap: .125rem .75rem; align-items: center; padding: .75rem .875rem;
          border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-  .opt.first { border-color: var(--accent); background: var(--accent-soft); }
-  .opt .dot { width: .625rem; height: .625rem; border-radius: 50%; border: 1.5px solid var(--accent); }
-  .opt.first .dot { background: var(--accent); }
+  .opt { cursor: pointer; position: relative; }
+  .opt:hover { border-color: var(--accent); }
+  .opt input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .opt .dot { width: .75rem; height: .75rem; border-radius: 50%; border: 1.5px solid var(--accent); }
+  .opt:has(input:checked) .dot { background: var(--accent); box-shadow: inset 0 0 0 2px var(--accent-soft); }
+  .panel { display: none; }
   .opt .name { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .5rem; min-width: 0; }
   .opt .name b { font-weight: 600; }
   .opt .amt { font-weight: 600; }
@@ -85,6 +90,9 @@
   .pane .notes { display: grid; gap: .5rem; font-size: .8125rem; color: var(--pane-muted); border-top: 1px solid var(--pane-line); padding-top: 1rem; }
   .pane .notes b { color: var(--pane-fg); font-weight: 600; }
   .pane code { color: var(--pane-fg); }
+  {{range $i, $c := .Choices}}body:has(#opt{{$i}}:checked) #panel{{$i}} { display: block; }
+  {{end}}
+  @supports not selector(:has(*)) { #panel{{.Default}} { display: block; } }
 </style>
 </head>
 <body>
@@ -103,40 +111,41 @@
     </div>
 
     <section>
-      <h2>{{if .Others}}Pay with any of these{{else}}Pay with{{end}}</h2>
-      <ul class="opts">
-        {{range $i, $o := .Options}}<li class="opt{{if eq $i 0}} first{{end}}">
+      <h2>{{if gt (len .Choices) 1}}Choose how to pay{{else}}Pay with{{end}}</h2>
+      <div class="opts" role="radiogroup">
+        {{range $i, $c := .Choices}}<label class="opt" for="opt{{$i}}">
+          <input type="radio" name="opt" id="opt{{$i}}"{{if eq $i $.Default}} checked{{end}}>
           <span class="dot"></span>
-          <span class="name"><b>{{$o.Chain}}</b><span>{{$o.Token}}</span>{{if and $.SomeTestnet $o.Testnet}}<span class="badge test">test</span>{{end}}{{if eq $o.PayWith "radius-cli"}}<span class="badge cli">radius-cli</span>{{else}}<span class="badge other">other x402 client</span>{{end}}</span>
-          <span class="amt">{{$o.Amount}}</span>
-          <span class="meta">to <code>{{$o.PayTo}}</code> · {{$o.MethodName}}{{if not $o.KnownToken}} · token <code>{{$o.AssetAddress}}</code>{{end}}{{if ne $o.PayWith "radius-cli"}}<br>Pay with {{$o.PayWith}}.{{end}}</span>
-        </li>
+          {{if $c.Any}}<span class="name"><b>Whichever you hold</b><span>{{$c.Chains}}</span><span class="badge cli">recommended</span></span>
+          <span class="amt">{{$c.Amount}}</span>
+          <span class="meta">One command pays on whichever of these networks your wallet has funds on.</span>
+          {{else}}{{with $c.Option}}<span class="name"><b>{{.Chain}}</b><span>{{.Token}}</span>{{if and $.SomeTestnet .Testnet}}<span class="badge test">test</span>{{end}}{{if not $c.Commands}}<span class="badge other">other x402 client</span>{{end}}</span>
+          <span class="amt">{{.Amount}}</span>
+          <span class="meta">to <code>{{.PayTo}}</code> · {{.MethodName}}{{if not .KnownToken}} · token <code>{{.AssetAddress}}</code>{{end}}</span>
+          {{end}}{{end}}
+        </label>
         {{end}}
-      </ul>
+      </div>
     </section>
 
-    {{if .Commands}}
-    <section class="pay">
+    {{range $i, $c := .Choices}}<section class="pay panel" id="panel{{$i}}">
+      {{if $c.Commands}}
       <h2>Pay with one command</h2>
-      <p class="lead">radius-cli signs the payment, sends this request again and prints the response. It pays on whichever network your wallet holds funds on, and never more than the price.</p>
-      {{range .Commands}}<div class="code primary"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
+      <p class="lead">radius-cli signs the payment, sends this request again and prints the response{{if $c.Any}}. It pays on whichever network your wallet holds funds on{{else}}, paying {{$c.Option.Amount}} in {{$c.Option.Token}} on {{$c.Option.Chain}}{{end}}, and never more than the price.</p>
+      {{range $c.Commands}}<div class="code primary"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
       {{end}}
       <details>
         <summary>First time? Set up radius-cli</summary>
         <ol class="steps">
-          {{range .Setup}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
+          {{range $c.Setup}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
           {{end}}
         </ol>
       </details>
-    </section>
-    {{else}}
-    <section class="pay">
+      {{else}}
       <h2>Pay with an x402 client</h2>
-      <p class="lead">Any x402 v2 client pays this: it reads this response's <code>PAYMENT-REQUIRED</code> header, signs one of the offered payments and sends the request again.</p>
-      <ol class="steps">
-        {{range .Steps}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
-        {{end}}
-      </ol>
+      <p class="lead">radius-cli does not pay this option yet. Use an x402 v2 client that supports {{$c.Option.MethodName}}, such as <code>@x402/fetch</code>: it reads this response's <code>PAYMENT-REQUIRED</code> header, signs this option and sends the request again.</p>
+      <div class="code"><pre>import { wrapFetchWithPayment } from "@x402/fetch";</pre><button type="button" class="copy">Copy</button></div>
+      {{end}}
     </section>
     {{end}}
 
