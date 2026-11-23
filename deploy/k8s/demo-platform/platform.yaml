@@ -1,0 +1,39 @@
+# A route governed by a Radius Platform project (see README.md here for the Secret and
+# the two values to fill in). Its path is longer than the demo route's `/`, so it wins.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: httpbin-platform
+  namespace: demo
+spec:
+  parentRefs:
+    - name: x402
+      namespace: gateway
+      sectionName: http
+  hostnames:
+    - x402-22ade072.nip.io
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /anything/platform
+      backendRefs:
+        - name: httpbin
+          port: 8080
+---
+# No network, price or payTo here: the project's compiled policy carries the rules, the
+# prices and the payment options. The controller polls it about once a minute.
+apiVersion: x402.dev/v1alpha1
+kind: PaymentPolicy
+metadata:
+  name: httpbin-platform
+  namespace: demo
+spec:
+  targetRef:
+    name: httpbin-platform
+  platform:
+    organizationId: REPLACE_ORG_ID
+    projectId: 00000000-0000-0000-0000-000000000000
+    credentialsSecretRef:
+      name: radius-platform # in x402-system, labelled x402.dev/platform-credentials=true
+    noPolicy: Deny # until the first fetch succeeds: 503, never free
