@@ -251,7 +251,7 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		"0.001 SBC", "Radius testnet", "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4", "npm i -g radius-cli", "radius-cli wallet new",
 		"radius-cli --network testnet wallet faucet",
 		`<pre>` + quoted + `</pre><button type="button" class="copy">Copy</button>`,
-		"Using an AI agent?", "Fetch this for me: GET",
+		"Hand it to your agent", "Fetch this for me: GET",
 		"Test network · no real money", `<span class="badge cli">radius-cli</span>`,
 	} {
 		if !strings.Contains(html, want) {
@@ -263,7 +263,7 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		strings.Contains(html, "fetch(") || strings.Contains(html, "src=") {
 		t.Error("page script is not just the copy buttons")
 	}
-	if !inOrder(html, "<h2>Pay from your terminal</h2>", "First time? Set up radius-cli", "<h2>Using an AI agent?</h2>", "<h2>Payment details</h2>", "From code:") {
+	if !inOrder(html, "<h2>Pay with</h2>", "<h2>Pay with one command</h2>", "First time? Set up radius-cli", "From code,", "<h2>Hand it to your agent</h2>") {
 		t.Error("sections out of order")
 	}
 }
@@ -337,8 +337,8 @@ func TestMainnetHasNoFaucet(t *testing.T) {
 	if strings.Contains(strings.ToLower(page), "testnet") || strings.Contains(page, "Test network") {
 		t.Error("mainnet page mentions a test network")
 	}
-	if !strings.Contains(page, "per request on Radius") {
-		t.Error("mainnet page does not name the chain")
+	if !strings.Contains(page, "<b>Radius</b>") || !strings.Contains(page, `<span class="amount">$0.001</span>`) {
+		t.Error("mainnet page does not name the chain or price it in dollars")
 	}
 }
 
@@ -350,7 +350,7 @@ func TestPageNamesWellKnownChains(t *testing.T) {
 			Extra: &x402.ExactExtra{AssetTransferMethod: x402.TransferEIP3009, Name: "USD Coin", Version: "2"}},
 	}
 	page := string(render(t, entry(t, nil), Request{Method: http.MethodGet, URL: url, Accept: browser.Accept, Offers: offers(reqs)}).Body)
-	if !strings.Contains(page, "Also accepted: 0.001 USD Coin on Base") || strings.Contains(page, "on eip155:8453") {
+	if !strings.Contains(page, "<b>Base</b><span>USD Coin</span>") || strings.Contains(page, "eip155:8453</b>") {
 		t.Error("Base mainnet is not named on the page")
 	}
 	if strings.Contains(page, "other 1 options") || !strings.Contains(page, "or the other option in the 402") {

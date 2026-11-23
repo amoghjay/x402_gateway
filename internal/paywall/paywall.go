@@ -182,6 +182,15 @@ type Option struct {
 	tokenName  string // for a token with no profile: the EIP-712 name the option gives, if any
 	chain      string // "Radius", "Base"; the CAIP-2 name for a network with no profile
 	testnet    bool
+	usd        bool // a dollar stablecoin this build knows
+}
+
+// Amount is the price for the page: "$0.001" for a dollar stablecoin, else with its token.
+func (o Option) Amount() string {
+	if o.usd {
+		return "$" + o.Price
+	}
+	return o.Price + " " + o.Token()
 }
 
 // Chain is the option's chain for the page, without its side: the page says "test
@@ -311,7 +320,7 @@ func Render(e *pricing.Entry, req Request) (Response, error) {
 	h.Set("Link", "<"+help.Docs+`>; rel="help"`)
 	h.Set("Access-Control-Expose-Headers", x402.HeaderPaymentRequired)
 
-	data := newPageData(help, req.URL, commands, agentPrompt(help, commands, req))
+	data := newPageData(help, req.Method, req.URL, commands, agentPrompt(help, commands, req))
 	var body bytes.Buffer
 	switch ct := negotiate(req.Accept); ct {
 	case typeHTML:
@@ -441,6 +450,7 @@ func options(offers []Offer) []Option {
 		out[i].chain = chainName(o.Requirements.Network)
 		if o.Profile != nil {
 			out[i].chain, out[i].testnet = o.Profile.Chain, o.Profile.Testnet
+			out[i].usd = o.KnownToken && o.Profile.Token.USD
 		}
 	}
 	return out
@@ -671,12 +681,13 @@ type pageData struct {
 	Testnet     bool     // every option is on a test network
 	SomeTestnet bool     // some options are, so each row says which
 	Host, Path  string   // the resource, split for the heading
+	Method      string
 }
 
 // newPageData is what the HTML page shows: the same how-to-pay as the other formats,
 // arranged for a person.
-func newPageData(h HowToPay, url string, commands []string, prompt string) pageData {
-	d := pageData{HowToPay: h, URL: url, Commands: commands, AgentPrompt: prompt, Host: url}
+func newPageData(h HowToPay, method, url string, commands []string, prompt string) pageData {
+	d := pageData{HowToPay: h, URL: url, Commands: commands, AgentPrompt: prompt, Host: url, Method: strings.ToUpper(orGET(method))}
 	for _, s := range h.Steps {
 		if s.Do != "pay" {
 			d.Setup = append(d.Setup, s)

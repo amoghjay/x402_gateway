@@ -70,6 +70,7 @@ type Token struct {
 	Name     string
 	Version  string
 	Decimals int
+	USD      bool // a dollar stablecoin: the 402 page shows its price as $0.001
 }
 
 // Format renders atomic units as a decimal amount ("1000" → "0.001" at 6 decimals).
@@ -87,7 +88,7 @@ func (t Token) Format(atomic *big.Int) string {
 }
 
 // SBCToken is SBC as a Token: the same contract and domain on both Radius networks.
-var SBCToken = Token{Symbol: DisplayAsset, Address: SBC, Name: SBCName, Version: SBCVersion, Decimals: SBCDecimals}
+var SBCToken = Token{Symbol: DisplayAsset, Address: SBC, Name: SBCName, Version: SBCVersion, Decimals: SBCDecimals, USD: true}
 
 // Profile is one network.
 type Profile struct {
@@ -155,7 +156,7 @@ var BaseSepolia = Profile{
 	RPC:         "https://sepolia.base.org",
 	Facilitator: "https://x402.org/facilitator",
 	Explorer:    "https://sepolia.basescan.org",
-	Token:       Token{Symbol: "USDC", Address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Name: "USDC", Version: "2", Decimals: 6},
+	Token:       Token{Symbol: "USDC", Address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Name: "USDC", Version: "2", Decimals: 6, USD: true},
 	Docs:        "https://docs.x402.org",
 	RadiusCLI:   true,
 	CLINetwork:  "base",
