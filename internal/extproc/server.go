@@ -641,6 +641,12 @@ func setHeaders(kv ...string) []*corev3.HeaderValueOption {
 // compares the two). X-Forwarded-Proto wins when a TLS-terminating proxy sits in front;
 // Envoy sets it from the downstream connection otherwise.
 func publicURL(h map[string]string) string {
+	return requestScheme(h) + "://" + h[":authority"] + h[":path"]
+}
+
+// requestScheme is the scheme the caller used: X-Forwarded-Proto when a TLS-terminating proxy
+// set it, else the downstream connection's.
+func requestScheme(h map[string]string) string {
 	scheme := h["x-forwarded-proto"]
 	if scheme != "http" && scheme != "https" {
 		scheme = h[":scheme"]
@@ -648,7 +654,7 @@ func publicURL(h map[string]string) string {
 	if scheme == "" {
 		scheme = "http"
 	}
-	return scheme + "://" + h[":authority"] + h[":path"]
+	return scheme
 }
 
 // immediate answers the request from the filter. Header values go in RawValue: Envoy's
@@ -703,7 +709,10 @@ func wait(ctx context.Context, d time.Duration) error {
 }
 
 // headerMap flattens Envoy's header list, keys lower-cased. Envoy may send a value as
-// bytes (RawValue) rather than a string (Value), so both are read.
+// bytes (RawValue) rather than a string (Value), so both are read. A field sent on several
+// lines is joined with ", " (RFC 9110 §5.3), which is also how a signature covers it
+// (RFC 9421 §2.1); a repeated PAYMENT-SIGNATURE so becomes one value that does not parse,
+// and is refused rather than one line silently winning.
 func headerMap(hm *corev3.HeaderMap) map[string]string {
 	out := make(map[string]string, len(hm.GetHeaders()))
 	for _, hv := range hm.GetHeaders() {
@@ -711,7 +720,11 @@ func headerMap(hm *corev3.HeaderMap) map[string]string {
 		if v == "" {
 			v = string(hv.GetRawValue())
 		}
-		out[strings.ToLower(hv.GetKey())] = v
+		k := strings.ToLower(hv.GetKey())
+		if prev, ok := out[k]; ok {
+			v = prev + ", " + v
+		}
+		out[k] = v
 	}
 	return out
 }

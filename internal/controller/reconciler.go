@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // targetIndex is a cache index from a policy's target route name to the policy, so an
@@ -159,9 +161,34 @@ func (r *Reconciler) syncedCondition(pp *v1alpha1.PaymentPolicy) *metav1.Conditi
 		if len(st.Warnings) > 0 {
 			c.Message += "; " + strings.Join(st.Warnings, "; ")
 		}
+		if agents := r.agentsStatus(id); agents != "" {
+			c.Message += "; signature agents: " + agents
+		}
 	}
 	c.Message = clipMessage(c.Message)
 	return c
+}
+
+// agentsStatus says, for each origin a project's policy names, how many keys the gate holds
+// and whether the last directory fetch failed.
+func (r *Reconciler) agentsStatus(id string) string {
+	var parts []string
+	for _, o := range r.Poller.ProjectOrigins(id) {
+		st, _ := r.Poller.Directory(o)
+		n := 0
+		if st.Directory != nil {
+			n = len(st.Directory.Keys)
+		}
+		switch {
+		case st.Err != "":
+			parts = append(parts, fmt.Sprintf("%s fetch failed, %d keys in force: %s", o, n, st.Err))
+		case n == 0:
+			parts = append(parts, o+" not fetched yet")
+		default:
+			parts = append(parts, fmt.Sprintf("%s %d keys", o, n))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // clipMessage keeps a condition message under the API's 32 KiB limit, with room to spare.
@@ -359,31 +386,41 @@ func (r *Reconciler) project(ctx context.Context) error {
 }
 
 // policyDocuments is the compiled policy of each named project, by ConfigMap key, as the
-// Poller holds it. A project the Poller has nothing for yet (just after a restart) keeps the
-// document already in the ConfigMap, which is offered to the Poller as its starting point:
-// dropping it would turn the route to noPolicy until the first fetch.
+// Poller holds it, and the key directories of the origins those policies name, under
+// pricing.AgentsKey. A project or origin the Poller has nothing for yet (just after a
+// restart) keeps what is already in the ConfigMap, which is offered to the Poller as its
+// starting point: dropping it would turn the route to noPolicy, or stop signatures
+// verifying, until the first fetch.
 func (r *Reconciler) policyDocuments(ctx context.Context, projects map[string]bool) (map[string]string, error) {
 	docs := map[string]string{}
 	if len(projects) == 0 || r.Poller == nil {
 		return docs, nil
 	}
 	var current map[string]any
+	stored := func() (map[string]any, error) {
+		if current != nil {
+			return current, nil
+		}
+		cm := &unstructured.Unstructured{}
+		cm.SetGroupVersionKind(configMapGVK)
+		err := r.Get(ctx, client.ObjectKey{Namespace: r.PricesNamespace, Name: r.PricesName}, cm)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		current, _, _ = unstructured.NestedMap(cm.Object, "data")
+		if current == nil {
+			current = map[string]any{}
+		}
+		return current, nil
+	}
 	for _, id := range slices.Sorted(maps.Keys(projects)) {
 		st, _ := r.Poller.State(id)
 		if st.Version == 0 {
-			if current == nil {
-				cm := &unstructured.Unstructured{}
-				cm.SetGroupVersionKind(configMapGVK)
-				err := r.Get(ctx, client.ObjectKey{Namespace: r.PricesNamespace, Name: r.PricesName}, cm)
-				if err != nil && !apierrors.IsNotFound(err) {
-					return nil, err
-				}
-				current, _, _ = unstructured.NestedMap(cm.Object, "data")
-				if current == nil {
-					current = map[string]any{}
-				}
+			data, err := stored()
+			if err != nil {
+				return nil, err
 			}
-			if old, ok := current[pricing.PolicyKey(id)].(string); ok {
+			if old, ok := data[pricing.PolicyKey(id)].(string); ok {
 				r.Poller.Seed(id, []byte(old))
 				st, _ = r.Poller.State(id)
 			}
@@ -391,6 +428,36 @@ func (r *Reconciler) policyDocuments(ctx context.Context, projects map[string]bo
 		if st.Version > 0 {
 			docs[pricing.PolicyKey(id)] = string(st.Body)
 		}
+	}
+
+	agents := map[string]*webbotauth.Directory{}
+	var seeded map[string]*webbotauth.Directory
+	for _, o := range r.Poller.Origins() {
+		st, _ := r.Poller.Directory(o)
+		if st.Directory == nil {
+			if seeded == nil {
+				data, err := stored()
+				if err != nil {
+					return nil, err
+				}
+				seeded = map[string]*webbotauth.Directory{}
+				if old, ok := data[pricing.AgentsKey].(string); ok {
+					_ = json.Unmarshal([]byte(old), &seeded) // unreadable: nothing to seed
+				}
+			}
+			r.Poller.SeedDirectory(o, seeded[o])
+			st, _ = r.Poller.Directory(o)
+		}
+		if st.Directory != nil {
+			agents[o] = st.Directory
+		}
+	}
+	if len(agents) > 0 {
+		b, err := json.Marshal(agents)
+		if err != nil {
+			return nil, err
+		}
+		docs[pricing.AgentsKey] = string(b)
 	}
 	return docs, nil
 }

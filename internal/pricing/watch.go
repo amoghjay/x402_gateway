@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // Watcher keeps a Store in step with the price-table ConfigMap.
@@ -98,6 +100,7 @@ func (w *Watcher) apply(obj any) {
 		return
 	}
 	p.LoadPolicies(cm.Data, w.Store.Load(), log)
+	p.LoadAgents(cm.Data, w.Store.Load(), log)
 	w.Store.Set(p)
 	if blocked := p.BlockedKeys(); len(blocked) > 0 {
 		// Loaded: the blocked routes answer 503 until their policy is fixed.
@@ -129,7 +132,15 @@ func errText(err error) string {
 // noPolicy.
 func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Logger) {
 	out := map[string]*compiledpolicy.Policy{}
-	defer func() { p.policies = out }()
+	defer func() {
+		p.policies = out
+		p.origins = map[string]map[string]bool{}
+		for project, pol := range out {
+			if o := signatureOrigins(pol); len(o) > 0 {
+				p.origins[project] = o
+			}
+		}
+	}()
 	for _, r := range p.platform {
 		if _, done := out[r.Project]; done {
 			continue
@@ -163,6 +174,45 @@ func (p *Prices) LoadPolicies(data map[string]string, prev *Prices, log *slog.Lo
 			}
 		}
 	}
+}
+
+// signatureOrigins is the set of origins a policy names in signature_agent rules,
+// normalised as the verifier reports them.
+func signatureOrigins(pol *compiledpolicy.Policy) map[string]bool {
+	var out map[string]bool
+	for _, r := range pol.Rules {
+		if r.Match.Agent == nil {
+			continue
+		}
+		for _, o := range r.Match.Agent.SignatureAgent {
+			if n, err := webbotauth.Origin(webbotauth.Item{Value: o}); err == nil {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+// LoadAgents reads the key directories the controller fetched. Call it after LoadPolicies.
+// An unreadable value keeps the directories already loaded, so signatures that verified keep
+// verifying; a missing one means no origin has keys yet.
+func (p *Prices) LoadAgents(data map[string]string, prev *Prices, log *slog.Logger) {
+	raw, ok := data[AgentsKey]
+	if !ok {
+		return
+	}
+	var dirs map[string]*webbotauth.Directory
+	if err := json.Unmarshal([]byte(raw), &dirs); err != nil {
+		if prev != nil {
+			p.agents = prev.agents
+		}
+		log.Error("key directories not loaded; keeping the ones in force", "err", err)
+		return
+	}
+	p.agents = dirs
 }
 
 func versionOf(p *compiledpolicy.Policy) uint64 {

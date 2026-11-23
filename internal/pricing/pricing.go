@@ -35,6 +35,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 	"github.com/amoghjay/x402_gateway/internal/x402/eip3009"
 )
@@ -44,6 +45,10 @@ const SchemaVersion = 1
 
 // ConfigMapKey is the ConfigMap data key that holds the table.
 const ConfigMapKey = "prices.json"
+
+// AgentsKey is the ConfigMap data key holding the Web Bot Auth key directories of the
+// origins the loaded policies name: a JSON object from origin to webbotauth.Directory.
+const AgentsKey = "agents.json"
 
 // PolicyKey is the ConfigMap data key holding a Radius Platform project's compiled policy,
 // beside the table: one key per project that a PaymentPolicy names, the document as served.
@@ -136,6 +141,8 @@ type Prices struct {
 	blocked  map[string]string                 // route key → why it is refused
 	platform map[string]PlatformRoute          // route key → its project
 	policies map[string]*compiledpolicy.Policy // project → its loaded compiled policy (Watcher)
+	origins  map[string]map[string]bool        // project → the signature_agent origins its policy names
+	agents   map[string]*webbotauth.Directory  // origin → its Web Bot Auth keys (Watcher)
 	networks []radius.Profile                  // the networks this filter charges on, as passed to Parse
 }
 
@@ -170,6 +177,26 @@ func (p *Prices) Policy(project string) *compiledpolicy.Policy {
 		return nil
 	}
 	return p.policies[strings.ToLower(project)]
+}
+
+// Directories returns what a project's signatures may verify against: the keys of the
+// origins its policy names, and no others. Nil when the policy names none, so the caller
+// skips verification. It is safe on a nil *Prices.
+func (p *Prices) Directories(project string) webbotauth.Directories {
+	if p == nil {
+		return nil
+	}
+	named := p.origins[strings.ToLower(project)]
+	if len(named) == 0 {
+		return nil
+	}
+	return func(origin string) (*webbotauth.Directory, bool) {
+		if !named[origin] {
+			return nil, false
+		}
+		d, ok := p.agents[origin]
+		return d, ok
+	}
 }
 
 // PlatformLen is the number of routes a platform project governs.
