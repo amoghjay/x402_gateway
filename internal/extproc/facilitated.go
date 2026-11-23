@@ -22,17 +22,19 @@ import (
 // path, plus a replay claim:
 //
 //	request:  identify the payment (x402.Identify), claim it in Redis, then the option's
-//	          facilitator's /verify; continue only on a yes
+//	          facilitator's /verify; continue only on a yes. Any other answer releases the
+//	          claim: /verify moves no money, so the payment is unspent and may come again
 //	response: a chargeable response is held while the option's facilitator settles; settled →
 //	          released with the receipt, refused → 402 in its place, unclear → 503
 //
 // What it does not have, next to the EIP-3009 path: no chain read before the settle (so a
-// payment settled outside the gate after its claim expired is not caught here; the claim
-// lives until the signature's own deadline, so only a facilitator that settles a repeat can
-// let it through), no held-payment record (a filter killed mid-settle leaves no trace for the
-// settler), and no second try on a passing refusal (safe only with a chain read). The claim is
-// a stated deviation from §6.2, as on the EIP-3009 path: the Radius testnet facilitator
-// answers a repeated /settle with success.
+// payment settled outside the gate after its claim ended is not caught here; a claim lives
+// until the signature's own deadline, or ends early only when nothing was settled under it,
+// so only a facilitator that settles a repeat can let it through), no held-payment record
+// (a filter killed mid-settle leaves no trace for the settler), and no second try on a
+// passing refusal (safe only with a chain read). The claim is a stated deviation from §6.2,
+// as on the EIP-3009 path: the Radius testnet facilitator answers a repeated /settle with
+// success.
 
 // remotePayment is a payment accepted on the facilitator-only path.
 type remotePayment struct {
@@ -43,7 +45,7 @@ type remotePayment struct {
 
 // acceptRemote takes a payment for an option only its facilitator can check.
 func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Request, pp x402.PaymentPayload, o offer) *extprocv3.ProcessingResponse {
-	log := st.log.With("path", "facilitator")
+	log := st.log.With("via", "facilitator")
 	st.log = log
 	id, err := x402.Identify(pp)
 	if err != nil {
@@ -93,6 +95,7 @@ func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Reque
 	switch {
 	case err == nil && vr.IsValid && (vr.Payer == "" || strings.EqualFold(vr.Payer, id.Payer)):
 	case err == nil && vr.IsValid:
+		s.unclaim(st, id.ID)
 		log.Error("facilitator verified a different payer; not charged", "decision", DependencyUnavailable, "facilitatorPayer", vr.Payer, "ms", ms)
 		return retryLater(DependencyUnavailable)
 	case err == nil, errors.As(err, &fs) && fs.Definite():
@@ -106,8 +109,10 @@ func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Reque
 		if reason == "" {
 			reason = x402.ReasonUnexpectedVerify
 		}
+		s.unclaim(st, id.ID)
 		return s.refuse(st, pw, reason, PaymentInvalid, fmt.Errorf("facilitator /verify said no in %d ms: %s", ms, reason))
 	default:
+		s.unclaim(st, id.ID)
 		log.Error("facilitator /verify gave no answer; not charged", "decision", DependencyUnavailable, "err", err, "ms", ms)
 		return retryLater(DependencyUnavailable)
 	}
@@ -119,6 +124,19 @@ func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Reque
 		RemoveHeaders: []string{strings.ToLower(x402.HeaderPaymentSignature)},
 		SetHeaders:    setHeaders(HeaderPayer, id.Payer, HeaderPaymentID, id.ID),
 	})
+}
+
+// unclaim releases the claim of a payment refused before its facilitator was asked to settle:
+// /verify moves no money, so the payment is unspent, and a resend should get the real answer
+// (or, after a 503, be checked again), not payment_already_used. It runs on its own short
+// context, as release does. If it fails, the claim expires with the payment; nothing was
+// charged either way.
+func (s *Server) unclaim(st *request, id string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), responsePhaseDeadline)
+	defer cancel()
+	if err := s.pay.Reserve.Unclaim(ctx, id); err != nil {
+		st.log.Warn("could not release the replay claim; it expires with the payment", "err", err)
+	}
 }
 
 // settleRemote settles a facilitator-only payment while Envoy holds the response.

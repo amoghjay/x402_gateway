@@ -337,6 +337,62 @@ func TestChargeFacilitatorOnlyRefusals(t *testing.T) {
 	p.decided(SettlementUnknown)
 }
 
+// /verify moves no money, so a payment it did not accept is unspent: its claim is released,
+// and a resend gets the real answer, not payment_already_used. A payment let through keeps
+// its claim.
+func TestChargeFacilitatorOnlyReleasesUnverifiedClaims(t *testing.T) {
+	p, f := setupCharge(t)
+	_, resp := p.chargeRequest("")
+	pr, _ := offered(t, resp)
+	terms := pr.Accepts[2]
+
+	// Refused: the same payment again is refused for the same reason, by the facilitator.
+	f.verifyStatus.Store(400)
+	f.verifyBody.Store(`{"isValid":false,"invalidReason":"permit2_allowance_required"}`)
+	refused := permit2Payment(t, terms, permit2Payer, "10", future())
+	for i := range 2 {
+		_, resp = p.chargeRequest(refused)
+		if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, "permit2_allowance_required") {
+			t.Errorf("verify refused, attempt %d: error %q", i+1, got.Error)
+		}
+	}
+	if f.verifyCalls.Load() != 2 {
+		t.Errorf("/verify called %d times, want 2: the resend was not checked", f.verifyCalls.Load())
+	}
+
+	// No answer: a 503, and the retry it asks for is checked and accepted.
+	f.verifyStatus.Store(503)
+	f.verifyBody.Store(`busy`)
+	unanswered := permit2Payment(t, terms, permit2Payer, "11", future())
+	_, resp = p.chargeRequest(unanswered)
+	if ir := resp.GetImmediateResponse(); ir == nil || ir.GetStatus().GetCode() != 503 {
+		t.Fatalf("verify unanswered: %v", resp)
+	}
+	f.verifyStatus.Store(0)
+	f.verifyBody.Store(`{"isValid":true}`)
+	stream, resp := p.chargeRequest(unanswered)
+	if resp.GetRequestHeaders() == nil {
+		t.Fatalf("retry after a 503: %v (logs %s)", resp, p.logs)
+	}
+
+	// Let through: the claim stays, so the same payment is a replay, not asked about again.
+	n := f.verifyCalls.Load()
+	_, resp = p.chargeRequest(unanswered)
+	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, ReasonReplay) {
+		t.Errorf("resend of an accepted payment: error %q", got.Error)
+	}
+	if f.verifyCalls.Load() != n {
+		t.Error("a replay reached the facilitator")
+	}
+	p.respond(stream, "200")
+	p.decided(Settled)
+
+	// The request's path survives the path's own log key.
+	if logs := p.logs.String(); !strings.Contains(logs, `"via":"facilitator"`) || strings.Contains(logs, `"path":"facilitator"`) {
+		t.Errorf("log keys:\n%s", logs)
+	}
+}
+
 // A payment for terms that were never offered.
 func TestChargeAcceptedMatchesNoOption(t *testing.T) {
 	p, _ := setupCharge(t)

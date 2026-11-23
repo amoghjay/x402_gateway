@@ -156,17 +156,29 @@ func (s *Store) Reserve(ctx context.Context, payer evm.Address, nonce [32]byte, 
 // expires, or that outlives the offer's window, so this is a backstop, not the usual life.
 const MaxClaim = 24 * time.Hour
 
+func claimKey(id string) string { return "claim:{" + id + "}" }
+
 // Claim marks a payment, by its identity (x402.Identify), as used, until it expires plus the
 // nonce margin (MaxClaim when it does not say). It reports false when it was claimed already.
 // It is the replay guard of the facilitator-only path, where the filter reads nothing on
-// chain: like the nonce claim of Reserve, it is never released, so a refused request costs the
-// buyer a new signature.
+// chain. Once the request is let through it is never released, so a request that fails after
+// that costs the buyer a new signature; one refused before /settle is sent releases it
+// (Unclaim).
 func (s *Store) Claim(ctx context.Context, id string, expires time.Time) (bool, error) {
 	ttl := MaxClaim
 	if !expires.IsZero() {
 		ttl = min(max(time.Until(expires), 0)+s.nonceMargin(), MaxClaim)
 	}
-	return s.Redis.SetNX(ctx, "claim:{"+id+"}", "1", ttl).Result()
+	return s.Redis.SetNX(ctx, claimKey(id), "1", ttl).Result()
+}
+
+// Unclaim releases a claim, so the same payment may be presented again. It is only for a
+// payment nothing could have spent: one refused before its facilitator was asked to settle.
+func (s *Store) Unclaim(ctx context.Context, id string) error {
+	if err := s.Redis.Del(ctx, claimKey(id)).Err(); err != nil {
+		return fmt.Errorf("unclaim: %w", err)
+	}
+	return nil
 }
 
 // Release gives the amount back to the payer's in-flight sum: the request failed

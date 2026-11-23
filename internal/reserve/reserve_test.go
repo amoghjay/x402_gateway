@@ -188,3 +188,24 @@ func TestClaim(t *testing.T) {
 		t.Error("claim still held after it expired")
 	}
 }
+
+func TestUnclaim(t *testing.T) {
+	mr, s := setup(t)
+	ctx := context.Background()
+	if ok, err := s.Claim(ctx, "abc", time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("first claim: %v, %v", ok, err)
+	}
+	if err := s.Unclaim(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if mr.Exists("claim:{abc}") {
+		t.Error("claim key still in Redis after Unclaim")
+	}
+	if ok, err := s.Claim(ctx, "abc", time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Errorf("claim after Unclaim: %v, %v", ok, err)
+	}
+	// Releasing a claim that is not there is not an error: it may have expired meanwhile.
+	if err := s.Unclaim(ctx, "never-claimed"); err != nil {
+		t.Errorf("unclaim of a missing claim: %v", err)
+	}
+}

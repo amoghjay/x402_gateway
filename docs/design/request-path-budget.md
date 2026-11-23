@@ -632,11 +632,15 @@ A settled payment, its held response and a filter killed mid-settle are not. The
 
 - On the facilitator-only path every log line carries `path` twice: the request's, and
   `"facilitator"` added by `facilitated.go`. Most log tools keep the last, so the request
-  path is lost. Rename the second key (step 6).
+  path is lost. Rename the second key (step 6). Fixed in step 6: the second key is now
+  `via`.
 - A payment the facilitator refused at verify keeps its replay claim until the claim
   expires (the payment's deadline plus a margin), so presenting it again answers
   `payment_already_used` instead of the refusal's reason. Nothing is served either way,
-  and clients sign a new payment per request; worth a clearer answer in step 6.
+  and clients sign a new payment per request; worth a clearer answer in step 6. Fixed in
+  step 6: the path now releases the claim (`reserve.Store.Unclaim`) whenever it answers
+  before `/settle` is sent, since `/verify` moves no money; a resend gets the refusal's
+  reason, and a retry after a `/verify` 503 is checked again.
 
 ## Web Bot Auth on GKE (2026-11-23)
 
