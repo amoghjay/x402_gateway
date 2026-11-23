@@ -124,18 +124,19 @@ reconciliation at zero difference, and the benchmark can be rerun from the repo.
   testnet, so this is a profile switch, re-verified at cutover.
 - Isolated namespace and Redis, a cold `payTo`, images promoted by digest from the
   soaked build, a capped price, and a canary on one route with one wallet.
-- Base mainnet as a second canary once a mainnet facilitator is configured. Its profile
-  also puts Base USDC into the 402's one `radius-cli` command, which pays it from 0.8.0.
+- Base mainnet as a second canary, settled through the Radius mainnet facilitator: its
+  `/supported` lists USDC on Base mainnet by EIP-3009 and Permit2 (checked 2026-11-23),
+  so no other facilitator account is needed. Its profile also puts Base USDC into the
+  402's one `radius-cli` command, which pays it from 0.8.0.
 - The 402's pay path on mainnet, run live at cutover: the `radius-cli --network mainnet`
   command it prints pays the canary route, and the fund step names radius-cli's mainnet
-  faucet if that faucet works for a fresh wallet (it says `wallet balance` until then).
+  faucet if that faucet works for a fresh wallet (it prints `wallet address` until then).
 - Tag v1.0. Bring the README, this file and the architecture doc in line with what shipped.
 
 **Exit test.** Real payments on mainnet for 48 hours on the canary route with every
 correctness indicator at target.
 
-**Cut first.** Base mainnet moves to v1.1 if its facilitator needs an account we do not
-have yet.
+**Cut first.** The Base mainnet canary moves to v1.1; the Radius canary stays.
 
 ## After v1.0
 
