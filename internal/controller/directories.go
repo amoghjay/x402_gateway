@@ -72,11 +72,27 @@ func refusePrivate(_, address string, _ syscall.RawConn) error {
 		return err
 	}
 	ip := ap.Addr().Unmap()
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-		netip.MustParsePrefix("100.64.0.0/10").Contains(ip) { // carrier-grade NAT, used by some clusters
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 		return fmt.Errorf("refusing to fetch a key directory from non-public address %s", ip)
 	}
+	for _, n := range nonPublic {
+		if n.Contains(ip) {
+			return fmt.Errorf("refusing to fetch a key directory from non-public address %s", ip)
+		}
+	}
 	return nil
+}
+
+// nonPublic is the ranges Go still calls global unicast that are not on the public internet.
+// GKE lets a cluster put Pods and Services in 100.64.0.0/10 and 240.0.0.0/4.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),     // this network
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // reserved (class E)
+	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64: an IPv4 address in IPv6 form
+	netip.MustParsePrefix("64:ff9b:1::/48"),
 }
 
 // signatureOrigins lists the origins a policy names in signature_agent rules, normalised;

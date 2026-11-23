@@ -21,6 +21,7 @@ import (
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
+	"github.com/amoghjay/x402_gateway/internal/webbotauth"
 )
 
 // Poll pacing. The gate standard asks for every 30 to 60 s and never more than once a second.
@@ -382,15 +383,29 @@ func platformConflict(pp *v1alpha1.PaymentPolicy, items []v1alpha1.PaymentPolicy
 // warnings lists what a loaded document asks for that this gate does not do, so the operator
 // sees it on the policy's status rather than finding out from traffic.
 func warnings(pol *compiled.Policy) []string {
-	var category []string
+	var category, origin []string
 	for _, r := range pol.Rules {
-		if a := r.Match.Agent; a != nil && len(a.Category) > 0 {
+		a := r.Match.Agent
+		if a == nil {
+			continue
+		}
+		if len(a.Category) > 0 {
 			category = append(category, r.ID)
+		}
+		// A rule's origin is compared as written with the origin a signature verified for,
+		// which is always in the normal form: lower-case https, no default port, no path.
+		for _, o := range a.SignatureAgent {
+			if n, err := webbotauth.Origin(webbotauth.Item{Value: o}); err != nil || n != o {
+				origin = append(origin, fmt.Sprintf("%s (%q)", r.ID, o))
+			}
 		}
 	}
 	var out []string
 	if len(category) > 0 {
 		out = append(out, "rules matching an agent category never match on this gate: "+strings.Join(category, ", "))
+	}
+	if len(origin) > 0 {
+		out = append(out, "signature_agent values that are not a plain https origin never match: "+strings.Join(origin, ", "))
 	}
 	return out
 }

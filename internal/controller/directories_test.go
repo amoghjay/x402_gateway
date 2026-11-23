@@ -211,6 +211,11 @@ func TestRefusePrivate(t *testing.T) {
 		"169.254.169.254:80":    true, // cloud metadata
 		"100.64.0.10:443":       true,
 		"0.0.0.0:443":           true,
+		"0.1.2.3:443":           true,
+		"240.0.0.10:443":        true, // class E, a GKE Pod range option
+		"198.18.0.1:443":        true,
+		"192.0.0.8:443":         true,
+		"[64:ff9b::a00:1]:443":  true, // NAT64 for 10.0.0.1
 		"[::1]:443":             true,
 		"[fd00::1]:443":         true,
 		"[fe80::1]:443":         true,
@@ -231,5 +236,12 @@ func TestSignatureOrigins(t *testing.T) {
 	}
 	if got := signatureOrigins(pol); len(got) != 1 || got[0] != "https://agent.example" {
 		t.Fatalf("origins %v", got)
+	}
+	// The evaluator compares a rule's origin as written, so the two that are not in the form
+	// a verified agent is reported in are called out.
+	w := warnings(pol)
+	if len(w) != 1 || !strings.Contains(w[0], `"https://Agent.example:443/"`) || !strings.Contains(w[0], `"http://plain.example"`) ||
+		strings.Contains(w[0], `"https://agent.example"`) {
+		t.Errorf("warnings %q", w)
 	}
 }
