@@ -473,6 +473,68 @@ Turnstile's 0.01 SBC conversion step, but the converted value does not show up a
 balance, so as measured a settle costs about **2 × 0.00014**. Open question for the Radius
 chain team; until answered, budget 0.0003 per settle.
 
+## Policy routes on GKE, first run (2026-11-23)
+
+The first live run of a route governed by a Radius Platform project, after the charge
+paths merged (#91, #92). Images `15af45399319`. One `PaymentPolicy` with `spec.platform`
+on `HTTPRoute httpbin-platform` (`/anything/platform`), reading a test-mode project in a
+Radius Platform development environment whose compiled policy has five rules and three
+payment options per charge. The controller reported `Synced=True`, and the Platform
+reported the gate as connected on the current policy version, as an unidentified gate (it
+does not know this gate's User-Agent).
+
+| Route | Rule | Answer |
+|---|---|---|
+| `/free` | allow | 200 |
+| `/blocked` | deny 403 `not_for_sale` | 403, body `{"code":"not_for_sale"}` |
+| `/paid/:id` | charge 0.001 | 402 listing all three options, in the document's order |
+| `/metered` | 3 free a minute per IP, then charge | 200, 200, 200, then 402 with `RateLimit-Limit: 3`, `RateLimit-Remaining: 0` |
+| `/limited` | 5 a minute, one counter for everyone | 200 five times, then 429 with `RateLimit-*` and `Retry-After` |
+| a path with no rule | the policy's default, allow | 200 |
+
+The routes priced directly by a `PaymentPolicy` (`/get`, `/anything/sync`,
+`/anything/base`) still answered 402, and `/anything/free` 200.
+
+**Payments.** Two paid requests to `/paid/42` with our own buyer, each matched to the
+option for its network and settled through the facilitator that option names:
+
+| Option | Verify, before the backend | Response held to settle | Transfer on chain |
+|---|---|---|---|
+| SBC on Radius testnet, EIP-3009 | 520 ms | 658 ms | [`0x1fbb4e73…e7f0`](https://testnet.radiustech.xyz/tx/0x1fbb4e73990f373cc59950728e74d6135a924f3d533c571b530d3f94c76be7f0), 0.001 SBC to the seller |
+| USDC on Base Sepolia, EIP-3009 | 418 ms | 363 ms | [`0x8dc253c3…d83d`](https://sepolia.basescan.org/tx/0x8dc253c36ccf8fa86b00e3ec68512b3c7d27980b8e2f8138a515e476fbb0d83d), 0.001 USDC to the seller |
+
+Both receipts were read from the chain's RPC: status success, the option's token, the
+buyer as sender, the seller as recipient, 1000 atomic units. The Base Sepolia payment went
+through Radius's testnet facilitator, as the option says, not through the filter's own
+default for that network. One request each is a check that the path works, not a latency
+figure.
+
+**Replay.** One signed payment for `/paid/…` sent four times: the first answered 200 with
+`PAYMENT-RESPONSE`; the other three answered 402 `payment_already_used`, each still offering
+all three options.
+
+**A policy edit reaches the gate with no cluster command.** The `/blocked` rule was
+changed to allow in the Platform: the route answered 200 five seconds later. It was changed
+back: 403 again after 13 seconds. The policy's `Synced` condition followed the document's
+version (2, 3, 4). The controller polls about once a minute, so up to a minute is expected.
+
+**Not run yet.**
+
+- A payment in the third option (SBC on Base Sepolia by Permit2), which takes the
+  facilitator-only path. Our buyer signs EIP-3009 only, so it needs another client. That
+  run also checks that a real client's Permit2 `deadline` falls inside the offer's window,
+  which the filter now requires.
+- The Platform unreachable: the last good policy should stay in force.
+- A filter killed mid-settle on the facilitator-only path, which leaves only a log line.
+- The same checks against the production Platform.
+
+**Seen along the way.**
+
+- The 402's help text describes only the first option. The `accepts` list is complete.
+- The Platform's wallet page showed both payments, with the paid URL and the transaction.
+  Its per-project payment list stayed empty: that list is fed by gates reporting events,
+  which this gate does not do.
+
 ## Sources
 
 - [Radius docs](https://docs.radiustech.xyz/llms-full.txt): `eth_sendRawTransactionSync` error codes (4 timed out, accepted; 5 not admitted; 6 nonce gap), the Turnstile
