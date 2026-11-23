@@ -122,8 +122,9 @@ func localEntry(key string, d policy.Decision, req x402.Requirements, profile ra
 // has no profile for. No ERC-20 in use comes near it.
 const maxTokenDecimals = 36
 
-// helpEntry is the entry whose how-to-pay text the 402 carries: the first option this filter
-// takes, else the first option, described generically.
+// helpEntry is the entry a charge's 402 and logs start from (the route's description, the
+// price and network logged): the first option this filter takes, else the first option,
+// described generically. The 402 describes every option from paywall.Offer.
 func helpEntry(key string, d policy.Decision, offers []offer) *pricing.Entry {
 	for _, o := range offers {
 		if o.entry != nil {
@@ -173,13 +174,15 @@ func (s *Server) platformCharge(ctx context.Context, h map[string]string, st *re
 		return plain(503, "x402 filter: this route's charge has no payment options\n", PolicyInvalid)
 	}
 	offers := offersFor(key, d, table)
-	accepts := make([]x402.Requirements, len(offers))
+	// The 402 describes each option by its own network and token, whether or not this
+	// filter takes it itself: radius-cli pays the facilitator-only ones too.
+	shown := make([]paywall.Offer, len(offers))
 	for i, o := range offers {
-		accepts[i] = o.req
+		shown[i] = paywall.NewOffer(o.req, d.Accepts[i].Decimals)
 	}
 	st.entry = helpEntry(key, d, offers)
 	st.ruleHeaders = d.Headers
-	pw := paywall.Request{Method: h[":method"], URL: publicURL(h), Accept: h["accept"], UserAgent: h["user-agent"], Accepts: accepts}
+	pw := paywall.Request{Method: h[":method"], URL: publicURL(h), Accept: h["accept"], Offers: shown}
 
 	hdr := h[strings.ToLower(x402.HeaderPaymentSignature)]
 	switch {

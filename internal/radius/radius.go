@@ -45,9 +45,12 @@ const (
 	ExactPermit2Proxy = "0x402085c248EeA27D92E8b30b2C58ed07f9E20001"
 )
 
-// How a buyer pays, for the 402's how-to-pay hints (checked 2026-11-04: npm radius-cli
-// 0.7.1 from radiustechsystems/tools; the docs URL is where the old
-// /developer-resources/x402-integration redirects).
+// How a buyer pays, for the 402's how-to-pay hints (checked 2026-11-04 against npm
+// radius-cli 0.7.1 from radiustechsystems/tools, and again against 0.8.0, released
+// 2026-11-18; the docs URL is where the old /developer-resources/x402-integration
+// redirects). radius-cli 0.8.0 pays `exact` on Radius in SBC and on Base in USDC, by
+// EIP-3009 or by Permit2 for that token, and refuses any other token. It needs Node 22 or
+// later.
 const (
 	X402Docs     = "https://docs.radiustech.xyz/build/x402/"
 	CLIInstall   = "npm i -g radius-cli"
@@ -97,7 +100,12 @@ type Profile struct {
 	Explorer    string // base URL for TxURL
 	Token       Token
 	Docs        string // where the 402 sends a buyer to read how to pay
-	RadiusCLI   bool   // radius-cli and radius-sdk can pay here; the 402 says how
+	RadiusCLI   bool   // radius-cli can pay here in Token; the 402 says how
+	// CLINetwork is radius-cli's name for the chain, as `wallet pay --networks` takes it:
+	// "radius" or "base". radius-cli picks testnet or mainnet for every chain at once with
+	// its global --network flag, so Testnet says which side this profile is on.
+	CLINetwork string
+	Testnet    bool
 }
 
 // Testnet is Radius testnet.
@@ -112,6 +120,8 @@ var Testnet = Profile{
 	Token:       SBCToken,
 	Docs:        X402Docs,
 	RadiusCLI:   true,
+	CLINetwork:  "radius",
+	Testnet:     true,
 }
 
 // Mainnet is Radius mainnet. Used only after the Phase 6 soak gate.
@@ -125,13 +135,15 @@ var Mainnet = Profile{
 	Token:       SBCToken,
 	Docs:        X402Docs,
 	RadiusCLI:   true,
+	CLINetwork:  "radius",
 }
 
 // BaseSepolia is Base's testnet, priced in Circle's test USDC, settled through the
 // x402 Foundation's public test facilitator (no account). Checked live on 2026-11-19:
 // eth_chainId is 84532; the token's name() is "USDC", version() "2", decimals() 6; the
 // facilitator's /supported lists exact on eip155:84532 for x402 v2. The public RPC is
-// rate-limited: fine for drills, not for load.
+// rate-limited: fine for drills, not for load. radius-cli pays its USDC since 0.8.0
+// (`--network testnet wallet pay --networks base`).
 var BaseSepolia = Profile{
 	Name:        "base-sepolia",
 	Display:     "Base Sepolia",
@@ -141,6 +153,9 @@ var BaseSepolia = Profile{
 	Explorer:    "https://sepolia.basescan.org",
 	Token:       Token{Symbol: "USDC", Address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Name: "USDC", Version: "2", Decimals: 6},
 	Docs:        "https://docs.x402.org",
+	RadiusCLI:   true,
+	CLINetwork:  "base",
+	Testnet:     true,
 }
 
 // Profiles is every network this build knows.

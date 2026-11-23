@@ -335,7 +335,7 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 	}
 	st.entry = entry
 
-	pw := paywall.Request{Method: h[":method"], URL: publicURL(h), Accept: h["accept"], UserAgent: h["user-agent"]}
+	pw := paywall.Request{Method: h[":method"], URL: publicURL(h), Accept: h["accept"]}
 	hdr := h[strings.ToLower(x402.HeaderPaymentSignature)]
 	switch {
 	case hdr == "":
