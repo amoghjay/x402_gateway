@@ -180,6 +180,62 @@ type Option struct {
 	PayWith    string `json:"payWith"`
 	knownToken bool
 	tokenName  string // for a token with no profile: the EIP-712 name the option gives, if any
+	chain      string // "Radius", "Base"; the CAIP-2 name for a network with no profile
+	testnet    bool
+	usd        bool // a dollar stablecoin this build knows
+}
+
+// Amount is the price for the page: "$0.001" for a dollar stablecoin, else with its token.
+func (o Option) Amount() string {
+	if o.usd {
+		return "$" + o.Price
+	}
+	return o.Price + " " + o.Token()
+}
+
+// Chain is the option's chain for the page, without its side: the page says "test
+// network" once, as a badge, instead of on every line.
+func (o Option) Chain() string { return o.chain }
+
+// chainNames names well-known chains this build has no profile for, so the page says
+// "Base" rather than "eip155:8453". A name only: it says nothing about paying there.
+var chainNames = map[string]string{
+	"eip155:1": "Ethereum", "eip155:10": "OP Mainnet", "eip155:137": "Polygon",
+	"eip155:8453": "Base", "eip155:42161": "Arbitrum One",
+}
+
+func chainName(caip2 string) string {
+	if n, ok := chainNames[caip2]; ok {
+		return n
+	}
+	return caip2
+}
+
+// KnownToken reports whether this build has a profile for the option's token.
+func (o Option) KnownToken() bool { return o.knownToken }
+
+// Testnet reports whether the option is on a test network.
+func (o Option) Testnet() bool { return o.testnet }
+
+// Token is the option's token for the page: its symbol, or the seller's name for a token
+// this build has no profile for.
+func (o Option) Token() string {
+	switch {
+	case o.knownToken:
+		return o.Asset
+	case o.tokenName != "":
+		return o.tokenName
+	}
+	return "tokens"
+}
+
+// ShortPayTo is the recipient shortened for the page: 0x2a52…eBe4. The full address is
+// beside it.
+func (o Option) ShortPayTo() string {
+	if len(o.PayTo) <= 14 {
+		return o.PayTo
+	}
+	return o.PayTo[:6] + "…" + o.PayTo[len(o.PayTo)-4:]
 }
 
 // PriceLabel is the price with its token, for the tables: the contract stands in for a
@@ -264,7 +320,7 @@ func Render(e *pricing.Entry, req Request) (Response, error) {
 	h.Set("Link", "<"+help.Docs+`>; rel="help"`)
 	h.Set("Access-Control-Expose-Headers", x402.HeaderPaymentRequired)
 
-	data := pageData{HowToPay: help, URL: req.URL, Commands: commands, AgentPrompt: agentPrompt(help, commands, req)}
+	data := newPageData(help, req.Method, req.URL, commands, agentPrompt(help, commands, req))
 	var body bytes.Buffer
 	switch ct := negotiate(req.Accept); ct {
 	case typeHTML:
@@ -391,6 +447,11 @@ func options(offers []Offer) []Option {
 		if !o.KnownToken && o.Requirements.Extra != nil {
 			out[i].tokenName = tokenName(o.Requirements.Extra.Name)
 		}
+		out[i].chain = chainName(o.Requirements.Network)
+		if o.Profile != nil {
+			out[i].chain, out[i].testnet = o.Profile.Chain, o.Profile.Testnet
+			out[i].usd = o.KnownToken && o.Profile.Token.USD
+		}
 	}
 	return out
 }
@@ -477,7 +538,9 @@ func (s cliSide) fund() Step {
 		}
 		return Step{Do: "fund", Run: "radius-cli --network " + s.name + " wallet faucet", Note: note}
 	}
-	return Step{Do: "fund", Run: "radius-cli --network " + s.name + " wallet balance", Note: "the wallet needs at least " + strings.Join(needs, " or ")}
+	// No faucet: the wallet is funded from outside, so the step prints where to send it.
+	return Step{Do: "fund", Run: "radius-cli wallet address", Note: "send at least " + strings.Join(needs, " or ") +
+		" to this address; `radius-cli --network " + s.name + " wallet balance` shows when it has arrived"}
 }
 
 // genericPay is the pay step when radius-cli pays no offer.
@@ -514,8 +577,11 @@ func agentPrompt(h HowToPay, commands []string, req Request) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Fetch this for me: %s %s\n", strings.ToUpper(orGET(req.Method)), req.URL)
 	fmt.Fprintf(&b, "It is paid per request with x402 (HTTP 402): %s %s on %s", h.Price, h.Asset, h.Network)
-	if len(h.Options) > 1 {
-		fmt.Fprintf(&b, ", or one of the other %d options in the 402's PAYMENT-REQUIRED header", len(h.Options)-1)
+	switch n := len(h.Options) - 1; {
+	case n == 1:
+		b.WriteString(", or the other option in the 402's PAYMENT-REQUIRED header")
+	case n > 1:
+		fmt.Fprintf(&b, ", or one of the other %d options in the 402's PAYMENT-REQUIRED header", n)
 	}
 	if len(commands) == 0 {
 		b.WriteString(".\nPay it with an x402 v2 client such as @x402/fetch: it reads the 402, signs one of the offered terms and retries.\n")
@@ -609,6 +675,41 @@ type pageData struct {
 	URL         string
 	Commands    []string // the radius-cli commands that pay this; none when it pays no option
 	AgentPrompt string
+	Setup       []Step   // the steps before paying: install, wallet, fund
+	First       Option   // the headline price
+	Others      []Option // every other option, for "also accepted"
+	Testnet     bool     // every option is on a test network
+	SomeTestnet bool     // some options are, so each row says which
+	Host, Path  string   // the resource, split for the heading
+	Method      string
+}
+
+// newPageData is what the HTML page shows: the same how-to-pay as the other formats,
+// arranged for a person.
+func newPageData(h HowToPay, method, url string, commands []string, prompt string) pageData {
+	d := pageData{HowToPay: h, URL: url, Commands: commands, AgentPrompt: prompt, Host: url, Method: strings.ToUpper(orGET(method))}
+	for _, s := range h.Steps {
+		if s.Do != "pay" {
+			d.Setup = append(d.Setup, s)
+		}
+	}
+	if len(h.Options) > 0 {
+		d.First, d.Others = h.Options[0], h.Options[1:]
+		d.Testnet = true
+		for _, o := range h.Options {
+			d.Testnet = d.Testnet && o.testnet
+			d.SomeTestnet = d.SomeTestnet || o.testnet
+		}
+		d.SomeTestnet = d.SomeTestnet && !d.Testnet
+	}
+	if _, rest, ok := strings.Cut(url, "://"); ok {
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			d.Host, d.Path = rest[:i], rest[i:]
+		} else {
+			d.Host, d.Path = rest, "/"
+		}
+	}
+	return d
 }
 
 //go:embed page.html

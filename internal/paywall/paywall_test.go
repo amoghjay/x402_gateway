@@ -251,8 +251,8 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		"0.001 SBC", "Radius testnet", "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4", "npm i -g radius-cli", "radius-cli wallet new",
 		"radius-cli --network testnet wallet faucet",
 		`<pre>` + quoted + `</pre><button type="button" class="copy">Copy</button>`,
-		"Hand this to your agent", "Fetch this for me: GET",
-		"<th>Pay with</th>",
+		"Hand it to your agent", "Fetch this for me: GET",
+		"Test network · no real money", `<span class="badge cli">radius-cli</span>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("page lacks %q", want)
@@ -263,7 +263,7 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		strings.Contains(html, "fetch(") || strings.Contains(html, "src=") {
 		t.Error("page script is not just the copy buttons")
 	}
-	if !inOrder(html, "<h2>Pay</h2>", "<h2>Steps</h2>", "Hand this to your agent", "<h2>Payment options</h2>", "<h2>Pay from code</h2>") {
+	if !inOrder(html, "<h2>Pay with</h2>", "<h2>Pay with one command</h2>", "First time? Set up radius-cli", "From code,", "<h2>Hand it to your agent</h2>") {
 		t.Error("sections out of order")
 	}
 }
@@ -329,8 +329,32 @@ func TestMainnetHasNoFaucet(t *testing.T) {
 		t.Error("mainnet 402 offers the testnet faucet or the environment variable")
 	}
 	fund := info(t, r).Steps[2]
-	if fund.Run != "radius-cli --network mainnet wallet balance" || fund.Note != "the wallet needs at least 0.001 SBC on Radius mainnet" {
+	if fund.Run != "radius-cli wallet address" || fund.Note != "send at least 0.001 SBC on Radius mainnet to this address; `radius-cli --network mainnet wallet balance` shows when it has arrived" {
 		t.Errorf("fund step %+v", fund)
+	}
+	// The page for a mainnet route says nothing about test networks.
+	page := string(render(t, e, Request{Method: http.MethodPost, URL: url, Accept: browser.Accept}).Body)
+	if strings.Contains(strings.ToLower(page), "testnet") || strings.Contains(page, "Test network") {
+		t.Error("mainnet page mentions a test network")
+	}
+	if !strings.Contains(page, "<b>Radius</b>") || !strings.Contains(page, `<span class="amount">$0.001</span>`) {
+		t.Error("mainnet page does not name the chain or price it in dollars")
+	}
+}
+
+// A chain with no profile is named, if it is well known, instead of shown as CAIP-2.
+func TestPageNamesWellKnownChains(t *testing.T) {
+	reqs := []x402.Requirements{
+		radius.Mainnet.ExactRequirements("1000", seller, 60),
+		{Scheme: x402.SchemeExact, Network: "eip155:8453", Amount: "1000", Asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", PayTo: seller, MaxTimeoutSeconds: 60,
+			Extra: &x402.ExactExtra{AssetTransferMethod: x402.TransferEIP3009, Name: "USD Coin", Version: "2"}},
+	}
+	page := string(render(t, entry(t, nil), Request{Method: http.MethodGet, URL: url, Accept: browser.Accept, Offers: offers(reqs)}).Body)
+	if !strings.Contains(page, "<b>Base</b><span>USD Coin</span>") || strings.Contains(page, "eip155:8453</b>") {
+		t.Error("Base mainnet is not named on the page")
+	}
+	if strings.Contains(page, "other 1 options") || !strings.Contains(page, "or the other option in the 402") {
+		t.Error("the agent prompt miscounts one other option")
 	}
 }
 
@@ -348,13 +372,13 @@ func TestBaseSepoliaRoutePaysWithRadiusCLI(t *testing.T) {
 	want := []string{
 		"install: npm i -g radius-cli",
 		"create-wallet: radius-cli wallet new",
-		"fund: radius-cli --network testnet wallet balance",
+		"fund: radius-cli wallet address",
 		"pay: " + cmd,
 	}
 	if got := steps(h); !reflect.DeepEqual(got, want) {
 		t.Errorf("steps\n got %q\nwant %q", got, want)
 	}
-	if h.Steps[2].Note != "the wallet needs at least 0.001 USDC on Base Sepolia" || h.Options[0].PayWith != "radius-cli" {
+	if h.Steps[2].Note != "send at least 0.001 USDC on Base Sepolia to this address; `radius-cli --network testnet wallet balance` shows when it has arrived" || h.Options[0].PayWith != "radius-cli" {
 		t.Errorf("fund %+v, options %+v", h.Steps[2], h.Options)
 	}
 }
@@ -465,7 +489,7 @@ func TestOffersOnBothSidesGetACommandEach(t *testing.T) {
 	want := []string{
 		"install: npm i -g radius-cli",
 		"create-wallet: radius-cli wallet new",
-		"fund: radius-cli --network mainnet wallet balance",
+		"fund: radius-cli wallet address",
 		"pay: " + main,
 		"fund: radius-cli --network testnet wallet faucet",
 		"pay: " + test,
