@@ -12,6 +12,7 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/x402"
@@ -236,4 +237,47 @@ func TestChargeRefusedSettleOffersEveryOptionAgain(t *testing.T) {
 		t.Errorf("withheld 402: error %q, %d options", got.Error, len(got.Accepts))
 	}
 	p.decided(SettleRefused)
+}
+
+// One token offered by two methods: a payment is matched by its method too, so it never runs
+// the other method's checks.
+func TestMatchOfferComparesTheTransferMethod(t *testing.T) {
+	terms := func(method string) x402.Requirements {
+		return x402.Requirements{Scheme: "exact", Network: "eip155:84532", Amount: "1000", Asset: sellerAddr, PayTo: sellerAddr,
+			Extra: &x402.ExactExtra{AssetTransferMethod: method}}
+	}
+	offers := []offer{{req: terms(x402.TransferEIP3009), why: "first"}, {req: terms(x402.TransferPermit2), why: "second"}}
+	if o, ok := matchOffer(offers, terms(x402.TransferPermit2)); !ok || o.why != "second" {
+		t.Errorf("a Permit2 payment matched %q, %v", o.why, ok)
+	}
+	if o, ok := matchOffer(offers, terms(x402.TransferEIP3009)); !ok || o.why != "first" {
+		t.Errorf("an EIP-3009 payment matched %q, %v", o.why, ok)
+	}
+	if _, ok := matchOffer(offers[:1], terms(x402.TransferPermit2)); ok {
+		t.Error("a Permit2 payment matched an EIP-3009-only offer")
+	}
+}
+
+// A compiled option's decimals are the document's word: nonsense must not crash the 402.
+func TestHelpEntrySurvivesBadDecimals(t *testing.T) {
+	req := x402.Requirements{Scheme: "exact", Network: "eip155:1", Amount: "1000", Asset: sellerAddr, PayTo: sellerAddr}
+	for _, decimals := range []int{-1, 2_000_000_000} {
+		d := policy.Decision{Accepts: []policy.Option{{Decimals: decimals}}}
+		e := helpEntry("httproute/demo/x", d, []offer{{req: req}})
+		if got := e.Network.Token.Decimals; got < 0 || got > maxTokenDecimals {
+			t.Errorf("decimals %d kept as %d", decimals, got)
+		}
+		_ = e.Network.Token.Format(e.Price) // must not panic
+	}
+}
+
+// extra reaches the buyer byte for byte, so an integer past 2^53 keeps its digits.
+func TestExtraAsWrittenKeepsLargeIntegers(t *testing.T) {
+	var o policy.Option
+	if err := json.Unmarshal([]byte(`{"scheme":"exact","extra":{"name":"T","maxAmount":12345678901234567890}}`), &o); err != nil {
+		t.Fatal(err)
+	}
+	if got := extraAsWritten(o); !strings.Contains(got, "12345678901234567890") {
+		t.Errorf("extra = %s", got)
+	}
 }

@@ -60,10 +60,10 @@ func offersFor(key string, d policy.Decision, table *pricing.Prices) []offer {
 		ourToken := known && strings.EqualFold(o.Asset, profile.Token.Address)
 		switch {
 		case o.Extra != nil:
-			// As the document wrote it (§6.1), and the fields this filter reads.
-			if raw, err := json.Marshal(o.Extra); err == nil {
-				req.ExtraRaw = string(raw)
-			}
+			// As the document wrote it (§6.1), and the fields this filter reads. The bytes
+			// come from the option's own text: re-encoding the decoded map would round a
+			// large integer through float64.
+			req.ExtraRaw = extraAsWritten(o)
 			str := func(k string) string { v, _ := o.Extra[k].(string); return v }
 			req.Extra = &x402.ExactExtra{AssetTransferMethod: str("assetTransferMethod"), Name: str("name"), Version: str("version")}
 		case ourToken:
@@ -118,6 +118,10 @@ func localEntry(key string, d policy.Decision, req x402.Requirements, profile ra
 	}, ""
 }
 
+// maxTokenDecimals bounds the decimals a compiled option may claim for a token this filter
+// has no profile for. No ERC-20 in use comes near it.
+const maxTokenDecimals = 36
+
 // helpEntry is the entry whose how-to-pay text the 402 carries: the first option this filter
 // takes, else the first option, described generically.
 func helpEntry(key string, d policy.Decision, offers []offer) *pricing.Entry {
@@ -128,9 +132,11 @@ func helpEntry(key string, d policy.Decision, offers []offer) *pricing.Entry {
 	}
 	first := offers[0].req
 	price, _ := evm.ParseUint256(first.Amount)
+	// The document's decimals are not validated by policy.Parse, and the 402's text formats
+	// the price with them: a value outside a token's possible range must not reach Format.
 	decimals := 0
 	if len(d.Accepts) > 0 {
-		decimals = d.Accepts[0].Decimals
+		decimals = min(max(d.Accepts[0].Decimals, 0), maxTokenDecimals)
 	}
 	return &pricing.Entry{
 		Key:   key,
@@ -144,12 +150,15 @@ func helpEntry(key string, d policy.Decision, offers []offer) *pricing.Entry {
 	}
 }
 
-// matchOffer finds the offer a payment says it accepted: same scheme, network and amount,
-// and the same asset and payTo (addresses compare without case).
+// matchOffer finds the offer a payment says it accepted: same scheme, network, amount and
+// transfer method, and the same asset and payTo (addresses compare without case). The
+// method is part of the match because one token can be offered by two methods, and each
+// method has its own checks: a payment must never run the other one's path.
 func matchOffer(offers []offer, acc x402.Requirements) (offer, bool) {
 	for _, o := range offers {
 		r := o.req
 		if acc.Scheme == r.Scheme && acc.Network == r.Network && acc.Amount == r.Amount &&
+			acc.TransferMethod() == r.TransferMethod() &&
 			strings.EqualFold(acc.Asset, r.Asset) && strings.EqualFold(acc.PayTo, r.PayTo) {
 			return o, true
 		}
@@ -220,4 +229,20 @@ func withRuleHeaders(resp *extprocv3.ProcessingResponse, h map[string]string) *e
 	}
 	(*m).SetHeaders = append((*m).SetHeaders, extra.SetHeaders...)
 	return resp
+}
+
+// extraAsWritten is an option's `extra` object, byte for byte as the compiled document has
+// it. An option built without its text (a test) falls back to encoding the decoded map.
+func extraAsWritten(o policy.Option) string {
+	var doc struct {
+		Extra json.RawMessage `json:"extra"`
+	}
+	if len(o.Raw) > 0 && json.Unmarshal(o.Raw, &doc) == nil && len(doc.Extra) > 0 {
+		return string(doc.Extra)
+	}
+	raw, err := json.Marshal(o.Extra)
+	if err != nil {
+		return `{}`
+	}
+	return string(raw)
 }

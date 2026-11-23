@@ -72,10 +72,11 @@ type Token struct {
 // Format renders atomic units as a decimal amount ("1000" → "0.001" at 6 decimals).
 func (t Token) Format(atomic *big.Int) string {
 	s := atomic.String()
-	if len(s) <= t.Decimals {
-		s = strings.Repeat("0", t.Decimals-len(s)+1) + s
+	d := max(t.Decimals, 0) // a negative count would slice past the end
+	if len(s) <= d {
+		s = strings.Repeat("0", d-len(s)+1) + s
 	}
-	whole, frac := s[:len(s)-t.Decimals], strings.TrimRight(s[len(s)-t.Decimals:], "0")
+	whole, frac := s[:len(s)-d], strings.TrimRight(s[len(s)-d:], "0")
 	if frac == "" {
 		return whole
 	}
