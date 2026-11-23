@@ -638,6 +638,45 @@ A settled payment, its held response and a filter killed mid-settle are not. The
   `payment_already_used` instead of the refusal's reason. Nothing is served either way,
   and clients sign a new payment per request; worth a clearer answer in step 6.
 
+## Web Bot Auth on GKE (2026-11-23)
+
+The first live run of `signature_agent` rules (#100, #101), images `50d1bcddf591`, against
+the production Platform project from the previous section. The test agent is a Cloudflare
+Worker on a domain we control, serving one Ed25519 key at
+`/.well-known/http-message-signatures-directory` (`max-age=300`); requests were signed the
+way ChatGPT's agent signs: `Signature-Agent` as a string, `@authority @method @path
+signature-agent` covered, valid 60 s, with a nonce and `tag="web-bot-auth"`.
+
+**The controller fetched the key, and only that one.** A rule was added in the Platform in
+front of `/blocked`'s deny: a verified signature agent from the test origin is allowed
+(the policy compiled to `radius.policy/0.2`). 21 seconds after the edit, `Synced` read
+`version 7 … loaded; signature agents: <origin> 1 keys`, and the price-table ConfigMap held
+the key under `agents.json`, fetched from inside the cluster through Cloudflare with no
+bot challenge.
+
+| Request to `/blocked` (`/free`, `/paid/1` where noted) | Answer |
+|---|---|
+| unsigned | 403 `not_for_sale` |
+| signed by the test agent | **200**, rule `…blocked/signed-agent`, logged `signatureAgent` |
+| signed, with a query string added (path unchanged) | 200 |
+| signed by another key, same `Signature-Agent` | 403 (no such key at that origin) |
+| signed for `/other`, sent to `/blocked` (`@path` covered) | 403 |
+| signed 200 s ago (valid 60 s) | 403 |
+| `created` 200 s in the future | 403 |
+| signed, to `/free` | 200 (its own rule) |
+| signed, to `/paid/1` | 402: a verified agent still pays where the rule charges |
+
+No request was refused because of its signature: every 403 is the deny rule, reached
+because the agent rule did not match. With the rule removed (version 8, the content of
+version 6) the controller dropped `agents.json` and a signed request was denied again.
+
+**Seen along the way.** The Platform lists each controller pod that fetched in the last 24
+hours as its own gate: after this rollout it showed the live controller `connected` on
+version 7 next to the replaced pod on version 6 and the pod from the outage drill on
+version 4, so the project's summary read `behind` although the only running gate was
+current. A question for the Platform team: how gates are told apart, and whether a gate
+that stopped fetching should drop out of the summary sooner.
+
 ## Sources
 
 - [Radius docs](https://docs.radiustech.xyz/llms-full.txt): `eth_sendRawTransactionSync` error codes (4 timed out, accepted; 5 not admitted; 6 nonce gap), the Turnstile

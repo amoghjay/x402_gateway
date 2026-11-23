@@ -57,7 +57,8 @@ Platform, and the gate pulls and enforces them.
 - Charge on policy routes with EIP-3009 options (#91).
 - A facilitator-only path for Permit2 and tokens the gate does not know (#92).
   Unit-tested; its live payment waits under *After v1.0*.
-- Bot-signature checks (Web Bot Auth) for rules that depend on who the caller is.
+- Bot-signature checks (Web Bot Auth) for rules that depend on who the caller is (#100,
+  #101; run on GKE 2026-11-23).
 - The 402 lists every payment option, as JSON, markdown or HTML by `Accept`.
 - Docs, drill scripts and demo manifests for policy routes; a check on GKE against a
   real Platform project.
