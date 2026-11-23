@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -144,6 +145,33 @@ type Payments struct {
 	// it; it costs one facilitator round trip before the backend is called.
 	FacilitatorVerify bool
 	VerifyTimeout     time.Duration // default DefaultVerifyTimeout
+
+	// FacilitatorHTTP is the client for facilitators a Radius Platform compiled policy
+	// names (each payment option carries its own). One facilitator.Client is kept per URL.
+	FacilitatorHTTP *http.Client
+	byURL           sync.Map // facilitator URL → *facilitator.Client
+}
+
+// facilitatorAt is the client for a facilitator a compiled policy names.
+func (p *Payments) facilitatorAt(url string) *facilitator.Client {
+	if c, ok := p.byURL.Load(url); ok {
+		return c.(*facilitator.Client)
+	}
+	hc := p.FacilitatorHTTP
+	if hc == nil {
+		hc = radius.NewFacilitatorHTTPClient()
+	}
+	c, _ := p.byURL.LoadOrStore(url, &facilitator.Client{URL: url, HTTP: hc})
+	return c.(*facilitator.Client)
+}
+
+// facilitator is the request's facilitator: the one its payment option names (a platform
+// route), else its network's.
+func (s *Server) facilitator(st *request) *facilitator.Client {
+	if st.fac != nil {
+		return st.fac
+	}
+	return s.pay.Facilitators[st.entry.Network.Network()]
 }
 
 // DefaultVerifyTimeout bounds the facilitator's /verify on a Sync route's request. Envoy
@@ -197,7 +225,9 @@ type request struct {
 	unknown  bool // Sync: the settle's outcome is not known; the in-flight amount stays until its TTL
 	held     bool // Sync: the payment's record (reserve.Held) is written and not yet cleared
 
-	ruleHeaders map[string]string // platform route, allowed: limit headers for the response
+	ruleHeaders map[string]string   // platform route: the decision's limit headers, for the response
+	fac         *facilitator.Client // platform route: the facilitator the paid option names
+	remote      *remotePayment      // platform route: a payment on the facilitator-only path
 }
 
 // Process handles one HTTP request's stream: one message in, one answer out, per phase.
@@ -221,7 +251,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			if st.settled {
 				// Paid for and not delivered: Envoy (or the client) went away while the
 				// response was held. The record stays, so the settler lists it for a refund.
-				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", paymentID(st.res), "err", err)
+				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", st.paymentID(), "err", err)
 			}
 			return err
 		}
@@ -293,7 +323,7 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 		return plain(http.StatusServiceUnavailable, "x402 filter: this route's payment policy is invalid\n", PolicyInvalid)
 	}
 	if pr, ok := table.Platform(key); ok {
-		return s.platformRequest(ctx, req, h, st, table, pr)
+		return s.platformRequest(ctx, req, h, st, key, table, pr)
 	}
 	entry, ok := table.Lookup(key)
 	if !ok {
@@ -337,7 +367,7 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	}
 	log = log.With("payer", res.Payer.String())
 	st.log = log
-	if n := entry.Network.Network(); entry.Sync() && (s.pay.Facilitators[n] == nil || s.pay.RPCs[n] == nil) {
+	if n := entry.Network.Network(); entry.Sync() && (s.facilitator(st) == nil || s.pay.RPCs[n] == nil) {
 		// Checked before the backend is called: without both the response could never be
 		// released, so the request would only cost the seller the work.
 		log.Error("the route settles before release, but its network has no facilitator or no RPC configured", "decision", DependencyUnavailable, "network", n)
@@ -405,10 +435,18 @@ func chargeable(code int) bool { return code >= 200 && code <= 399 && code != ht
 // Async path is kept to one Redis call so it cannot approach Envoy's per-message
 // timeout, which after a served response would turn a 200 into a 504.
 func (s *Server) responseHeaders(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
+	// A platform rule's decision may carry limit headers; they go on whatever the client
+	// gets (§4.5).
+	return withRuleHeaders(s.respond(ctx, h, st), st.ruleHeaders)
+}
+
+func (s *Server) respond(ctx context.Context, h map[string]string, st *request) *extprocv3.ProcessingResponse {
+	if st.remote != nil {
+		code, _ := strconv.Atoi(h[":status"])
+		return s.settleRemote(ctx, code, st)
+	}
 	if st.rsv == nil {
-		// Unpriced, or nothing was reserved; a platform rule's allowed request may carry
-		// limit headers for the response.
-		return continueResponse(ruleResponseHeaders(st.ruleHeaders))
+		return continueResponse(nil) // unpriced, or nothing was reserved
 	}
 	code, _ := strconv.Atoi(h[":status"])
 	if !chargeable(code) {
@@ -487,6 +525,14 @@ func (s *Server) release(st *request, why Decision) {
 // sees to that), and the same value the chain's AuthorizationUsed event carries.
 func paymentID(res verify.Result) string { return evm.Hex(res.Authorization.Nonce[:]) }
 
+// paymentID is the request's payment id on either paid path.
+func (st *request) paymentID() string {
+	if st.remote != nil {
+		return st.remote.id
+	}
+	return paymentID(st.res)
+}
+
 // paywall answers 402 with how to pay.
 func (s *Server) paywall(st *request, pw paywall.Request, d Decision) *extprocv3.ProcessingResponse {
 	resp, err := paywall.Render(st.entry, pw)
@@ -515,7 +561,7 @@ func (s *Server) refuse(st *request, pw paywall.Request, reason string, d Decisi
 // a 402 with its reason; no answer is a 503. Either way the reservation is released
 // (nothing was charged) and the nonce stays claimed, as for any refused payment.
 func (s *Server) facilitatorVerify(ctx context.Context, st *request, pw paywall.Request) *extprocv3.ProcessingResponse {
-	fac := s.pay.Facilitators[st.entry.Network.Network()] // not nil: checked for Sync routes above
+	fac := s.facilitator(st) // not nil: checked for Sync routes above
 	ctx, cancel := context.WithTimeout(ctx, s.pay.verifyTimeout())
 	defer cancel()
 	t0 := time.Now()

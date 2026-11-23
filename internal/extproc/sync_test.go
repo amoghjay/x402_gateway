@@ -35,6 +35,45 @@ type fakeFacilitator struct {
 	verifyCalls  atomic.Int32
 }
 
+func newFakeFacilitator() *fakeFacilitator {
+	f := &fakeFacilitator{}
+	f.answer(200, `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`)
+	return f
+}
+
+// handler serves /verify and /settle.
+func (f *fakeFacilitator) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/verify" {
+			f.verifyCalls.Add(1)
+			code, body := int(f.verifyStatus.Load()), `{"isValid":true}`
+			if code == 0 {
+				code = 200
+			}
+			if b, ok := f.verifyBody.Load().(string); ok {
+				body = b
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		if r.URL.Path != "/settle" {
+			http.NotFound(w, r)
+			return
+		}
+		f.calls.Add(1)
+		var raw json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		f.last.Store(string(raw))
+		if fn, ok := f.onCall.Load().(func()); ok {
+			fn()
+		}
+		time.Sleep(time.Duration(f.delay.Load()))
+		w.WriteHeader(int(f.status.Load()))
+		_, _ = w.Write([]byte(f.body.Load().(string)))
+	})
+}
+
 func (f *fakeFacilitator) answer(status int, body string) {
 	f.status.Store(int64(status))
 	f.body.Store(body)
@@ -64,37 +103,8 @@ func syncPrices(t *testing.T) *pricing.Store {
 
 func setupSync(t *testing.T, settleTimeout time.Duration, opts ...func(*Payments)) (*paid, *fakeFacilitator) {
 	t.Helper()
-	f := &fakeFacilitator{}
-	f.answer(200, `{"success":true,"transaction":"0xfeed","network":"eip155:72344"}`)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/verify" {
-			f.verifyCalls.Add(1)
-			code, body := int(f.verifyStatus.Load()), `{"isValid":true}`
-			if code == 0 {
-				code = 200
-			}
-			if b, ok := f.verifyBody.Load().(string); ok {
-				body = b
-			}
-			w.WriteHeader(code)
-			_, _ = w.Write([]byte(body))
-			return
-		}
-		if r.URL.Path != "/settle" {
-			http.NotFound(w, r)
-			return
-		}
-		f.calls.Add(1)
-		var raw json.RawMessage
-		_ = json.NewDecoder(r.Body).Decode(&raw)
-		f.last.Store(string(raw))
-		if fn, ok := f.onCall.Load().(func()); ok {
-			fn()
-		}
-		time.Sleep(time.Duration(f.delay.Load()))
-		w.WriteHeader(int(f.status.Load()))
-		_, _ = w.Write([]byte(f.body.Load().(string)))
-	}))
+	f := newFakeFacilitator()
+	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	p := setupWith(t, 5000, 0, syncPrices(t), func(pay *Payments, node *radius.RPC) {
 		pay.Facilitators = map[string]*facilitator.Client{radius.Testnet.Network(): {URL: srv.URL, HTTP: srv.Client()}}

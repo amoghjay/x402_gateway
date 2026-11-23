@@ -47,6 +47,25 @@ type Requirements struct {
 	PayTo             string      `json:"payTo"`
 	MaxTimeoutSeconds int         `json:"maxTimeoutSeconds"`
 	Extra             *ExactExtra `json:"extra,omitempty"`
+
+	// ExtraRaw, when set, is the `extra` object exactly as a Radius Platform compiled
+	// policy wrote it, and is what gets encoded in place of Extra, so a field this package
+	// does not model still reaches the buyer and the facilitator. Extra holds the fields
+	// that are read here. Decoding never sets it. A string, not json.RawMessage, so that
+	// Requirements stays comparable.
+	ExtraRaw string `json:"-"`
+}
+
+// MarshalJSON writes ExtraRaw as `extra` when it is set.
+func (r Requirements) MarshalJSON() ([]byte, error) {
+	type plain Requirements
+	if len(r.ExtraRaw) == 0 {
+		return json.Marshal(plain(r))
+	}
+	return json.Marshal(struct {
+		plain
+		Extra json.RawMessage `json:"extra"`
+	}{plain(r), json.RawMessage(r.ExtraRaw)})
 }
 
 // ExactExtra is the `extra` object of the `exact` EVM scheme: the token's EIP-712 domain
