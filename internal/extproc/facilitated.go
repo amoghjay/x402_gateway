@@ -14,6 +14,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
 	"github.com/amoghjay/x402_gateway/internal/x402"
+	"github.com/amoghjay/x402_gateway/internal/x402/verify"
 )
 
 // The facilitator-only path: a platform payment option this filter cannot check itself
@@ -48,8 +49,25 @@ func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Reque
 	if err != nil {
 		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, err)
 	}
-	if !id.Expires.IsZero() && !id.Expires.After(s.pay.now()) {
+	// The payload must be the form the matched option asks for: the identity is built from
+	// that form, and the facilitator settles by the option's method.
+	if want := o.req.TransferMethod(); id.Method != want {
+		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, fmt.Errorf("the payload is a %s payment, but the option it accepted is %s", id.Method, want))
+	}
+	// The claim below is the only replay guard on this path, and it lives as long as the
+	// signature says it does. So the signature must say, and must not outlive the offer's
+	// window: a payment valid for a month would outlive any claim worth keeping, and a
+	// client-chosen lifetime would let unpaid requests park keys in Redis.
+	now := s.pay.now()
+	limit := now.Add(time.Duration(o.req.MaxTimeoutSeconds)*time.Second + verify.SkewAllowance)
+	switch {
+	case id.Expires.IsZero():
+		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, errors.New("the payment does not say when it expires (a decimal unix time)"))
+	case !id.Expires.After(now):
 		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, fmt.Errorf("the payment expired at %s", id.Expires.UTC().Format(time.RFC3339)))
+	case id.Expires.After(limit):
+		return s.refuse(st, pw, x402.ReasonInvalidPayload, PaymentInvalid, fmt.Errorf("the payment is valid until %s, later than now + maxTimeoutSeconds + %s; check the client's clock",
+			id.Expires.UTC().Format(time.RFC3339), verify.SkewAllowance))
 	}
 	log = log.With("payer", id.Payer, "paymentId", id.ID)
 	st.log = log
@@ -149,6 +167,13 @@ func (s *Server) settleRemote(ctx context.Context, code int, st *request) *extpr
 		}
 		st.log.Warn("not paid by this request: response withheld", "decision", SettleRefused, "reason", reason, "settleErr", errText(err), "ms", ms)
 		return immediate(r.Status, r.Headers, r.Body, SettleRefused)
+	}
+	// Nothing reached the facilitator, so nothing can settle later: not charged. The claim
+	// stays, so the buyer signs again.
+	if neverSent(err) {
+		st.log.Error("facilitator unreachable: response withheld, not charged", "decision", DependencyUnavailable,
+			"status", code, "settleErr", errText(err), "ms", ms)
+		return retryLater(DependencyUnavailable)
 	}
 	// Unclear, and this path has no chain read to settle the question: withheld. The buyer
 	// may have been charged; the log line is the only record (see the comment at the top).

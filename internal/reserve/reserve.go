@@ -152,9 +152,8 @@ func (s *Store) Reserve(ctx context.Context, payer evm.Address, nonce [32]byte, 
 	return 0, nil, fmt.Errorf("reserve: unexpected script result %v", res)
 }
 
-// Release gives the amount back to the payer's in-flight sum: the request failed
-
-// MaxClaim bounds a claim's life when a payment does not say when it expires.
+// MaxClaim bounds a claim's life. The filter refuses a payment that does not say when it
+// expires, or that outlives the offer's window, so this is a backstop, not the usual life.
 const MaxClaim = 24 * time.Hour
 
 // Claim marks a payment, by its identity (x402.Identify), as used, until it expires plus the
@@ -170,6 +169,7 @@ func (s *Store) Claim(ctx context.Context, id string, expires time.Time) (bool, 
 	return s.Redis.SetNX(ctx, "claim:{"+id+"}", "1", ttl).Result()
 }
 
+// Release gives the amount back to the payer's in-flight sum: the request failed
 // before anything was served, or the settlement is done. The nonce stays claimed.
 func (s *Store) Release(ctx context.Context, payer evm.Address, amount *big.Int) error {
 	if err := releaseScript.Run(ctx, s.Redis, []string{inflightKey(payer)}, amount.String()).Err(); err != nil {

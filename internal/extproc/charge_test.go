@@ -279,10 +279,36 @@ func TestChargeFacilitatorOnlyRefusals(t *testing.T) {
 	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) {
 		t.Errorf("unidentifiable: error %q", got.Error)
 	}
-	// Expired.
-	_, resp = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "2", "1700000000"))
+	// Expired, valid for longer than the offer's window, or silent about when it expires:
+	// the claim could not outlive such a signature, so nothing is claimed for it.
+	claims := func() (n int) {
+		for _, k := range p.redis.Keys() {
+			if strings.HasPrefix(k, "claim:") {
+				n++
+			}
+		}
+		return n
+	}
+	before := claims()
+	for name, deadline := range map[string]string{
+		"expired":     "1700000000",
+		"a month":     strconv.FormatInt(time.Now().Add(30*24*time.Hour).Unix(), 10),
+		"no deadline": "",
+		"hex":         "0x7fffffff",
+	} {
+		_, resp = p.chargeRequest(permit2Payment(t, terms, permit2Payer, "2", deadline))
+		if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) {
+			t.Errorf("%s: error %q", name, got.Error)
+		}
+	}
+	// A decoy member that another JSON reader would ignore must not make a new payment of
+	// one already used ("255" above): the payload is refused, not given a new identity.
+	_, resp = p.chargeRequest(permit2Payment(t, terms, permit2Payer, `255","Nonce":"77`, future()))
 	if got, _ := offered(t, resp); !strings.HasPrefix(got.Error, x402.ReasonInvalidPayload) {
-		t.Errorf("expired: error %q", got.Error)
+		t.Errorf("decoy nonce: error %q", got.Error)
+	}
+	if after := claims(); after != before {
+		t.Errorf("claims in Redis went from %d to %d for payments refused at the door", before, after)
 	}
 	if f.verifyCalls.Load() != n {
 		t.Error("the facilitator was asked about a payment refused at the door")
