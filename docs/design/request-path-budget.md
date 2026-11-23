@@ -518,7 +518,8 @@ changed to allow in the Platform: the route answered 200 five seconds later. It 
 back: 403 again after 13 seconds. The policy's `Synced` condition followed the document's
 version (2, 3, 4). The controller polls about once a minute, so up to a minute is expected.
 
-**Not run yet.**
+**Not run yet** (as of this run; the next section ran the production Platform and the
+unreachable drill, and says why Permit2 did not run).
 
 - A payment in the third option (SBC on Base Sepolia by Permit2), which takes the
   facilitator-only path. Our buyer signs EIP-3009 only, so it needs another client. That
@@ -534,6 +535,108 @@ version (2, 3, 4). The controller polls about once a minute, so up to a minute i
 - The Platform's wallet page showed both payments, with the paid URL and the transaction.
   Its per-project payment list stayed empty: that list is fed by gates reporting events,
   which this gate does not do.
+
+## Policy routes against the production Platform (2026-11-23)
+
+The same checks as the first run, now against the production Radius Platform, in a new
+organization where we are admin. The project has the same five endpoints and rules, the
+same seller wallet, test mode, and the same three options per charge; its compiled policy
+was identical to the development one apart from its IDs. The controller runs with no
+`-platform-api-url`, so it reads the production API by default, and `kubectl diff` of
+`deploy/k8s/x402-system/` against the cluster is empty. Images `15af45399319`.
+
+**A key without the right permission.** The first key we stored was accepted but refused
+for this project: `403 forbidden: missing permission endpoints:read`. Until a fetch
+succeeded, the Platform routes answered 503 `{"code":"policy_unavailable"}` (`noPolicy:
+Deny`) and the routes priced directly by a `PaymentPolicy` kept answering 402. A connector
+key made on the project's Gate page fixed it; the controller read the replaced Secret on
+its next poll, about 30 seconds later, with no restart. The Platform then reported the
+gate as connected on the current version, as an unidentified gate.
+
+| Route | Answer |
+|---|---|
+| `/free`, and a path with no rule | 200 |
+| `/blocked` | 403 `{"code":"not_for_sale"}` |
+| `/paid/:id` | 402 listing all three options, in the document's order |
+| `/metered` | 200 three times (`RateLimit-Remaining` 2, 1, 0), then 402 |
+| `/limited` | 200 five times, then 429 with `Retry-After: 50` |
+
+**Payments**, one in each EIP-3009 option, each settled through the facilitator the
+option names (`facilitator.testnet.radiustech.xyz`):
+
+| Option | Verify, before the backend | Response held to settle | Transfer on chain |
+|---|---|---|---|
+| SBC on Radius testnet | 601 ms | 804 ms | [`0xa3493e7f…aace`](https://testnet.radiustech.xyz/tx/0xa3493e7faaa720720b94101bdfc0f8e0453354610f39c94e13a9c05ae888aace) |
+| USDC on Base Sepolia | 316 ms | 971 ms | [`0xe2f14179…d203`](https://sepolia.basescan.org/tx/0xe2f14179fade8d31e20b1486153a90c163e2fb529f3666a4704dc6f5d78cd203) |
+
+Both receipts read from the chain's RPC: status success, the option's token, 1000 atomic
+units from the buyer to the seller. As before, one request each shows the path works; it
+is not a latency figure.
+
+**Replay.** One signed payment sent four times: 200 with `PAYMENT-RESPONSE`, then three
+402 `payment_already_used`, each still offering all three options.
+
+**A policy edit reaches the gate with no cluster command.** `/blocked` changed to allow in
+the Platform: 200 about 15 seconds after the edit was saved. Changed back: 403 about 20
+seconds later.
+
+**The Platform unreachable.** The controller's Deployment was patched with a
+`hostAliases` entry sending `platform-api.radiustech.xyz` to an unroutable address, which
+also restarted the controller. During the outage `/blocked` was changed to allow in the
+Platform (version 5).
+
+- For 2.5 minutes, sampled every 25 seconds, the routes kept enforcing version 4: free 200,
+  blocked 403, paid 402. The restarted controller seeded version 4 from the price-table
+  ConfigMap and never served without a policy.
+- Every fetch failed with a client timeout; the policy's condition read `Synced=False
+  FetchFailed … version 4 stays in force`, and the ConfigMap kept version 4.
+- The Platform reported the gate as `behind`: on version 4 while version 5 was current,
+  last fetch 3 minutes earlier.
+- With the patch removed, the new controller fetched version 5 and `/blocked` answered 200
+  18 seconds after the rollout finished. The rule was then restored (version 6, the same
+  content as version 4): 403 again 19 seconds later.
+
+**The Permit2 option was not paid.** It is the only option that takes the
+facilitator-only path, and no client we can fund pays it:
+
+- `radius-cli` 0.8.0 refuses it before signing. Its `sell check` against `/paid/:id`
+  passes 30 checks and fails two, both on that option: the asset "is not USDC on
+  base-sepolia … buyers refuse it (asset_mismatch)", and the domain "Stable Coin" v1 does
+  not match USDC's. So Radius's own buyer cannot pay the Platform's default third option.
+- The reference client `@x402/evm` 2.32.0 can: it signs Permit2 whenever the offer's
+  `extra.assetTransferMethod` is `permit2`, for any token, with a `deadline` of now +
+  `maxTimeoutSeconds` (60 s), inside the 90 s the filter allows. A buyer script with it is
+  ready; it needs SBC on Base Sepolia, plus a little ETH for the one-time Permit2 approval
+  because the option declares no gas sponsoring.
+- SBC on Base Sepolia (`0xf9FB20B8…0F16`) has no faucet we could find, its `mint` is
+  role-gated, and Uniswap v3 on Base Sepolia has no SBC pool against WETH or USDC.
+- The Platform's catalog offers no other Permit2 token on a test network: USDC always
+  compiles to EIP-3009.
+
+**What did run on that path, unfunded.** A Permit2 payment signed by the reference client
+for a buyer with no SBC and no allowance (the client pays only its built-in default
+assets unless given `spendControls.allowedAssets`; the script allows exactly the offer's
+token, capped at its amount), sent twice to `/paid/:id`:
+
+- First: the gate identified the Permit2 payload, claimed its replay key, and asked the
+  option's facilitator to verify it: refused in 511 ms ("Insufficient balance: has 0,
+  needs 1000"). 402, nothing served, nothing settled.
+- Second: 402 `payment_already_used` from the replay claim, without calling the
+  facilitator.
+
+So identification, the claim and the facilitator's verify are checked live on this path.
+A settled payment, its held response and a filter killed mid-settle are not. They move to
+*After v1.0* in the roadmap, with the trigger written there.
+
+**Seen along the way.**
+
+- On the facilitator-only path every log line carries `path` twice: the request's, and
+  `"facilitator"` added by `facilitated.go`. Most log tools keep the last, so the request
+  path is lost. Rename the second key (step 6).
+- A payment the facilitator refused at verify keeps its replay claim until the claim
+  expires (the payment's deadline plus a margin), so presenting it again answers
+  `payment_already_used` instead of the refusal's reason. Nothing is served either way,
+  and clients sign a new payment per request; worth a clearer answer in step 6.
 
 ## Sources
 
