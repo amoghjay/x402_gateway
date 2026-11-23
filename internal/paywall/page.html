@@ -3,165 +3,111 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Payment required · {{.Host}}</title>
+<title>402 Payment Required · {{.Host}}</title>
 <style>
+  /* A payment sheet: one panel that fits on a screen. Price, where to pay, the command.
+     Everything else is one click away. The terminal is the only dark surface. */
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f5; --surface: #ffffff; --fg: #1b1d21; --muted: #6b6e6c; --faint: #8b8d8a; --line: #e7e7e3;
-    --code-bg: #f2f2ef; --accent: #3b5bdb; --accent-soft: #eef1fb; --accent-fg: #ffffff;
-    --pane-bg: #1e2a3d; --pane-fg: #e9edf5; --pane-muted: rgba(233, 237, 245, .62); --pane-code: #16202f; --pane-line: rgba(255, 255, 255, .12);
-    --test-bg: #fff2cc; --test-fg: #6b4a00; --ok-bg: #e6f4ea; --ok-fg: #1e5b31; --other-bg: #eeeef0; --other-fg: #4a4a52;
+    --page: #eef0f2; --sheet: #ffffff; --ink: #15171a; --soft: #646a73; --line: #dfe2e6;
+    --term: #15171a; --term-ink: #e8eaed; --term-soft: #8b9099; --warn: #8a5a00;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #111214; --surface: #18191c; --fg: #ecedef; --muted: #a3a6ab; --faint: #7d8086; --line: #2a2c30;
-      --code-bg: #0e0f11; --accent: #7c95ff; --accent-soft: #1d2440; --accent-fg: #0e0f11;
-      --pane-bg: #161d2b; --pane-code: #0f1520;
-      --test-bg: #3a2c06; --test-fg: #f3c859; --ok-bg: #16301f; --ok-fg: #8fd6a4; --other-bg: #26272b; --other-fg: #c4c5cc;
+      --page: #0b0c0e; --sheet: #17191c; --ink: #eceef0; --soft: #9aa0a8; --line: #2b2e33;
+      --term: #000000; --term-ink: #e8eaed; --term-soft: #7d828b; --warn: #e0a83a;
     }
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg); }
-  body { font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; font-feature-settings: "tnum"; }
-  code, pre { font-family: var(--mono); }
-  a { color: var(--accent); }
+  html { background: var(--page); }
+  body { margin: 0; color: var(--ink); font: 15px/1.5 var(--sans); padding: 8vh max(16px, env(safe-area-inset-right, 0px)) 2rem max(16px, env(safe-area-inset-left, 0px)); }
+  @media (max-width: 30rem) { body { padding-top: 16px; } }
+  a { color: inherit; text-underline-offset: 2px; }
+  code { font: .875em var(--mono); }
 
-  .wrap { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr) 27rem; }
-  @media (max-width: 60rem) { .wrap { grid-template-columns: minmax(0, 1fr); align-content: start; } }
-  .main { padding: 3.5rem 3rem 3rem; display: grid; gap: 1.75rem; align-content: start; max-width: 40rem; width: 100%; justify-self: center; }
-  @media (max-width: 40rem) { .main { padding: 1.5rem 1rem 2rem; gap: 1.5rem; } }
+  .sheet { max-width: 30rem; margin: 0 auto; background: var(--sheet); border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem 1.25rem 1rem; }
+  .top { display: flex; gap: .75rem; align-items: baseline; font-size: .8125rem; color: var(--soft); }
+  .top .where { flex: 1; min-width: 0; font-family: var(--mono); font-size: .75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top .test { color: var(--warn); white-space: nowrap; }
+  .price { margin: 1.25rem 0 0; font-size: 2.5rem; font-weight: 600; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .per { margin: .375rem 0 0; color: var(--soft); font-size: .875rem; }
+  .what { margin: .5rem 0 0; font-size: .875rem; }
 
-  .kicker { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; font-size: .8125rem; color: var(--muted); }
-  .kicker .code402 { font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-  .badge { display: inline-block; font-size: .75rem; font-weight: 600; padding: .15rem .55rem; border-radius: 999px; white-space: nowrap; }
-  .badge.test { background: var(--test-bg); color: var(--test-fg); }
-  .badge.cli { background: var(--ok-bg); color: var(--ok-fg); }
-  .badge.other { background: var(--other-bg); color: var(--other-fg); }
+  .seg { display: flex; flex-wrap: wrap; margin: 1.25rem 0 0; border: 1px solid var(--line); border-radius: 8px; padding: 3px; gap: 3px; }
+  .seg label { flex: 1 1 auto; text-align: center; padding: .4rem .625rem; border-radius: 6px; font-size: .8125rem; cursor: pointer; white-space: nowrap; color: var(--soft); }
+  .seg label:hover { color: var(--ink); }
+  .seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .seg label:has(input:checked) { background: var(--ink); color: var(--sheet); }
+  .seg label:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
 
-  h1 { margin: 0; font-size: 2rem; font-weight: 600; line-height: 1.15; letter-spacing: -.02em; overflow-wrap: anywhere; }
-  .sub { margin: .375rem 0 0; font: .8125rem/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-  .price { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; margin-top: 1.25rem; }
-  .price .amount { font-size: 2.75rem; font-weight: 650; letter-spacing: -.03em; line-height: 1; }
-  .price .per { color: var(--muted); }
-  .message { margin: .75rem 0 0; }
-  @media (max-width: 40rem) { h1 { font-size: 1.5rem; } .price .amount { font-size: 2.25rem; } }
+  .panel { display: none; margin-top: .75rem; }
+  .term { position: relative; background: var(--term); color: var(--term-ink); border-radius: 8px; }
+  .term pre { margin: 0; padding: .875rem 4.5rem .875rem .875rem; font: .8125rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .term.cmd pre::before { content: "$ "; color: var(--term-soft); }
+  .term + .term { margin-top: .5rem; }
+  button.copy { position: absolute; top: .5rem; right: .5rem; padding: .2rem .55rem; font: .75rem var(--mono); color: inherit; background: transparent;
+                border: 1px solid currentColor; border-radius: 4px; cursor: pointer; opacity: .75; }
+  button.copy:hover { opacity: 1; }
+  button.copy:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; opacity: 1; }
+  .note { margin: .5rem 0 0; font-size: .8125rem; color: var(--soft); overflow-wrap: anywhere; }
 
-  h2 { margin: 0 0 .625rem; font-size: .8125rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-  .opts { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
-  .opt { display: grid; grid-template-columns: auto 1fr auto; gap: .125rem .75rem; align-items: center; padding: .75rem .875rem;
-         border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-  .opt { cursor: pointer; position: relative; }
-  .opt:hover { border-color: var(--accent); }
-  .opt input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-  .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-  .opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .opt .dot { width: .75rem; height: .75rem; border-radius: 50%; border: 1.5px solid var(--accent); }
-  .opt:has(input:checked) .dot { background: var(--accent); box-shadow: inset 0 0 0 2px var(--accent-soft); }
-  .panel { display: none; }
-  .opt .name { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .5rem; min-width: 0; }
-  .opt .name b { font-weight: 600; }
-  .opt .amt { font-weight: 600; }
-  .opt .meta { grid-column: 2 / 4; font-size: .75rem; color: var(--muted); overflow-wrap: anywhere; }
-  .opt .meta code { font-size: .75rem; color: var(--fg); }
+  details { border-top: 1px solid var(--line); margin-top: .875rem; padding-top: .625rem; font-size: .875rem; }
+  details + details { margin-top: .625rem; }
+  summary { cursor: pointer; }
+  details ol { margin: .625rem 0 0; padding-left: 1.25rem; display: grid; gap: .5rem; }
+  details ol .note { margin-top: .25rem; }
+  .plain { position: relative; margin-top: .625rem; border: 1px solid var(--line); border-radius: 8px; }
+  .plain pre { margin: 0; padding: .75rem 4.5rem .75rem .75rem; font: .75rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow: auto; }
 
-  .pay { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1.125rem; }
-  .pay p.lead { margin: 0 0 .75rem; color: var(--muted); font-size: .875rem; }
-  .code { position: relative; }
-  .code pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: .75rem 5rem .75rem .875rem;
-              font-size: .8125rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
-  .code.primary pre { border-color: var(--accent); }
-  .code + .code { margin-top: .5rem; }
-  button.copy { position: absolute; top: .4375rem; right: .4375rem; height: 1.875rem; padding: 0 .75rem; border: 0; border-radius: 6px;
-                background: var(--accent); color: var(--accent-fg); font: 600 .8125rem system-ui, sans-serif; cursor: pointer; }
-  button.copy:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
-  details { margin-top: .875rem; }
-  summary { cursor: pointer; font-weight: 600; font-size: .875rem; }
-  ol.steps { margin: .75rem 0 0; padding-left: 1.25rem; display: grid; gap: .625rem; }
-  .hint { margin: .25rem 0 0; font-size: .75rem; color: var(--muted); }
-  .foot { margin: 0; font-size: .8125rem; color: var(--faint); line-height: 1.6; }
-  .foot code { color: var(--muted); }
-
-  .pane { background: var(--pane-bg); color: var(--pane-fg); padding: 3.5rem 2rem 2rem; display: grid; gap: 1rem; align-content: start; }
-  @media (max-width: 60rem) { .pane { padding: 2rem 1rem; } }
-  .pane h2 { color: var(--pane-muted); }
-  .pane p { margin: 0; font-size: .875rem; color: var(--pane-muted); }
-  .pane .code pre { background: var(--pane-code); border-color: var(--pane-line); color: var(--pane-fg); max-height: 22rem; overflow: auto; }
-  .pane .notes { display: grid; gap: .5rem; font-size: .8125rem; color: var(--pane-muted); border-top: 1px solid var(--pane-line); padding-top: 1rem; }
-  .pane .notes b { color: var(--pane-fg); font-weight: 600; }
-  .pane code { color: var(--pane-fg); }
+  .foot { max-width: 30rem; margin: .75rem auto 0; font-size: .75rem; color: var(--soft); text-align: center; }
   {{range $i, $c := .Choices}}body:has(#opt{{$i}}:checked) #panel{{$i}} { display: block; }
   {{end}}
   @supports not selector(:has(*)) { #panel{{.Default}} { display: block; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <main class="main">
-    <div class="kicker">
-      <span class="code402">402 · Payment required</span>
-      {{if .Testnet}}<span class="badge test">Test network · no real money</span>{{end}}
-    </div>
+<main class="sheet">
+  <div class="top">
+    <span class="where" title="{{.Method}} {{.Host}}{{.Path}}">402 · {{.Method}} {{.Host}}{{.Path}}</span>
+    {{if .Testnet}}<span class="test">Test network</span>{{end}}
+  </div>
 
-    <div>
-      <h1>{{if .Description}}{{.Description}}{{else}}{{.Path}}{{end}}</h1>
-      <p class="sub">{{.Method}} {{.Host}}{{if .Description}}{{.Path}}{{end}}</p>
-      <div class="price"><span class="amount">{{.First.Amount}}</span><span class="per">per request</span></div>
-      {{if .Message}}<p class="message">{{.Message}}</p>{{end}}
-    </div>
+  <p class="price">{{.First.Amount}}</p>
+  <p class="per">per request · nothing charged yet</p>
+  {{if .Description}}<p class="what">{{.Description}}</p>{{end}}
+  {{if .Message}}<p class="what">{{.Message}}</p>{{end}}
 
-    <section>
-      <h2>{{if gt (len .Choices) 1}}Choose how to pay{{else}}Pay with{{end}}</h2>
-      <div class="opts" role="radiogroup">
-        {{range $i, $c := .Choices}}<label class="opt" for="opt{{$i}}">
-          <input type="radio" name="opt" id="opt{{$i}}"{{if eq $i $.Default}} checked{{end}}>
-          <span class="dot"></span>
-          {{if $c.Any}}<span class="name"><b>Whichever you hold</b><span>{{$c.Chains}}</span><span class="badge cli">recommended</span></span>
-          <span class="amt">{{$c.Amount}}</span>
-          <span class="meta">One command pays on whichever of these networks your wallet has funds on.</span>
-          {{else}}{{with $c.Option}}<span class="name"><b>{{.Chain}}</b><span>{{.Token}}</span>{{if and $.SomeTestnet .Testnet}}<span class="badge test">test</span>{{end}}{{if not $c.Commands}}<span class="badge other">other x402 client</span>{{end}}</span>
-          <span class="amt">{{.Amount}}</span>
-          <span class="meta">to <code>{{.PayTo}}</code> · {{.MethodName}}{{if not .KnownToken}} · token <code>{{.AssetAddress}}</code>{{end}}</span>
-          {{end}}{{end}}
-        </label>
-        {{end}}
-      </div>
-    </section>
-
-    {{range $i, $c := .Choices}}<section class="pay panel" id="panel{{$i}}">
-      {{if $c.Commands}}
-      <h2>Pay with one command</h2>
-      <p class="lead">radius-cli signs the payment, sends this request again and prints the response{{if $c.Any}}. It pays on whichever network your wallet holds funds on{{else}}, paying {{$c.Option.Amount}} in {{$c.Option.Token}} on {{$c.Option.Chain}}{{end}}, and never more than the price.</p>
-      {{range $c.Commands}}<div class="code primary"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
-      {{end}}
-      <details>
-        <summary>First time? Set up radius-cli</summary>
-        <ol class="steps">
-          {{range $c.Setup}}<li><div class="code"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="hint">{{.Note}}</p>{{end}}</li>
-          {{end}}
-        </ol>
-      </details>
-      {{else}}
-      <h2>Pay with an x402 client</h2>
-      <p class="lead">radius-cli does not pay this option yet. Use an x402 v2 client that supports {{$c.Option.MethodName}}, such as <code>@x402/fetch</code>: it reads this response's <code>PAYMENT-REQUIRED</code> header, signs this option and sends the request again.</p>
-      <div class="code"><pre>import { wrapFetchWithPayment } from "@x402/fetch";</pre><button type="button" class="copy">Copy</button></div>
-      {{end}}
-    </section>
+  {{if gt (len .Choices) 1}}<div class="seg" role="radiogroup" aria-label="Pay on">
+    {{range $i, $c := .Choices}}<label for="opt{{$i}}"><input type="radio" name="opt" id="opt{{$i}}"{{if eq $i $.Default}} checked{{end}}>{{if $c.Any}}Any{{else}}{{$c.Option.Chain}} {{$c.Option.Token}}{{end}}</label>
     {{end}}
+  </div>{{else}}<input type="radio" name="opt" id="opt0" checked hidden>{{end}}
 
-    <p class="foot">Nothing has been charged. Each request is paid on its own, settled before the response is released. From code, <code>{{.SDK.Entry}}</code> from <code>{{.SDK.Import}}</code> pays this inside your app. <a href="{{.Docs}}">How x402 payments work</a></p>
-  </main>
+  {{range $i, $c := .Choices}}<section class="panel" id="panel{{$i}}">
+    {{if $c.Commands}}
+    {{range $c.Commands}}<div class="term cmd"><pre>{{.}}</pre><button type="button" class="copy">Copy</button></div>
+    {{end}}
+    <p class="note">{{if $c.Any}}Pays on {{$c.Chains}}, whichever your wallet has funds on.{{else}}Pays {{$c.Option.Amount}} in {{$c.Option.Token}} on {{$c.Option.Chain}} to <code title="{{$c.Option.PayTo}}">{{$c.Option.ShortPayTo}}</code>.{{end}} Never more than the price; settled before you get the response.</p>
+    <details>
+      <summary>First time? Set up radius-cli</summary>
+      <ol>
+        {{range $c.Setup}}<li><div class="term cmd"><pre>{{.Run}}</pre><button type="button" class="copy">Copy</button></div>{{if .Note}}<p class="note">{{.Note}}</p>{{end}}</li>
+        {{end}}
+      </ol>
+    </details>
+    {{else}}
+    <p class="note">radius-cli does not pay this option yet. Use an x402 client that supports {{$c.Option.MethodName}}, such as <code>@x402/fetch</code>: it signs the option in this response's <code>PAYMENT-REQUIRED</code> header and retries.{{if not $c.Option.KnownToken}} Token <code>{{$c.Option.AssetAddress}}</code>.{{end}}</p>
+    {{end}}
+  </section>
+  {{end}}
 
-  <aside class="pane">
-    <h2>Hand it to your agent</h2>
-    <p>Paste this into your AI agent. It says what to run, and that it may not pay more than the price without asking you.</p>
-    <div class="code"><pre>{{.AgentPrompt}}</pre><button type="button" class="copy">Copy</button></div>
-    <div class="notes">
-      <div><b>Agents and scripts</b> get the same terms as JSON (<code>Accept: application/json</code>) or markdown (<code>Accept: text/markdown</code>).</div>
-      <div><b>x402 clients</b> read the <code>PAYMENT-REQUIRED</code> header and retry with <code>PAYMENT-SIGNATURE</code>.</div>
-    </div>
-  </aside>
-</div>
+  <details>
+    <summary>Using an AI agent? Hand it this prompt</summary>
+    <div class="plain"><pre>{{.AgentPrompt}}</pre><button type="button" class="copy">Copy</button></div>
+  </details>
+</main>
+<p class="foot">Paid with x402. Programs read the <code>PAYMENT-REQUIRED</code> header, or the same terms as JSON or markdown by <code>Accept</code>. From code: <code>{{.SDK.Entry}}</code>. <a href="{{.Docs}}">Docs</a></p>
 <script>
   document.querySelectorAll("button.copy").forEach(function (b) {
     b.addEventListener("click", function () {

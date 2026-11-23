@@ -248,11 +248,11 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 	quoted := strings.ReplaceAll(strings.ReplaceAll(payCommand, "'", "&#39;"), "&q", "&amp;q")
 	quoted = strings.ReplaceAll(quoted, "&r=", "&amp;r=")
 	for _, want := range []string{
-		"0.001 SBC", "Radius testnet", "0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4", "npm i -g radius-cli", "radius-cli wallet new",
+		"$0.001", "Radius testnet", `title="0x2a521BC1C1fda5C366aEf14A8326152de5EBfBe4"`, "npm i -g radius-cli", "radius-cli wallet new",
 		"radius-cli --network testnet wallet faucet",
 		`<pre>` + quoted + `</pre><button type="button" class="copy">Copy</button>`,
-		"Hand it to your agent", "Fetch this for me: GET",
-		"Test network · no real money", `id="opt0" checked>`,
+		"Using an AI agent? Hand it this prompt", "Fetch this for me: GET",
+		`<span class="test">Test network</span>`, `id="opt0" checked hidden>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("page lacks %q", want)
@@ -263,7 +263,7 @@ func TestBrowserGetsHTMLWithTheSteps(t *testing.T) {
 		strings.Contains(html, "fetch(") || strings.Contains(html, "src=") {
 		t.Error("page script is not just the copy buttons")
 	}
-	if !inOrder(html, "<h2>Pay with</h2>", "<h2>Pay with one command</h2>", "First time? Set up radius-cli", "From code,", "<h2>Hand it to your agent</h2>") {
+	if !inOrder(html, `<p class="price">$0.001</p>`, "per request", `<div class="term cmd">`, "First time? Set up radius-cli", "Using an AI agent?", "From code:") {
 		t.Error("sections out of order")
 	}
 }
@@ -337,7 +337,7 @@ func TestMainnetHasNoFaucet(t *testing.T) {
 	if strings.Contains(strings.ToLower(page), "testnet") || strings.Contains(page, "Test network") {
 		t.Error("mainnet page mentions a test network")
 	}
-	if !strings.Contains(page, "<b>Radius</b>") || !strings.Contains(page, `<span class="amount">$0.001</span>`) {
+	if !strings.Contains(page, "in SBC on Radius") || !strings.Contains(page, `<p class="price">$0.001</p>`) {
 		t.Error("mainnet page does not name the chain or price it in dollars")
 	}
 }
@@ -350,7 +350,7 @@ func TestPageNamesWellKnownChains(t *testing.T) {
 			Extra: &x402.ExactExtra{AssetTransferMethod: x402.TransferEIP3009, Name: "USD Coin", Version: "2"}},
 	}
 	page := string(render(t, entry(t, nil), Request{Method: http.MethodGet, URL: url, Accept: browser.Accept, Offers: offers(reqs)}).Body)
-	if !strings.Contains(page, "<b>Base</b><span>USD Coin</span>") || strings.Contains(page, "eip155:8453</b>") {
+	if !strings.Contains(page, ">Base USD Coin</label>") || strings.Contains(page, ">eip155:8453 ") {
 		t.Error("Base mainnet is not named on the page")
 	}
 	if strings.Contains(page, "other 1 options") || !strings.Contains(page, "or the other option in the 402") {
@@ -610,7 +610,7 @@ func TestPageLetsTheVisitorPickAnOption(t *testing.T) {
 	page := string(render(t, entry(t, nil), Request{Method: http.MethodGet, URL: url, Accept: browser.Accept, Offers: offers(reqs)}).Body)
 	q := func(s string) string { return strings.NewReplacer("'", "&#39;", "&", "&amp;").Replace(s) }
 	for _, want := range []string{
-		`id="opt0" checked>`, "Whichever you hold", "Radius or Base",
+		`id="opt0" checked>Any</label>`, "Pays on Radius or Base, whichever your wallet has funds on.",
 		`id="opt1">`, `id="opt2">`, `id="opt3">`,
 		"body:has(#opt0:checked) #panel0 { display: block; }",
 		"body:has(#opt3:checked) #panel3 { display: block; }",
@@ -623,7 +623,7 @@ func TestPageLetsTheVisitorPickAnOption(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
-	if strings.Count(page, `class="pay panel"`) != 4 || strings.Count(page, "<script") != 1 {
+	if strings.Count(page, `class="panel"`) != 4 || strings.Count(page, "<script") != 1 {
 		t.Error("want one panel per choice and no script beyond the copy buttons")
 	}
 }
