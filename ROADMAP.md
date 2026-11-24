@@ -88,20 +88,24 @@ Everything a team needs to try it in ten minutes and run it without us.
 - **Refuse unpriced routes.** A flag that answers 503 for a route missing from the
   price table. On by default in standalone mode, where one filter covers every route
   and a typo would otherwise serve free.
-- **Install.** One manifest or Helm chart with public images.
+- **Platform policies without Kubernetes.** `x402-controller sync` polls a Radius Platform
+  project and writes the price file and bot-signature keys the filter reads in standalone
+  mode, keeping the last good policy when Platform is unreachable. A Platform project's
+  rules then apply on plain Envoy, where a single-container gate would run.
+- **Install.** A Helm chart and public multi-arch images, with a plain manifest rendered
+  from the chart for clusters without Helm.
 - **Client interop in CI.** The reference TypeScript, Go and Python clients and
   `radius-cli`, paying through a real Envoy.
 - **Contract-wallet signatures.** First establish what the local signature check does
   with an EIP-1271 or ERC-6492 signature today; then let those through to the
   facilitator's verification instead of refusing them.
-- **Limits on unsettled money in `Async` mode.** A per-payer and a per-route ceiling,
-  so the opt-in serve-first mode has a stated worst case.
 - **Load test.** Stated percentiles at a stated concurrency.
 
 **Exit test.** Someone who has not seen the repo installs it both ways from the README,
 pays with a reference client, and reads the latency of that request from a metric.
 
-**Cut first.** The `Async` ceilings, then the Helm chart (a plain manifest stays).
+**Cut first.** Contract-wallet signatures (their live check depends on the facilitator),
+then the Helm chart (the rendered manifest stays).
 
 ### Phase 3 — Proof (M6d)
 
@@ -147,6 +151,7 @@ Ordered. Each item waits for its trigger, and none of them blocks v1.0.
 | GKE Gateway and Google Cloud load balancers | The same filter as a Service Extensions callout. Starts with a logging-only filter to learn how the route is identified and whether the callout can answer 402 and hold a response. | v1.0 tagged |
 | The fast lane | An opt-in mode where the gate submits the settlement itself while still holding the response. The settle step alone measured a median of 91 ms on Radius from GKE; end to end it is unbuilt. Needs keys in the cluster and a pool of them. | The benchmark shows the facilitator is most of a paid request's wait |
 | Permit2 paid live | A payment in the Platform's Permit2 option (SBC on Base Sepolia) through the facilitator-only path, and a filter killed mid-settle on that path. The buyer script with the reference client is in [`tools/drills/permit2-buyer`](tools/drills/permit2-buyer/); [why it has not run](docs/design/request-path-budget.md#policy-routes-against-the-production-platform-2026-11-23). | SBC on Base Sepolia for our buyer, `radius-cli` able to pay that option, or a seller asking for Permit2 |
+| Limits on unsettled money in `Async` mode | A per-payer and a per-route ceiling on money served but not yet settled, so the opt-in serve-first mode has a stated worst case. First, the in-flight sum must outlive a stalled settler: today its Redis key expires 30 s after the last reservation, so a settler down for longer lets the same balance be reserved again. `Sync`, the default, is not affected. | A seller asks for `Async` |
 | Facilitator failover | An ordered list of facilitators per option, with a cooldown after failures. | A facilitator outage during the soak, or a second mainnet facilitator in use |
 | kgateway | A second Envoy-based gateway through its own external-processing attachment. | GKE Gateway working, or a user asking |
 | Browser payment page | A page where a person connects a wallet and pays, with a short-lived pass afterwards. Needs its own threat review. | A seller with human traffic |
