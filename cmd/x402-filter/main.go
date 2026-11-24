@@ -13,6 +13,9 @@
 // unready instead of restarting it. Never the facilitator or the RPC: only Sync routes
 // call the first, and the second has a cache in front of it.
 //
+// Prometheus metrics are served on a separate HTTP port, -metrics-addr (:9090), so a
+// scrape never shares a connection with Envoy's streams.
+//
 // Without -redis the paid path is off and every priced request gets the 402 (the M3
 // shape), which is also the safe answer if the flag is dropped by mistake.
 package main
@@ -43,6 +46,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/counter"
 	"github.com/amoghjay/x402_gateway/internal/extproc"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
@@ -55,6 +59,7 @@ const readinessService = "readiness"
 
 type config struct {
 	listen, namespace, configMap, networks string
+	metricsAddr                            string // "" = no metrics listener
 	drain, delay                           time.Duration
 	redis                                  string // "" = payments off
 	rpcURL                                 string // "" = the network's public endpoint
@@ -69,6 +74,7 @@ func main() {
 	var c config
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.StringVar(&c.listen, "listen", ":9002", "gRPC listen address (ext_proc and health)")
+	flag.StringVar(&c.metricsAddr, "metrics-addr", ":9090", "HTTP listen address for Prometheus metrics at /metrics; empty turns it off")
 	flag.DurationVar(&c.drain, "drain", 20*time.Second, "how long to let in-flight streams finish on SIGTERM")
 	flag.DurationVar(&c.delay, "delay", 0, "drills only: hold each request this long before answering")
 	flag.StringVar(&c.namespace, "prices-namespace", os.Getenv("POD_NAMESPACE"), "namespace of the price-table ConfigMap (default $POD_NAMESPACE)")
@@ -144,6 +150,13 @@ func run(log *slog.Logger, c config) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+
+	metrics.SetBuildInfo(buildinfo.Version, "filter")
+	if c.metricsAddr != "" {
+		if err := metrics.Serve(ctx, c.metricsAddr, log); err != nil {
+			return fmt.Errorf("metrics listener: %w", err)
+		}
+	}
 
 	prices := pricing.NewStore()
 	watcher := &pricing.Watcher{Client: client, Namespace: c.namespace, Name: c.configMap, Networks: nets, Store: prices, Log: log}

@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/webbotauth"
@@ -515,9 +516,10 @@ func NewStore() *Store { return &Store{loaded: make(chan struct{})} }
 // Load returns the current table, or nil before the first one.
 func (s *Store) Load() *Prices { return s.p.Load() }
 
-// Set replaces the table.
+// Set replaces the table, and records it in the price-table metrics.
 func (s *Store) Set(p *Prices) {
 	s.p.Store(p)
+	metrics.PriceTable(p.Len(), p.PlatformLen(), len(p.BlockedKeys()), time.Now())
 	s.once.Do(func() { close(s.loaded) })
 }
 

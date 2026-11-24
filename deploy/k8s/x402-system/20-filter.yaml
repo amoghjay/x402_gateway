@@ -75,6 +75,9 @@ spec:
           ports:
             - name: grpc
               containerPort: 9002
+            # Prometheus /metrics (-metrics-addr, default :9090), its own HTTP port.
+            - name: metrics
+              containerPort: 9090
           # The kubelet speaks the standard gRPC health protocol natively.
           # Readiness asks for the "readiness" service: SERVING once the first price table
           # has loaded, NOT_SERVING before that and while draining on SIGTERM.

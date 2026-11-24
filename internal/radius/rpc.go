@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 )
 
 // RPC is a minimal JSON-RPC client: the two or three calls the gateway makes (balance,
@@ -169,7 +170,10 @@ func (r *RPC) Call(ctx context.Context, out any, method string, params ...any) e
 // ChainID returns eth_chainId.
 func (r *RPC) ChainID(ctx context.Context) (uint64, error) {
 	var hexID string
-	if err := r.Call(ctx, &hexID, "eth_chainId"); err != nil {
+	t0 := time.Now()
+	err := r.Call(ctx, &hexID, "eth_chainId")
+	metrics.Dependency(metrics.DepRPC, "chainId", err, time.Since(t0))
+	if err != nil {
 		return 0, err
 	}
 	id, ok := new(big.Int).SetString(strings.TrimPrefix(hexID, "0x"), 16)
@@ -203,7 +207,9 @@ func (r *RPC) call32(ctx context.Context, to evm.Address, data []byte) ([]byte, 
 // BalanceOf reads an ERC-20 balance with eth_call at "latest".
 func (r *RPC) BalanceOf(ctx context.Context, token, holder evm.Address) (*big.Int, error) {
 	w := evm.AddressWord(holder)
+	t0 := time.Now()
 	b, err := r.call32(ctx, token, append(append([]byte{}, balanceOfSelector...), w[:]...))
+	metrics.Dependency(metrics.DepRPC, "balanceOf", err, time.Since(t0))
 	if err != nil {
 		return nil, fmt.Errorf("balanceOf: %w", err)
 	}
@@ -216,7 +222,9 @@ func (r *RPC) BalanceOf(ctx context.Context, token, holder evm.Address) (*big.In
 func (r *RPC) AuthorizationState(ctx context.Context, token, authorizer evm.Address, nonce [32]byte) (bool, error) {
 	w := evm.AddressWord(authorizer)
 	data := append(append(append([]byte{}, authorizationStateSelector...), w[:]...), nonce[:]...)
+	t0 := time.Now()
 	b, err := r.call32(ctx, token, data)
+	metrics.Dependency(metrics.DepRPC, "authorizationState", err, time.Since(t0))
 	if err != nil {
 		return false, fmt.Errorf("authorizationState: %w", err)
 	}

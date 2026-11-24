@@ -66,3 +66,26 @@ dropped (nobody was charged). The settler logs each one at error level. To list 
 ```
 kubectl -n x402-system exec redis-0 -- redis-cli XRANGE outcomes - +
 ```
+
+**Metrics.** Each component serves Prometheus metrics. Scraping and alert rules are not
+in these manifests yet.
+
+| Component | Endpoint | What it adds |
+|---|---|---|
+| filter | `:9090/metrics` (`-metrics-addr`, port `metrics`) | every decision, how long each phase held the request, dependency calls, balance-cache hits, the price table in force |
+| settler | `:8081/metrics` (port `health`) | settlement and held-payment outcomes, dependency calls |
+| controller | `:8080/metrics` (`-metrics-addr`, port `metrics`) | controller-runtime's reconcile metrics, Radius Platform fetches |
+
+A paid request on a Sync route is two observations of `x402_filter_phase_duration_seconds`
+on its route: `phase="request", decision="payment_accepted"` (the checks before the backend)
+and `phase="response", decision="settled"` (the held settle). To read them without a
+Prometheus:
+
+```
+kubectl -n x402-system port-forward deploy/x402-filter 9090 &
+curl -s localhost:9090/metrics | grep -E 'x402_filter_(decisions_total|phase_duration_seconds_(sum|count))'
+```
+
+Labels never carry a payer, nonce, transaction or path: `route` is the price-table key,
+and `reason` is the 402 reason or a policy's built-in code (`other` and `custom` stand in
+for anything else).

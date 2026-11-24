@@ -1,16 +1,20 @@
 // Package facilitator is the HTTP client for an x402 facilitator (/verify, /settle,
-// /supported). The settler is its only production caller; the buyer CLI uses it for
-// the M2 done-check, and the request path never does.
+// /supported). The filter calls it on Sync routes (/verify on the request, /settle while
+// the response is held), the settler for Async jobs, and the buyer CLI for checks.
 package facilitator
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 )
 
@@ -35,7 +39,26 @@ func (s *Status) Error() string { return fmt.Sprintf("facilitator: HTTP %d: %s",
 // opposed to failing to process it (5xx).
 func (s *Status) Definite() bool { return s.Code >= 400 && s.Code < 500 }
 
+// post records each call as x402_dependency_duration_seconds. A 4xx is the facilitator
+// answering no, so it counts as ok: the dependency worked, the payment did not.
 func (c *Client) post(ctx context.Context, path string, in, out any) error {
+	t0 := time.Now()
+	err := c.do(ctx, path, in, out)
+	metrics.Dependency(metrics.DepFacilitator, strings.TrimPrefix(path, "/"), refusedIsAnswer(err), time.Since(t0))
+	return err
+}
+
+// refusedIsAnswer maps a definite refusal to nil for the dependency's result, so a
+// facilitator turning payments down does not read as the facilitator being down.
+func refusedIsAnswer(err error) error {
+	var s *Status
+	if errors.As(err, &s) && s.Definite() {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) do(ctx context.Context, path string, in, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return err

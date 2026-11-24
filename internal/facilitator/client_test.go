@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/amoghjay/x402_gateway/internal/metrics/metricstest"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/x402"
 )
@@ -81,5 +82,22 @@ func TestSupported(t *testing.T) {
 	got, err := (&Client{URL: srv.URL}).Supported(t.Context())
 	if err != nil || len(got.Kinds) != 1 || got.Kinds[0].Network != radius.Testnet.Network() || got.Kinds[0].Extra.AssetTransferMethod != x402.TransferEIP3009 {
 		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+// A refusal is the facilitator answering, so it counts as ok; a 5xx is the facilitator
+// failing.
+func TestDependencyResult(t *testing.T) {
+	labels := func(result string) map[string]string {
+		return map[string]string{"dependency": "facilitator", "operation": "settle", "result": result}
+	}
+	ok0, err0 := metricstest.Value(t, "x402_dependency_duration_seconds", labels("ok")), metricstest.Value(t, "x402_dependency_duration_seconds", labels("error"))
+	_, _ = echo(t, "/settle", http.StatusBadRequest, `{"success":false,"errorReason":"insufficient_funds"}`).Settle(t.Context(), pp, req)
+	_, _ = echo(t, "/settle", http.StatusBadGateway, "upstream connect error").Settle(t.Context(), pp, req)
+	if got := metricstest.Value(t, "x402_dependency_duration_seconds", labels("ok")); got != ok0+1 {
+		t.Errorf("ok = %v, want %v", got, ok0+1)
+	}
+	if got := metricstest.Value(t, "x402_dependency_duration_seconds", labels("error")); got != err0+1 {
+		t.Errorf("error = %v, want %v", got, err0+1)
 	}
 }

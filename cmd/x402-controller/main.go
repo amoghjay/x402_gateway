@@ -27,11 +27,13 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
 	"github.com/amoghjay/x402_gateway/internal/buildinfo"
 	"github.com/amoghjay/x402_gateway/internal/controller"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
@@ -90,6 +92,11 @@ func run(log *slog.Logger, healthAddr, metricsAddr string, leaderElect bool, pri
 		}
 		profiles = append(profiles, p)
 	}
+
+	// controller-runtime serves its own registry (reconciles, errors, work queue); ours adds
+	// the build and the Platform fetches to it.
+	ctrlmetrics.Registry.MustRegister(metrics.BuildInfo, metrics.PlatformFetches)
+	metrics.SetBuildInfo(buildinfo.Version, "controller")
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {

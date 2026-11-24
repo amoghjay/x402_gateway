@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/amoghjay/x402_gateway/internal/metrics/metricstest"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 )
 
@@ -258,5 +259,22 @@ func TestAssetMustBeTheNetworksToken(t *testing.T) {
 		if _, err := Parse(data, radius.Testnet, radius.BaseSepolia); err == nil || !strings.Contains(err.Error(), "is supported on") {
 			t.Errorf("%s: err = %v", name, err)
 		}
+	}
+}
+
+// The table in force is visible as metrics: how many routes of each kind, and when it
+// was loaded.
+func TestStoreSetRecordsTheTable(t *testing.T) {
+	p, err := Parse(example(t), radius.Testnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore()
+	s.Set(p)
+	if got := metricstest.Value(t, "x402_price_table_routes", map[string]string{"kind": "priced"}); got != float64(p.Len()) {
+		t.Errorf("priced routes = %v, want %d", got, p.Len())
+	}
+	if got := metricstest.Value(t, "x402_price_table_last_load_timestamp_seconds", map[string]string{}); got == 0 {
+		t.Error("load time not recorded")
 	}
 }

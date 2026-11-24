@@ -30,6 +30,7 @@ import (
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
 	"github.com/amoghjay/x402_gateway/internal/x402"
@@ -166,6 +167,7 @@ func (s *Settler) claim(ctx context.Context) {
 			return
 		}
 		for _, msg := range msgs {
+			metrics.SettlerOutcome("", string(Claimed))
 			s.Log.Info("claimed an idle job", "outcome", Claimed, "id", msg.ID)
 			s.handle(ctx, msg)
 		}
@@ -255,6 +257,7 @@ func (s *Settler) handle(ctx context.Context, msg redis.XMessage) {
 		return
 	}
 	// Uncertain: leave it pending; claim() brings it back after MinIdle.
+	metrics.SettlerOutcome(job.Network, string(SettleUncertain))
 	log.Warn("settle uncertain; left pending for a retry", "outcome", SettleUncertain, "err", errString(err))
 }
 
@@ -279,6 +282,7 @@ func (s *Settler) usedOnChain(ctx context.Context, rpc *radius.RPC, network stri
 
 // done releases the in-flight amount and acknowledges the job: its outcome is known.
 func (s *Settler) done(ctx context.Context, log *slog.Logger, msg redis.XMessage, job *reserve.Job, o Outcome, kv ...any) {
+	metrics.SettlerOutcome(network(job), string(o))
 	s.release(ctx, log, job)
 	if err := s.Redis.XAck(ctx, reserve.Stream, s.group(), msg.ID).Err(); err != nil {
 		// Not acknowledged: it comes back through claim(), settles again, and the chain
@@ -309,7 +313,17 @@ func (s *Settler) dead(ctx context.Context, log *slog.Logger, msg redis.XMessage
 	if err := s.Redis.XAck(ctx, reserve.Stream, s.group(), msg.ID).Err(); err != nil {
 		log.Error("ack failed after dead-lettering", "err", err)
 	}
+	metrics.SettlerOutcome(network(job), string(o))
 	log.Error("dead-lettered: the seller is not paid", "outcome", o, "why", why)
+}
+
+// network is a job's network for the outcome metric; "" (counted as unknown) when the job
+// could not be read.
+func network(job *reserve.Job) string {
+	if job == nil {
+		return ""
+	}
+	return job.Network
 }
 
 // release returns the job's amount to the payer's in-flight sum.

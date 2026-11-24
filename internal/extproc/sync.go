@@ -166,7 +166,7 @@ func (s *Server) settleHeld(ctx context.Context, code int, st *request) *extproc
 // releaseHeld lets the held response go, with the receipt.
 func (s *Server) releaseHeld(st *request, code int, tx string, d Decision, ms int64) *extprocv3.ProcessingResponse {
 	entry, id := st.entry, paymentID(st.res)
-	st.settled = true
+	st.settled, st.decision = true, d
 	s.release(st, d) // the transfer is on chain: the in-flight amount has done its job
 	st.log.Info("settled; released", "decision", d, "paymentId", id, "tx", tx, "status", code, "ms", ms)
 	set := []string{"cache-control", "private, no-store"} // a shared cache must never resell a paid response
@@ -194,6 +194,7 @@ func (s *Server) withhold(st *request, reason string, d Decision, cause error, m
 		reason = x402.ReasonUnexpectedSettle
 	}
 	s.release(st, d)
+	st.reason = reason
 	pw := st.pw
 	pw.Refused = reason
 	resp, err := paywall.Render(st.entry, pw)
