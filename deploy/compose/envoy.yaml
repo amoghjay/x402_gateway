@@ -1,0 +1,104 @@
+# Envoy in front of the API, with the x402 filter on every route but /anything/free.
+#
+# Each route has a name: that name is what Envoy sends the filter as xds.route_name, and
+# what the price table is keyed by (prices.json in compose.yaml). A route the table does
+# not list is refused with a 503, so a name that does not match (a typo) never serves free.
+#
+# __UPSTREAM_HOST__ and __UPSTREAM_PORT__ are filled in from .env when the container starts
+# (compose.yaml), so pointing the gate at your own API is two lines in .env.
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 } # inside the container only
+
+static_resources:
+  listeners:
+    - name: http
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                # The client's address is the connection's: what source.address (below)
+                # carries to the filter for a Platform policy's per-IP limits.
+                use_remote_address: true
+                route_config:
+                  name: gate
+                  virtual_hosts:
+                    - name: api
+                      domains: ["*"]
+                      routes:
+                        # Free: the filter is not called at all.
+                        - name: free
+                          match: { path_separated_prefix: /anything/free }
+                          route: { cluster: upstream }
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_proc:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                              disabled: true
+                        # Priced in prices.json: a 402 until paid.
+                        - name: paid
+                          match: { path_separated_prefix: /anything/paid }
+                          route: { cluster: upstream }
+                        # Governed by a Radius Platform project with compose.platform.yaml;
+                        # without it, not in the table, so refused like everything below.
+                        - name: platform
+                          match: { path_separated_prefix: /anything/platform }
+                          route: { cluster: upstream }
+                        # Everything else: not in the table, so the filter answers 503.
+                        - name: unlisted
+                          match: { prefix: / }
+                          route: { cluster: upstream }
+                http_filters:
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      grpc_service:
+                        envoy_grpc: { cluster_name: x402_filter }
+                        timeout: 10s
+                      # A filter that is down or slow is a 503, never a free request.
+                      failure_mode_allow: false
+                      status_on_error: { code: ServiceUnavailable }
+                      # Long enough to hold a response while its payment settles (Sync).
+                      message_timeout: 10s
+                      request_attributes: [xds.route_name, source.address]
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: NONE
+                        response_body_mode: NONE
+                        request_trailer_mode: SKIP
+                        response_trailer_mode: SKIP
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: upstream
+      type: STRICT_DNS
+      connect_timeout: 2s
+      load_assignment:
+        cluster_name: upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: __UPSTREAM_HOST__, port_value: __UPSTREAM_PORT__ }
+    # The filter speaks gRPC, so this cluster is HTTP/2.
+    - name: x402_filter
+      type: STRICT_DNS
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: x402_filter
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: filter, port_value: 9002 }

@@ -1,0 +1,79 @@
+# The x402 gate without Kubernetes: Envoy in front of an API, the filter it asks about
+# every request, Redis for the state the filter's replicas share, and the settler that
+# resolves payments whose outcome was not confirmed. See README.md.
+#
+#   cp .env.example .env    # set PAY_TO
+#   docker compose up --build
+name: x402-gate
+
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.40.2
+    ports: ["8080:8080"]
+    environment:
+      UPSTREAM_HOST: ${UPSTREAM_HOST:-httpbin}
+      UPSTREAM_PORT: ${UPSTREAM_PORT:-8080}
+    volumes: ["./envoy.yaml:/etc/x402/envoy.yaml:ro"]
+    # Fill the upstream in from .env, then run Envoy.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        sed -e "s/__UPSTREAM_HOST__/$$UPSTREAM_HOST/" -e "s/__UPSTREAM_PORT__/$$UPSTREAM_PORT/"
+        /etc/x402/envoy.yaml > /tmp/envoy.yaml && exec envoy -c /tmp/envoy.yaml --log-level warn
+    depends_on: [filter]
+
+  filter:
+    build: { context: ../.., args: { BINARY: x402-filter } }
+    image: x402-filter:local
+    command:
+      - -prices-dir=/etc/x402/prices # standalone: keys are route names, unlisted routes refused
+      - -redis=redis:6379
+      - -networks=testnet
+    configs:
+      - source: prices
+        target: /etc/x402/prices/prices.json
+    ports: ["127.0.0.1:9090:9090"] # Prometheus /metrics
+    depends_on: [redis]
+
+  settler:
+    build: { context: ../.., args: { BINARY: x402-settler } }
+    image: x402-settler:local
+    command: [-redis=redis:6379, -networks=testnet]
+    depends_on: [redis]
+
+  redis:
+    image: redis:8.10.2-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis:/data]
+
+  # The demo API: it echoes each request, including the x-x402-payer header the filter
+  # adds to a paid one. Replace it with yours through UPSTREAM_HOST and UPSTREAM_PORT.
+  httpbin:
+    image: mccutchen/go-httpbin:2.26.0
+
+# The price table. Keys are Envoy route names (envoy.yaml); this prices the route
+# "paid" at 0.001 SBC on Radius testnet, paid to PAY_TO, settled before the response is
+# released (Sync). Check a table with: docker compose run --rm filter validate /etc/x402/prices
+configs:
+  prices:
+    content: |
+      {
+        "schemaVersion": 1,
+        "routes": {
+          "paid": {
+            "network": "eip155:72344",
+            "price": "1000",
+            "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+            "payTo": "${PAY_TO:?set PAY_TO in .env to the wallet that receives payments}",
+            "assetTransferMethod": "eip3009",
+            "maxTimeoutSeconds": 300,
+            "failureMode": "Closed",
+            "captureMode": "Sync",
+            "description": "One echo from httpbin",
+            "mimeType": "application/json"
+          }
+        }
+      }
+
+volumes:
+  redis: {}

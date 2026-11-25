@@ -31,7 +31,28 @@ mainnet waits on a soak, see [ROADMAP.md](ROADMAP.md).
 | `kubectl delete` the policy → free | ≤ 0.21 s |
 | settler killed mid-queue | the replacement re-drives the queue; one orphaned job that had settled was mis-filed as unpaid, [fixed](https://github.com/amoghjay/x402_gateway/pull/50) |
 
-## Try it
+## Try it on your laptop
+
+Docker with Compose, and Node 22 for `radius-cli`. No cluster, no account: Envoy, the
+filter, Redis, the settler and a demo API, from [`deploy/compose/`](deploy/compose/README.md).
+
+```bash
+cd deploy/compose && cp .env.example .env     # set PAY_TO to a wallet you control
+docker compose up --build
+curl -i localhost:8080/anything/paid          # 402: 0.001 SBC on Radius testnet
+
+npx radius-cli@0.8.0 --network testnet wallet new
+npx radius-cli@0.8.0 --network testnet wallet faucet
+npx radius-cli@0.8.0 --network testnet wallet pay get 'http://localhost:8080/anything/paid' --threshold 0.001   # 200
+
+curl -s localhost:9090/metrics | grep 'phase_duration_seconds_sum.*route="paid"'   # what the gate added, by phase
+```
+
+Pointing it at your own API is two lines in `.env` and a route per price; the
+[compose README](deploy/compose/README.md#use-it-with-your-api) has the steps, and how to
+enforce a Radius Platform project's policy instead of fixed prices.
+
+## Try the live gateway
 
 The demo route prices [httpbin](https://httpbin.org) at 0.001 testnet SBC. The cluster
 runs on a personal GCP project and may be paused, so if the hostname doesn't answer,
@@ -50,7 +71,8 @@ tools/demo/walkthrough.sh                            # the five-minute walkthrou
 ```
 
 The 402 is plain x402 V2, so any V2 client with EIP-3009 support should be able to
-pay it. So far only our own buyer has been tested against it; `radius-cli wallet pay` is next.
+pay it. Tested so far: our own buyer and `radius-cli` 0.8.0; the reference x402 clients
+are next.
 
 ## Why the data plane forces the design
 
@@ -186,6 +208,7 @@ fast lane runs end to end. The argument and its evidence are in
 
 ## Run it yourself
 
+Without Kubernetes: [`deploy/compose/`](deploy/compose/README.md), as above. On GKE:
 [`deploy/terraform/`](deploy/terraform/README.md) builds the GKE project (zonal cluster,
 spot workload pool, Artifact Registry, keyless CI push).
 [`deploy/k8s/`](deploy/k8s/README.md) has the apply order: Envoy Gateway v1.9.2 by Helm,
@@ -198,7 +221,7 @@ then our CRD, Redis, the filter, the controller, the settler and the demo.
 | `api/v1alpha1/` | the `PaymentPolicy` type; the CRD is generated into `deploy/k8s/crd/` |
 | `cmd/` | `x402-filter`, `x402-controller`, `x402-settler`, and `x402-buyer` (a test client) |
 | `internal/` | the ext_proc server, the local verifier, the Redis reserve and settle stream, the controller ([map](docs/architecture.md#repository-map)) |
-| `deploy/` | Terraform for GKE, Kubernetes manifests |
+| `deploy/` | Terraform for GKE, Kubernetes manifests, and `compose/`: the gate with Docker Compose and a plain Envoy |
 | `docs/` | [architecture](docs/architecture.md), the [request-path budget](docs/design/request-path-budget.md) and its measurements, design notes |
 | `tools/` | the demo walkthrough, [drill scripts](tools/drills/README.md), latency probes, GKE pause/resume |
 | `legacy/llm-gateway/` | where this started: an app-level pay-per-prompt gateway and the [audit findings](legacy/llm-gateway/REPORT.md) that moved enforcement into the data plane |
