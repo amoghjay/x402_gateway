@@ -358,7 +358,7 @@ func (r *Reconciler) project(ctx context.Context) error {
 		routes[routeKey(pp)] = rt
 	}
 
-	table, err := tableJSON(routes, blocked, platformRoutes, r.Networks)
+	table, err := tableJSON(routes, blocked, platformRoutes, pricing.KeysHTTPRoute, r.Networks)
 	if err != nil {
 		// Each route passed validate on its own, so this cannot happen; if it does, the
 		// last good table stays in place and the error surfaces in the log.

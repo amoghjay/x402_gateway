@@ -11,6 +11,10 @@
 // A PaymentPolicy may instead name a Radius Platform project (spec.platform). The leader
 // then polls that project's compiled policy and stores it beside the price table; the
 // controller is the only part of the gate that talks to the Platform.
+//
+// `x402-controller sync` does the Platform half without a cluster: it keeps one project's
+// compiled policy in a directory that a filter reads with -prices-dir (internal/controller
+// Standalone).
 package main
 
 import (
@@ -53,6 +57,9 @@ func main() {
 	platformURL := flag.String("platform-api-url", platform.DefaultBaseURL, "the Radius Platform API that spec.platform projects are read from")
 	pollInterval := flag.Duration("platform-poll-interval", controller.DefaultPollInterval, "how often each Radius Platform project's compiled policy is fetched (±10 %); at least 1s")
 	debug := flag.Bool("debug", false, "debug logging")
+	if len(os.Args) > 1 && os.Args[1] == "sync" {
+		os.Exit(runSync(os.Args[2:], os.Stderr))
+	}
 	flag.Parse()
 
 	if *version {

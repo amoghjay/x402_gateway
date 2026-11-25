@@ -89,7 +89,7 @@ func validate(pp *v1alpha1.PaymentPolicy, networks []radius.Profile) error {
 	if err != nil {
 		return err
 	}
-	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, nil, nil, networks)
+	_, err = tableJSON(map[string]pricing.Route{routeKey(pp): r}, nil, nil, pricing.KeysHTTPRoute, networks)
 	return err
 }
 
@@ -103,7 +103,7 @@ func noPolicy(p *v1alpha1.Platform) string {
 
 // tableJSON is the price table: the accepted routes priced, and the routes whose policy
 // is invalid blocked. Validated as the filter would; any error refuses it.
-func tableJSON(routes map[string]pricing.Route, blocked map[string]string, platform map[string]pricing.PlatformRoute, networks []radius.Profile) ([]byte, error) {
+func tableJSON(routes map[string]pricing.Route, blocked map[string]string, platform map[string]pricing.PlatformRoute, keys pricing.KeyStyle, networks []radius.Profile) ([]byte, error) {
 	if routes == nil {
 		routes = map[string]pricing.Route{} // "routes": {} rather than null
 	}
@@ -117,7 +117,7 @@ func tableJSON(routes map[string]pricing.Route, blocked map[string]string, platf
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pricing.Parse(data, networks...); err != nil {
+	if _, err := pricing.ParseKeys(data, keys, networks...); err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
