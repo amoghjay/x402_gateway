@@ -1,5 +1,6 @@
 // Command x402-filter is the Envoy ext_proc filter that enforces x402 payments in the
-// data plane. It prices requests from the table it watches in one ConfigMap
+// data plane. It prices requests from the table it watches in one ConfigMap, or, with
+// -prices-dir and no Kubernetes at all, from a directory of the same files
 // (internal/pricing), answers unpaid ones with the paywall (internal/paywall), and
 // serves paid ones after verifying the signature locally, reading the payer's balance
 // through a Redis cache (internal/balance) and reserving in Redis (internal/reserve).
@@ -12,6 +13,11 @@
 // answers. Two names, so a missing ConfigMap or a Redis outage leaves the pod alive and
 // unready instead of restarting it. Never the facilitator or the RPC: only Sync routes
 // call the first, and the second has a cache in front of it.
+//
+// Standalone (-prices-dir): table keys are Envoy's own route names (-route-keys=name), and
+// a route missing from the table is refused with a 503 (-unpriced=refuse), since one
+// filter then sits in front of every route and a typo must not serve free.
+// `x402-filter validate <dir | prices.json>` checks a table without starting anything.
 //
 // Prometheus metrics are served on a separate HTTP port, -metrics-addr (:9090), so a
 // scrape never shares a connection with Envoy's streams.
@@ -59,6 +65,8 @@ const readinessService = "readiness"
 
 type config struct {
 	listen, namespace, configMap, networks string
+	pricesDir, routeKeys, unpriced         string // pricesDir "" = the ConfigMap
+	pricesPoll                             time.Duration
 	metricsAddr                            string // "" = no metrics listener
 	drain, delay                           time.Duration
 	redis                                  string // "" = payments off
@@ -79,6 +87,10 @@ func main() {
 	flag.DurationVar(&c.delay, "delay", 0, "drills only: hold each request this long before answering")
 	flag.StringVar(&c.namespace, "prices-namespace", os.Getenv("POD_NAMESPACE"), "namespace of the price-table ConfigMap (default $POD_NAMESPACE)")
 	flag.StringVar(&c.configMap, "prices-configmap", "x402-prices", "name of the price-table ConfigMap")
+	flag.StringVar(&c.pricesDir, "prices-dir", "", "standalone: read the price table from this directory (prices.json, and agents.json and policy-<project>.json for Radius Platform routes) instead of a ConfigMap; no Kubernetes is used")
+	flag.DurationVar(&c.pricesPoll, "prices-poll", pricing.DefaultDirPoll, "standalone: how often -prices-dir is read; SIGHUP reads it at once")
+	flag.StringVar(&c.routeKeys, "route-keys", "", "how Envoy route names map to table keys: httproute (Envoy Gateway's names) or name (the route name itself); default httproute with the ConfigMap, name with -prices-dir")
+	flag.StringVar(&c.unpriced, "unpriced", "", "a route missing from the table: serve (free) or refuse (503); default serve with the ConfigMap, refuse with -prices-dir")
 	flag.StringVar(&c.networks, "networks", "testnet", "comma-separated networks routes may charge on (testnet, mainnet)")
 	flag.StringVar(&c.redis, "redis", "", "Redis address for the replay guard, in-flight sums, balance cache and settle stream; empty = payments off, every priced request gets the 402")
 	flag.StringVar(&c.rpcURL, "rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for balance reads (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
@@ -91,6 +103,9 @@ func main() {
 	flag.DurationVar(&c.lastKnown, "balance-last-known", balance.DefaultLastKnown, "a cached balance up to this old is served when a refresh overruns the deadline")
 	flag.DurationVar(&c.keepalive, "rpc-keepalive", 20*time.Second, "how often the RPC connection is exercised so a balance read never pays for a new connection")
 	debug := flag.Bool("debug", false, "log every request's headers (credentials redacted)")
+	if len(os.Args) > 1 && os.Args[1] == "validate" {
+		os.Exit(validate(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	flag.Parse()
 
 	if *version {
@@ -110,16 +125,13 @@ func main() {
 }
 
 func run(log *slog.Logger, c config) error {
-	var nets []radius.Profile
-	for _, n := range strings.Split(c.networks, ",") {
-		p, err := radius.Lookup(strings.TrimSpace(n))
-		if err != nil {
-			return err
-		}
-		nets = append(nets, p)
+	nets, err := parseNetworks(c.networks)
+	if err != nil {
+		return err
 	}
-	if c.namespace == "" {
-		return fmt.Errorf("no namespace for the price table: set -prices-namespace or POD_NAMESPACE")
+	keys, refuseUnpriced, err := c.resolve()
+	if err != nil {
+		return err
 	}
 	if c.rpcURL != "" && len(nets) != 1 {
 		return fmt.Errorf("-rpc-url names one endpoint, but %d networks are configured", len(nets))
@@ -134,15 +146,6 @@ func run(log *slog.Logger, c config) error {
 	if c.settleTimeout >= pricing.SyncMessageTimeout {
 		return fmt.Errorf("-settle-timeout %s must be under Envoy's messageTimeout for Sync routes (%s)", c.settleTimeout, pricing.SyncMessageTimeout)
 	}
-	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("kubernetes config: %w", err)
-	}
-	client, err := corev1client.NewForConfig(cfg)
-	if err != nil {
-		return err
-	}
-
 	lis, err := net.Listen("tcp", c.listen)
 	if err != nil {
 		return err
@@ -159,14 +162,12 @@ func run(log *slog.Logger, c config) error {
 	}
 
 	prices := pricing.NewStore()
-	watcher := &pricing.Watcher{Client: client, Namespace: c.namespace, Name: c.configMap, Networks: nets, Store: prices, Log: log}
-	go func() {
-		if err := watcher.Run(ctx); err != nil {
-			log.Error("price table watch stopped", "err", err)
-		}
-	}()
+	source, err := c.watchPrices(ctx, log, nets, keys, prices)
+	if err != nil {
+		return err
+	}
 
-	server := extproc.NewServer(log, c.delay, prices)
+	server := extproc.NewServer(log, c.delay, prices).WithRouteKeys(keys).RefuseUnpriced(refuseUnpriced)
 	var redisClient *redis.Client
 	if c.redis != "" {
 		redisClient = rdb.RequestPath(c.redis)
@@ -219,7 +220,7 @@ func run(log *slog.Logger, c config) error {
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(lis) }()
-	log.Info("listening", "addr", lis.Addr().String(), "prices", c.namespace+"/"+c.configMap, "networks", c.networks,
+	log.Info("listening", "addr", lis.Addr().String(), "prices", source, "routeKeys", keys.String(), "refuseUnpriced", refuseUnpriced, "networks", c.networks,
 		"redis", c.redis, "deadline", c.deadline.String(), "facilitatorVerify", c.facilitatorVerify)
 	if c.delay > 0 {
 		log.Warn("drill mode: every request is held before it is answered", "delay", c.delay.String())
@@ -243,6 +244,78 @@ func run(log *slog.Logger, c config) error {
 		srv.Stop()
 	}
 	return nil
+}
+
+// parseNetworks reads -networks: profile names, comma-separated.
+func parseNetworks(v string) ([]radius.Profile, error) {
+	var nets []radius.Profile
+	for _, n := range strings.Split(v, ",") {
+		p, err := radius.Lookup(strings.TrimSpace(n))
+		if err != nil {
+			return nil, err
+		}
+		nets = append(nets, p)
+	}
+	return nets, nil
+}
+
+// resolve fills in the defaults that depend on the mode: standalone (-prices-dir) keys
+// tables by route name and refuses unpriced routes; the ConfigMap mode keys by HTTPRoute,
+// serves them, and needs a namespace.
+func (c config) resolve() (pricing.KeyStyle, bool, error) {
+	standalone := c.pricesDir != ""
+	if !standalone && c.namespace == "" {
+		return 0, false, fmt.Errorf("no namespace for the price table: set -prices-namespace or POD_NAMESPACE, or use -prices-dir")
+	}
+	keys := pricing.KeysHTTPRoute
+	if standalone {
+		keys = pricing.KeysName
+	}
+	if c.routeKeys != "" {
+		k, err := pricing.ParseKeyStyle(c.routeKeys)
+		if err != nil {
+			return 0, false, fmt.Errorf("-route-keys: %w", err)
+		}
+		keys = k
+	}
+	refuse := standalone
+	switch c.unpriced {
+	case "":
+	case "serve":
+		refuse = false
+	case "refuse":
+		refuse = true
+	default:
+		return 0, false, fmt.Errorf("-unpriced %q: want serve or refuse", c.unpriced)
+	}
+	return keys, refuse, nil
+}
+
+// watchPrices starts keeping prices in step with the table's source, and names it for the
+// log: the directory, with no Kubernetes; or the ConfigMap, through the API server.
+func (c config) watchPrices(ctx context.Context, log *slog.Logger, nets []radius.Profile, keys pricing.KeyStyle, prices *pricing.Store) (string, error) {
+	if c.pricesDir != "" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		w := &pricing.DirWatcher{Dir: c.pricesDir, Keys: keys, Networks: nets, Store: prices, Log: log, Every: c.pricesPoll, Reload: hup}
+		go func() { _ = w.Run(ctx) }()
+		return c.pricesDir, nil
+	}
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return "", fmt.Errorf("kubernetes config (use -prices-dir to run without Kubernetes): %w", err)
+	}
+	client, err := corev1client.NewForConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	w := &pricing.Watcher{Client: client, Namespace: c.namespace, Name: c.configMap, Networks: nets, Store: prices, Log: log}
+	go func() {
+		if err := w.Run(ctx); err != nil {
+			log.Error("price table watch stopped", "err", err)
+		}
+	}()
+	return c.namespace + "/" + c.configMap, nil
 }
 
 // readiness keeps the "readiness" health status in step with what the filter needs to
