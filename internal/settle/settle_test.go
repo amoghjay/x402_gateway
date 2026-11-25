@@ -21,6 +21,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/buyer"
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/metrics/metricstest"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/rdb"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
@@ -170,6 +171,8 @@ func (f *fixture) outcome(o Outcome) {
 
 func TestSettled(t *testing.T) {
 	f := setup(t)
+	settled := map[string]string{"network": radius.Testnet.Network(), "outcome": string(Settled)}
+	before := metricstest.Value(t, "x402_settler_outcomes_total", settled)
 	f.capture(5 * time.Minute)
 	if f.inflight() != "1000" {
 		t.Fatal("not reserved")
@@ -179,6 +182,9 @@ func TestSettled(t *testing.T) {
 		t.Errorf("pending=%d inflight=%q dead=%d, want 0 / released / 0", f.pending(), f.inflight(), f.dead())
 	}
 	f.outcome(Settled)
+	if got := metricstest.Value(t, "x402_settler_outcomes_total", settled); got != before+1 {
+		t.Errorf("settled outcomes = %v, want %v", got, before+1)
+	}
 	if !strings.Contains(f.logs.String(), radius.Testnet.TxURL("0xabc")) {
 		t.Error("explorer link not logged")
 	}

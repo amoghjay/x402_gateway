@@ -59,6 +59,7 @@ spec:
             - name: GOMEMLIMIT
               value: 48MiB
           ports:
+            # /healthz, /readyz and Prometheus /metrics share this port.
             - name: health
               containerPort: 8081
           readinessProbe:

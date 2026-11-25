@@ -24,6 +24,7 @@ import (
 
 	"github.com/amoghjay/x402_gateway/internal/buildinfo"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/rdb"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
@@ -35,7 +36,7 @@ func main() {
 	redisAddr := flag.String("redis", "", "Redis address (required): the settle stream and the in-flight sums")
 	networks := flag.String("networks", "testnet", "comma-separated networks to settle on (testnet, mainnet)")
 	consumer := flag.String("consumer", os.Getenv("POD_NAME"), "this replica's consumer name (default $POD_NAME, then the hostname)")
-	healthAddr := flag.String("health-addr", ":8081", "HTTP address for /healthz and /readyz")
+	healthAddr := flag.String("health-addr", ":8081", "HTTP address for /healthz, /readyz and Prometheus /metrics")
 	facilitatorURL := flag.String("facilitator-url", os.Getenv("RADIUS_FACILITATOR_URL"), "facilitator base URL (default $RADIUS_FACILITATOR_URL, then the network's)")
 	rpcURL := flag.String("rpc-url", os.Getenv("RADIUS_RPC_URL"), "JSON-RPC URL for authorizationState (default $RADIUS_RPC_URL, then the network's public endpoint); a keyed URL is a secret and is never logged")
 	settleTimeout := flag.Duration("settle-timeout", settle.DefaultSettleTimeout, "per /settle call")
@@ -101,7 +102,9 @@ func run(log *slog.Logger, redisAddr, networks, consumer, healthAddr, facilitato
 		Log: log, Consumer: consumer, SettleTimeout: settleTimeout, MinIdle: minIdle,
 	}
 
+	metrics.SetBuildInfo(buildinfo.Version, "settler")
 	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := rdb.Ping(r.Context(), client, 500*time.Millisecond); err != nil {

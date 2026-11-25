@@ -15,6 +15,7 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	compiledpolicy "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/radius"
 	"github.com/amoghjay/x402_gateway/internal/webbotauth"
@@ -90,12 +91,14 @@ func (w *Watcher) apply(obj any) {
 	data, ok := cm.Data[ConfigMapKey]
 	if !ok {
 		log.Error("price table rejected; serving the last good table", "err", "no "+ConfigMapKey+" key", "loaded", w.Store.Load() != nil)
+		metrics.PriceTableRejected()
 		w.done(false)
 		return
 	}
 	p, err := Parse([]byte(data), w.Networks...)
 	if p == nil {
 		log.Error("price table rejected; serving the last good table", "err", err, "loaded", w.Store.Load() != nil)
+		metrics.PriceTableRejected()
 		w.done(false)
 		return
 	}

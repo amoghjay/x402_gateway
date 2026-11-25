@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/amoghjay/x402_gateway/api/v1alpha1"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/platform"
 	compiled "github.com/amoghjay/x402_gateway/internal/policy"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
@@ -270,16 +271,20 @@ func (p *Poller) poll(ctx context.Context, id string, s platformSettings) bool {
 	log := p.Log.With("project", id)
 	switch {
 	case err != nil:
+		metrics.PlatformFetches.WithLabelValues("error").Inc()
 		pr.err, pr.reason = err.Error(), reason
 		log.Error("compiled policy fetch failed; keeping the policy in force", "err", err, "version", pr.version)
 	case res.NotModified:
+		metrics.PlatformFetches.WithLabelValues("unchanged").Inc()
 		pr.err, pr.reason = "", ""
 		log.Debug("compiled policy unchanged", "version", pr.version)
 	case res.Policy.Version > pr.version:
+		metrics.PlatformFetches.WithLabelValues("new_version").Inc()
 		pr.version, pr.body, pr.warnings, pr.origins = res.Policy.Version, res.Body, warnings(res.Policy), signatureOrigins(res.Policy)
 		pr.err, pr.reason = "", ""
 		log.Info("compiled policy loaded", "version", pr.version, "rules", len(res.Policy.Rules), "schema", res.Policy.Schema, "warnings", pr.warnings)
 	default:
+		metrics.PlatformFetches.WithLabelValues("unchanged").Inc()
 		pr.err, pr.reason = "", ""
 		if res.Policy.Version < pr.version {
 			log.Warn("compiled policy ignored: older than the one in force", "offered", res.Policy.Version, "version", pr.version)

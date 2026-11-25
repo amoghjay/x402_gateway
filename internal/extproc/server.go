@@ -47,6 +47,7 @@ import (
 	"github.com/amoghjay/x402_gateway/internal/counter"
 	"github.com/amoghjay/x402_gateway/internal/evm"
 	"github.com/amoghjay/x402_gateway/internal/facilitator"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/paywall"
 	"github.com/amoghjay/x402_gateway/internal/pricing"
 	"github.com/amoghjay/x402_gateway/internal/radius"
@@ -103,6 +104,7 @@ const (
 	ReleasedStreamEnd        Decision = "released_stream_end"        // stream ended without a response phase: reservation released
 	CaptureFailed            Decision = "capture_failed"             // Async, response chargeable but the job could not be queued: served unpaid
 	Settled                  Decision = "settled"                    // Sync, response chargeable: settled through the facilitator, then released
+	SettledNotDelivered      Decision = "settled_not_delivered"      // Sync: settled, but Envoy went away before the response was handed back; the record stays for a refund
 	SettledOnChain           Decision = "settled_on_chain"           // Sync: /settle failed or was unclear, but the chain says the transfer happened; released
 	SettleRefused            Decision = "settle_refused"             // Sync: 402 in place of the response; the settlement was refused, nothing charged
 	SettlementUnknown        Decision = "settlement_unknown"         // Sync: 503 in place of the response; the settlement's outcome is not known
@@ -115,12 +117,17 @@ const (
 	PaywallError             Decision = "paywall_error"              // 500: the 402 could not be built
 )
 
-// redacted headers are logged as "[redacted]": credentials have no place in logs.
+// redacted headers are logged as "[redacted]": credentials and payments have no place in
+// logs. x-payment is x402 v1's payment header; signature and signature-input are a bot's
+// Web Bot Auth credentials (RFC 9421).
 var redacted = map[string]bool{
 	"authorization":     true,
 	"cookie":            true,
 	"set-cookie":        true,
 	"payment-signature": true,
+	"x-payment":         true,
+	"signature":         true,
+	"signature-input":   true,
 }
 
 // Payments is what the paid path needs. Nil on a Server means payments are not wired
@@ -213,6 +220,9 @@ func (s *Server) WithPayments(p *Payments) *Server {
 // phase and for the release on the way out.
 type request struct {
 	log      *slog.Logger
+	route    string   // the price-table key, for metrics; "" until identified
+	decision Decision // a "continue" answer's decision, for metrics; an immediate answer carries its own
+	reason   string   // the 402 reason or the rule's code behind the decision, for metrics
 	entry    *pricing.Entry
 	payment  string              // the PAYMENT-SIGNATURE value, as received, for the settlement job
 	pp       x402.PaymentPayload // the same, decoded, for a Sync route's /settle
@@ -243,18 +253,23 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return err
 		}
 
+		t0 := time.Now()
 		resp, err := s.handle(stream.Context(), req, st)
 		if err != nil {
 			return err
 		}
+		phase, d := phaseOf(req), st.decided(resp)
 		if err := stream.Send(resp); err != nil {
 			if st.settled {
 				// Paid for and not delivered: Envoy (or the client) went away while the
 				// response was held. The record stays, so the settler lists it for a refund.
-				st.log.Error("settled, but the response could not be handed back to Envoy", "paymentId", st.paymentID(), "err", err)
+				st.log.Error("settled, but the response could not be handed back to Envoy", "decision", SettledNotDelivered, "paymentId", st.paymentID(), "err", err)
+				d = SettledNotDelivered
 			}
+			st.observe(phase, d, t0)
 			return err
 		}
+		st.observe(phase, d, t0)
 		if st.settled {
 			// Envoy has the paid response: delivered, so the record can go. Only now, so
 			// a crash between the settle and this point leaves it for the settler.
@@ -268,6 +283,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 func (s *Server) finish(st *request) {
 	if st.rsv != nil && !st.captured && !st.released && !st.unknown {
 		s.release(st, ReleasedStreamEnd)
+		metrics.Decision(st.routeLabel(), metrics.PhaseStreamEnd, string(ReleasedStreamEnd), "")
 	}
 }
 
@@ -310,7 +326,7 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 		return plain(http.StatusInternalServerError, "x402 filter: route not identified\n", NoRouteAttribute)
 	}
 	log = log.With("routeKey", key)
-	st.log = log
+	st.log, st.route = log, key
 	table := s.prices.Load()
 	if table == nil {
 		log.Error("no price table loaded", "decision", TableNotLoaded)
@@ -331,6 +347,7 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 		// the window while a PaymentPolicy is deleted (M4 removes the extension policy
 		// first, then the table entry). Nothing to charge, so let it through.
 		log.Warn("route is not in the price table; serving it free", "decision", Unpriced)
+		st.decision = Unpriced
 		return continueWith(nil)
 	}
 	st.entry = entry
@@ -386,12 +403,15 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 	switch {
 	case errors.Is(err, balance.ErrDeadline):
 		// The read goes on and fills the cache; the client's retry is a hit.
+		metrics.BalanceRead("deadline")
 		log.Warn("balance read overran the deadline; not charged", "decision", Deadline, "ms", time.Since(t0).Milliseconds())
 		return retryLater(Deadline)
 	case err != nil:
+		metrics.BalanceRead("error")
 		log.Error("balance read failed; not charged", "decision", DependencyUnavailable, "err", err)
 		return retryLater(DependencyUnavailable)
 	}
+	metrics.BalanceRead(string(bal.Source))
 
 	out, rsv, err := s.pay.Reserve.Reserve(ctx, res.Payer, res.Authorization.Nonce, entry.Price, bal.Value, res.Expires)
 	if err != nil {
@@ -413,6 +433,7 @@ func (s *Server) accept(ctx context.Context, st *request, pw paywall.Request, hd
 		}
 	}
 
+	st.decision = PaymentAccepted
 	log.Info("payment accepted", "decision", PaymentAccepted, "paymentId", paymentID(res), "amount", entry.Price.String(),
 		"balance", bal.Value.String(), "balanceSource", bal.Source, "inflight", rsv.Inflight.String(), "ms", time.Since(t0).Milliseconds())
 	// The signature never reaches the backend; the payer's identity does, in headers
@@ -453,6 +474,7 @@ func (s *Server) respond(ctx context.Context, h map[string]string, st *request) 
 		// Nothing was served (a backend error, or Envoy's own 502/503/504 after we
 		// continued): nobody is charged.
 		s.release(st, ReleasedNotServed)
+		st.decision = ReleasedNotServed
 		st.log.Info("not served; released", "decision", ReleasedNotServed, "status", code)
 		return continueResponse(nil)
 	}
@@ -479,6 +501,7 @@ func (s *Server) respond(ctx context.Context, h map[string]string, st *request) 
 		// The job is the only copy of the signed authorization; without it there is
 		// nothing to settle. Served, unpaid, and said so: the first correctness SLI.
 		s.release(st, CaptureFailed)
+		st.decision = CaptureFailed
 		st.log.Error("served but not captured: unpaid", "decision", CaptureFailed, "paymentId", id, "err", err)
 		return continueResponse(&extprocv3.HeaderMutation{SetHeaders: setHeaders("cache-control", "private, no-store")})
 	}
@@ -495,6 +518,7 @@ func (s *Server) respond(ctx context.Context, h map[string]string, st *request) 
 		st.log.Error("receipt header could not be built", "err", err) // served and captured; only the header is missing
 		return continueResponse(&extprocv3.HeaderMutation{SetHeaders: setHeaders("cache-control", "private, no-store")})
 	}
+	st.decision = Paid
 	st.log.Info("paid", "decision", Paid, "paymentId", id, "stream", streamID, "status", code)
 	// no-store overrides whatever the backend said: a shared cache must never resell a
 	// paid response to the next caller.
@@ -513,6 +537,7 @@ func (s *Server) release(st *request, why Decision) {
 	st.released = true
 	if err := s.pay.Reserve.Release(ctx, st.rsv.Payer, st.rsv.Amount); err != nil {
 		// The in-flight TTL (30 s) is the backstop: the payer is overcounted until then.
+		metrics.ReleaseFailed()
 		st.log.Warn("release failed; the in-flight TTL will clear it", "decision", why, "err", err)
 		return
 	}
@@ -548,6 +573,7 @@ func (s *Server) paywall(st *request, pw paywall.Request, d Decision) *extprocv3
 // its payment was turned down and how to pay again.
 func (s *Server) refuse(st *request, pw paywall.Request, reason string, d Decision, cause error) *extprocv3.ProcessingResponse {
 	pw.Refused = reason
+	st.reason = reason
 	resp, err := paywall.Render(st.entry, pw)
 	if err != nil {
 		st.log.Error("could not build the 402", "decision", PaywallError, "err", err)

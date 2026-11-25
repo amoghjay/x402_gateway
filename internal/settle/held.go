@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/amoghjay/x402_gateway/internal/evm"
+	"github.com/amoghjay/x402_gateway/internal/metrics"
 	"github.com/amoghjay/x402_gateway/internal/reserve"
 )
 
@@ -69,6 +70,7 @@ func (s *Settler) resolveHeld(ctx context.Context) {
 			if err != nil {
 				log.Error("could not record a held payment's outcome; asking again later", "err", err)
 			} else if done {
+				metrics.SettlerOutcome(h.Network, string(ChargedUnconfirmed))
 				log.Error("charged without a confirmed delivery: on the outcomes stream for a refund or redelivery",
 					"outcome", ChargedUnconfirmed, "stream", reserve.Outcomes, "heldAt", h.HeldAt.UTC().Format(time.RFC3339))
 			}
@@ -76,6 +78,7 @@ func (s *Settler) resolveHeld(ctx context.Context) {
 			if err := s.Reserve.Unhold(ctx, h.PaymentID); err != nil {
 				log.Warn("could not drop an expired held payment", "err", err)
 			} else {
+				metrics.SettlerOutcome(h.Network, string(HeldNotCharged))
 				log.Info("held payment expired unused: nobody was charged", "outcome", HeldNotCharged)
 			}
 		}

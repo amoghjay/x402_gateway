@@ -140,7 +140,7 @@ func (s *Server) respondRule(st *request, d policy.Decision, version uint64) *ex
 	switch d.Type {
 	case policy.TypeAllow:
 		// The limit headers go on the backend's response (§5), in the response phase.
-		st.ruleHeaders = d.Headers
+		st.ruleHeaders, st.decision = d.Headers, RuleAllowed
 		log.Info("allowed", "decision", RuleAllowed, "limitHeaders", len(d.Headers) > 0)
 		return continueWith(withoutPaymentHeaders())
 
@@ -156,6 +156,7 @@ func (s *Server) respondRule(st *request, d policy.Decision, version uint64) *ex
 		}
 		hdr.Set("Content-Type", "application/json")
 		hdr.Set("Cache-Control", "no-store")
+		st.reason = d.Code
 		log.Info("denied", "decision", decision, "status", d.Status, "code", d.Code)
 		return immediate(d.Status, hdr, append(body, '\n'), decision)
 

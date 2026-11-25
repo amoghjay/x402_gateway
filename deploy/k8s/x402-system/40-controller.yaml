@@ -134,6 +134,9 @@ spec:
           args:
             # The networks a PaymentPolicy may charge on; keep it the same as the filter's.
             - -networks=testnet,base-sepolia
+            # controller-runtime's metrics (reconciles, errors, work queue) plus the gate's
+            # build info and Radius Platform fetch counts. Off unless set.
+            - -metrics-addr=:8080
           env:
             # Where the price table, the grant and the Lease live: this namespace.
             - name: POD_NAMESPACE
@@ -150,6 +153,8 @@ spec:
           ports:
             - name: health
               containerPort: 8081
+            - name: metrics
+              containerPort: 8080
           readinessProbe:
             httpGet:
               path: /readyz

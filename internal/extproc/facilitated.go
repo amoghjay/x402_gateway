@@ -119,6 +119,7 @@ func (s *Server) acceptRemote(ctx context.Context, st *request, pw paywall.Reque
 
 	st.remote = &remotePayment{id: id.ID, payer: id.Payer, terms: o.req}
 	st.fac, st.pp, st.pw = fac, pp, pw
+	st.decision = PaymentAccepted
 	log.Info("payment accepted", "decision", PaymentAccepted, "amount", o.req.Amount, "asset", o.req.Asset, "method", o.req.TransferMethod(), "verifyMs", ms)
 	return continueWith(&extprocv3.HeaderMutation{
 		RemoveHeaders: []string{strings.ToLower(x402.HeaderPaymentSignature)},
@@ -144,6 +145,7 @@ func (s *Server) settleRemote(ctx context.Context, code int, st *request) *extpr
 	rp := st.remote
 	if !chargeable(code) {
 		// Nothing was served: nothing is settled. The claim stays, so the buyer signs again.
+		st.decision = ReleasedNotServed
 		st.log.Info("not served; not settled", "decision", ReleasedNotServed, "status", code)
 		return continueResponse(nil)
 	}
@@ -157,7 +159,7 @@ func (s *Server) settleRemote(ctx context.Context, code int, st *request) *extpr
 	ms := time.Since(t0).Milliseconds()
 
 	if err == nil && resp.Success {
-		st.settled = true
+		st.settled, st.decision = true, Settled
 		st.log.Info("settled; released", "decision", Settled, "tx", resp.Transaction, "status", code, "ms", ms)
 		set := []string{"cache-control", "private, no-store"}
 		receipt, rerr := x402.SettleResponse{
@@ -173,6 +175,7 @@ func (s *Server) settleRemote(ctx context.Context, code int, st *request) *extpr
 		if reason == "" {
 			reason = x402.ReasonUnexpectedSettle
 		}
+		st.reason = reason
 		pw := st.pw
 		pw.Refused = reason
 		r, perr := paywall.Render(st.entry, pw)
