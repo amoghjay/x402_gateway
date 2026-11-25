@@ -130,7 +130,7 @@ spec:
       containers:
         - name: controller
           # Built and pushed by CI from the merge commit (the tag is the commit).
-          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:1e991f217e78
+          image: us-central1-docker.pkg.dev/x402-envoy/x402/x402-controller:2d94971711d3
           args:
             # The networks a PaymentPolicy may charge on; keep it the same as the filter's.
             - -networks=testnet,base-sepolia
