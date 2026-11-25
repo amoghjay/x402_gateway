@@ -25,6 +25,7 @@ jobs:
     outputs:
       go: ${{ steps.filter.outputs.go }}
       terraform: ${{ steps.filter.outputs.terraform }}
+      compose: ${{ steps.filter.outputs.compose }}
     steps:
       - uses: actions/checkout@v4
       - id: filter
@@ -47,6 +48,42 @@ jobs:
             terraform:
               - "deploy/terraform/**"
               - ".github/workflows/ci.yml"
+            compose:
+              - "api/**"
+              - "cmd/**"
+              - "internal/**"
+              - "go.mod"
+              - "go.sum"
+              - "Dockerfile"
+              - "deploy/compose/**"
+              - ".github/workflows/ci.yml"
+
+  # The gate without Kubernetes, as the README runs it: Envoy, the filter, Redis, the
+  # settler and httpbin from deploy/compose, checked with smoke.sh. No money moves: the
+  # checks stop at the 402.
+  compose:
+    needs: changes
+    if: needs.changes.outputs.compose == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/compose
+    env:
+      PAY_TO: "0x000000000000000000000000000000000000dEaD"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Up
+        run: docker compose up -d --build
+      - name: Smoke
+        run: ./smoke.sh
+      - name: Validate the price table in the filter image
+        run: docker compose run --rm filter validate /etc/x402/prices
+      - name: Logs
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Down
+        if: always()
+        run: docker compose down -v
 
   go:
     needs: changes

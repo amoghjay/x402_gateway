@@ -1,0 +1,40 @@
+# A Radius Platform project's policy instead of the fixed price table:
+#
+#   docker compose -f compose.yaml -f compose.platform.yaml up --build
+#
+# `x402-controller sync` keeps the project's compiled policy in a volume, and the filter
+# reads that volume instead of compose.yaml's prices. The project governs the Envoy route
+# "platform" (/anything/platform/...); its rules (allow, deny, rate limits, free quotas,
+# charges) match paths inside it. Set PLATFORM_ORG, PLATFORM_PROJECT and PLATFORM_KEY_FILE
+# in .env.
+services:
+  sync:
+    build: { context: ../.., args: { BINARY: x402-controller } }
+    image: x402-controller:local
+    command:
+      - sync
+      - --organization=${PLATFORM_ORG:?set PLATFORM_ORG in .env}
+      - --project=${PLATFORM_PROJECT:?set PLATFORM_PROJECT in .env}
+      - --key-file=/run/secrets/platform_key
+      - --route=platform
+      - --out=/home/nonroot
+      - --instance=compose
+    secrets: [platform_key]
+    # Mounted on the image's own nonroot home, so the volume starts out writable by the
+    # nonroot user both images run as.
+    volumes: ["table:/home/nonroot"]
+
+  filter:
+    command:
+      - -prices-dir=/etc/x402/table
+      - -redis=redis:6379
+      - -networks=testnet,base-sepolia # the networks the project's payment options use
+    volumes: ["table:/etc/x402/table:ro"]
+    depends_on: [redis, sync]
+
+secrets:
+  platform_key:
+    file: ${PLATFORM_KEY_FILE:?set PLATFORM_KEY_FILE in .env to the file holding the connector key}
+
+volumes:
+  table: {}
