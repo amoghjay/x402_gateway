@@ -111,6 +111,7 @@ const (
 	Deadline                 Decision = "deadline"                   // 503 + Retry-After: the balance read overran the filter's deadline
 	DependencyUnavailable    Decision = "dependency_unavailable"     // 503 + Retry-After: Redis or the RPC failed
 	Unpriced                 Decision = "unpriced"                   // continue: the route has no price (a policy being removed)
+	UnpricedRefused          Decision = "unpriced_refused"           // 503: the route has no price and this filter refuses unpriced routes (standalone)
 	PolicyInvalid            Decision = "policy_invalid"             // 503: the route's policy or price entry is invalid; refused, never served free
 	NoRouteAttribute         Decision = "no_route_attribute"         // 500: the policy does not send xds.route_name
 	TableNotLoaded           Decision = "table_not_loaded"           // 503: no price table yet
@@ -195,12 +196,14 @@ func (p *Payments) verifyTimeout() time.Duration {
 // Server is the ext_proc server.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	log      *slog.Logger
-	delay    time.Duration
-	prices   *pricing.Store
-	pay      *Payments
-	counters *counter.Store   // platform routes' limits; nil reads every counter as failed
-	now      func() time.Time // the policy's clock: counter windows; tests set it
+	log            *slog.Logger
+	delay          time.Duration
+	prices         *pricing.Store
+	pay            *Payments
+	counters       *counter.Store   // platform routes' limits; nil reads every counter as failed
+	now            func() time.Time // the policy's clock: counter windows; tests set it
+	keys           pricing.KeyStyle // how Envoy's route names map to table keys
+	refuseUnpriced bool             // a route missing from the table gets a 503, not a free pass
 }
 
 // NewServer returns a Server that prices requests from prices and logs one decision per
@@ -208,6 +211,22 @@ type Server struct {
 // timeout drill and is 0 otherwise.
 func NewServer(log *slog.Logger, delay time.Duration, prices *pricing.Store) *Server {
 	return &Server{log: log, delay: delay, prices: prices, now: time.Now}
+}
+
+// WithRouteKeys sets how Envoy's route names map to table keys: Envoy Gateway's HTTPRoute
+// names (the default), or plain route names for a standalone Envoy.
+func (s *Server) WithRouteKeys(k pricing.KeyStyle) *Server {
+	s.keys = k
+	return s
+}
+
+// RefuseUnpriced makes a route missing from the table a 503 instead of a free pass. A
+// standalone filter sits in front of every route in envoy.yaml, so a name that does not
+// match the table (a typo) must fail closed. In a cluster only priced routes reach the
+// filter, and the free pass covers a PaymentPolicy being deleted.
+func (s *Server) RefuseUnpriced(refuse bool) *Server {
+	s.refuseUnpriced = refuse
+	return s
 }
 
 // WithPayments wires the paid path.
@@ -320,9 +339,13 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 
 	// Fail closed on anything that means the filter cannot tell what the route costs.
 	// Envoy's failOpen stays false, so these answers reach the client as they are.
-	key, ok := pricing.RouteKey(route)
+	key, ok := s.keys.Key(route)
 	if !ok {
-		log.Error("no usable xds.route_name; check the EnvoyExtensionPolicy's processingMode.request.attributes", "decision", NoRouteAttribute)
+		hint := "check the EnvoyExtensionPolicy's processingMode.request.attributes"
+		if s.keys == pricing.KeysName {
+			hint = `check that envoy.yaml names the route and lists "xds.route_name" in the ext_proc filter's request_attributes`
+		}
+		log.Error("no usable xds.route_name; "+hint, "decision", NoRouteAttribute)
 		return plain(http.StatusInternalServerError, "x402 filter: route not identified\n", NoRouteAttribute)
 	}
 	log = log.With("routeKey", key)
@@ -342,6 +365,10 @@ func (s *Server) requestHeaders(ctx context.Context, req *extprocv3.ProcessingRe
 		return s.platformRequest(ctx, req, h, st, key, table, pr)
 	}
 	entry, ok := table.Lookup(key)
+	if !ok && s.refuseUnpriced {
+		log.Error("route is not in the price table; refused", "decision", UnpricedRefused)
+		return plain(http.StatusServiceUnavailable, "x402 filter: route not priced\n", UnpricedRefused)
+	}
 	if !ok {
 		// A policy attached the route to the filter, but the table has no price for it:
 		// the window while a PaymentPolicy is deleted (M4 removes the extension policy

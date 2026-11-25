@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -88,30 +89,46 @@ func (w *Watcher) apply(obj any) {
 		return
 	}
 	log := w.Log.With("configmap", cm.Namespace+"/"+cm.Name, "resourceVersion", cm.ResourceVersion)
-	data, ok := cm.Data[ConfigMapKey]
+	w.done(load(w.Store, cm.Data, KeysHTTPRoute, w.Networks, log))
+}
+
+// Build turns a table's files, by name, into a table: prices.json parsed in the key style,
+// then the compiled policies and key directories beside it, keeping prev's where a newer
+// one cannot be read. The files are a ConfigMap's keys (Watcher) or a directory's files
+// (DirWatcher); both come through here, so the two sources behave the same. A nil table
+// means prices.json is missing or unreadable; otherwise err names any blocked routes.
+func Build(data map[string]string, prev *Prices, keys KeyStyle, networks []radius.Profile, log *slog.Logger) (*Prices, error) {
+	raw, ok := data[ConfigMapKey]
 	if !ok {
-		log.Error("price table rejected; serving the last good table", "err", "no "+ConfigMapKey+" key", "loaded", w.Store.Load() != nil)
-		metrics.PriceTableRejected()
-		w.done(false)
-		return
+		return nil, errors.New("no " + ConfigMapKey)
 	}
-	p, err := Parse([]byte(data), w.Networks...)
+	p, err := ParseKeys([]byte(raw), keys, networks...)
 	if p == nil {
-		log.Error("price table rejected; serving the last good table", "err", err, "loaded", w.Store.Load() != nil)
-		metrics.PriceTableRejected()
-		w.done(false)
-		return
+		return nil, err
 	}
-	p.LoadPolicies(cm.Data, w.Store.Load(), log)
-	p.LoadAgents(cm.Data, w.Store.Load(), log)
-	w.Store.Set(p)
+	p.LoadPolicies(data, prev, log)
+	p.LoadAgents(data, prev, log)
+	return p, err
+}
+
+// load builds a table and puts it in force, or keeps the last good one: the controller
+// (or whoever writes the files) being down or wrong must not make priced routes free. It
+// reports whether a table was stored.
+func load(store *Store, data map[string]string, keys KeyStyle, networks []radius.Profile, log *slog.Logger) bool {
+	p, err := Build(data, store.Load(), keys, networks, log)
+	if p == nil {
+		metrics.PriceTableRejected()
+		log.Error("price table rejected; serving the last good table", "err", err, "loaded", store.Load() != nil)
+		return false
+	}
+	store.Set(p)
 	if blocked := p.BlockedKeys(); len(blocked) > 0 {
 		// Loaded: the blocked routes answer 503 until their policy is fixed.
 		log.Error("price table loaded with blocked routes; they answer 503", "routes", p.Len(), "platformRoutes", p.PlatformLen(), "blocked", blocked, "err", errText(err))
 	} else {
 		log.Info("price table loaded", "routes", p.Len(), "platformRoutes", p.PlatformLen())
 	}
-	w.done(true)
+	return true
 }
 
 func (w *Watcher) done(accepted bool) {

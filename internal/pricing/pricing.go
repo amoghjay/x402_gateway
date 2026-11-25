@@ -238,6 +238,22 @@ func (p *Prices) BlockedKeys() []string {
 	return slices.Sorted(maps.Keys(p.blocked))
 }
 
+// Keys lists the priced routes' keys, sorted.
+func (p *Prices) Keys() []string {
+	if p == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(p.entries))
+}
+
+// PlatformKeys lists the routes a Radius Platform project governs, sorted.
+func (p *Prices) PlatformKeys() []string {
+	if p == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(p.platform))
+}
+
 // Len is the number of priced routes.
 func (p *Prices) Len() int {
 	if p == nil {
@@ -255,6 +271,12 @@ func (p *Prices) Len() int {
 // one: a caller that loads tables (the filter) serves it and logs the error; a caller
 // that checks tables (the controller) treats any error as a refusal.
 func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
+	return ParseKeys(data, KeysHTTPRoute, networks...)
+}
+
+// ParseKeys is Parse for a table keyed in the given style: the controller's tables are
+// KeysHTTPRoute, a standalone filter's are KeysName.
+func ParseKeys(data []byte, keys KeyStyle, networks ...radius.Profile) (*Prices, error) {
 	// Unmarshal also rejects trailing data after the table.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
@@ -291,8 +313,8 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 
 	out := &Prices{entries: make(map[string]*Entry, len(routes)), blocked: map[string]string{}, platform: map[string]PlatformRoute{}, networks: networks}
 	for k, why := range blocked {
-		if rk, ok := RouteKey(k + "/"); !ok || rk != k {
-			return nil, fmt.Errorf("pricing: blocked route %q: key must be \"httproute/<namespace>/<name>\"", k)
+		if err := keys.check(k); err != nil {
+			return nil, fmt.Errorf("pricing: blocked route %q: %w", k, err)
 		}
 		out.blocked[k] = "policy invalid: " + why
 	}
@@ -301,7 +323,7 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 		if _, ok := out.blocked[k]; ok {
 			continue // blocked wins
 		}
-		pr, err := parsePlatformRoute(k, platform[k])
+		pr, err := parsePlatformRoute(k, platform[k], keys)
 		if err == nil {
 			if _, priced := routes[k]; priced {
 				err = errors.New("listed with a price and a platform project")
@@ -322,7 +344,7 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 		if _, ok := platform[k]; ok {
 			continue // blocked above, for being both
 		}
-		e, err := parseRoute(k, routes[k], networks)
+		e, err := parseRoute(k, routes[k], networks, keys)
 		if err != nil {
 			err = fmt.Errorf("route %q: %w", k, err)
 			out.blocked[k] = err.Error()
@@ -338,9 +360,9 @@ func Parse(data []byte, networks ...radius.Profile) (*Prices, error) {
 }
 
 // parsePlatformRoute decodes and checks one platform entry.
-func parsePlatformRoute(key string, raw json.RawMessage) (PlatformRoute, error) {
-	if rk, ok := RouteKey(key + "/"); !ok || rk != key {
-		return PlatformRoute{}, errors.New(`key must be "httproute/<namespace>/<name>"`)
+func parsePlatformRoute(key string, raw json.RawMessage, keys KeyStyle) (PlatformRoute, error) {
+	if err := keys.check(key); err != nil {
+		return PlatformRoute{}, err
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -367,13 +389,13 @@ var projectID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 // ValidateRoute is Parse's check of one route: what the controller runs on a policy
 // before it puts the route in the table.
 func ValidateRoute(key string, r Route, networks ...radius.Profile) error {
-	_, err := validate(key, r, networks)
+	_, err := validate(key, r, networks, KeysHTTPRoute)
 	return err
 }
 
 // parseRoute decodes one route strictly (exact key spelling, no unknown fields) and
 // validates it.
-func parseRoute(key string, raw json.RawMessage, networks []radius.Profile) (*Entry, error) {
+func parseRoute(key string, raw json.RawMessage, networks []radius.Profile, keys KeyStyle) (*Entry, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -391,7 +413,7 @@ func parseRoute(key string, raw json.RawMessage, networks []radius.Profile) (*En
 	if err := strictDecode(raw, &r); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return validate(key, r, networks)
+	return validate(key, r, networks, keys)
 }
 
 // strictDecode is json.Unmarshal that refuses unknown fields.
@@ -425,9 +447,9 @@ func keysOf(obj map[string]json.RawMessage, v any, where string) error {
 // dnsName is a Kubernetes namespace or object name, loosely (RFC 1123 subdomain).
 var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
 
-func validate(key string, r Route, networks []radius.Profile) (*Entry, error) {
-	if k, ok := RouteKey(key + "/"); !ok || k != key {
-		return nil, errors.New(`key must be "httproute/<namespace>/<name>"`)
+func validate(key string, r Route, networks []radius.Profile, keys KeyStyle) (*Entry, error) {
+	if err := keys.check(key); err != nil {
+		return nil, err
 	}
 	i := slices.IndexFunc(networks, func(p radius.Profile) bool { return p.Network() == r.Network })
 	if i < 0 {
