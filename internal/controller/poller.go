@@ -57,6 +57,13 @@ type Poller struct {
 	// DirectoryClient fetches Web Bot Auth key directories; NewDirectoryClient when nil.
 	DirectoryClient *http.Client
 
+	// Seams for running without a cluster (Standalone). Nil means the cluster behaviour:
+	// the projects come from PaymentPolicies, the key from a labelled Secret, and a change
+	// is sent to the Reconciler.
+	listProjects func(ctx context.Context) (map[string]*platformRef, error)
+	readKey      func(ctx context.Context, s platformSettings) (string, error)
+	onChange     func()
+
 	now    func() time.Time // tests
 	events chan event.GenericEvent
 	kick   chan struct{}
@@ -192,12 +199,11 @@ func (p *Poller) Start(ctx context.Context) error {
 // pollDue fetches every project that is due, one at a time: there are few, and a slow
 // Platform should not open a connection per project at once.
 func (p *Poller) pollDue(ctx context.Context) {
-	var list v1alpha1.PaymentPolicyList
-	if err := p.Policies.List(ctx, &list); err != nil {
+	named, err := p.projectsToFetch(ctx)
+	if err != nil {
 		p.Log.Error("list PaymentPolicies", "err", err)
 		return
 	}
-	named := platformProjects(list.Items)
 
 	p.mu.Lock()
 	for id := range p.projects {
@@ -251,7 +257,7 @@ func (p *Poller) poll(ctx context.Context, id string, s platformSettings) bool {
 		err    error
 		reason = v1alpha1.ReasonFetchFailed
 	)
-	key, err := p.apiKey(ctx, s)
+	key, err := p.key(ctx, s)
 	if err == nil {
 		res, err = p.Fetcher.Fetch(ctx, platform.Project{BaseURL: p.BaseURL, OrganizationID: s.OrganizationID, ProjectID: id}, key, have)
 	}
@@ -309,6 +315,26 @@ func (p *Poller) wait(pr *project) time.Duration {
 	return max(time.Duration(float64(p.Interval)*(0.9+0.2*rand.Float64())), minPollGap) //nolint:gosec // poll jitter, not a secret
 }
 
+// projectsToFetch is every project a PaymentPolicy names, or the Standalone's one project.
+func (p *Poller) projectsToFetch(ctx context.Context) (map[string]*platformRef, error) {
+	if p.listProjects != nil {
+		return p.listProjects(ctx)
+	}
+	var list v1alpha1.PaymentPolicyList
+	if err := p.Policies.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	return platformProjects(list.Items), nil
+}
+
+// key is a project's Platform API key: from its labelled Secret, or the Standalone's file.
+func (p *Poller) key(ctx context.Context, s platformSettings) (string, error) {
+	if p.readKey != nil {
+		return p.readKey(ctx, s)
+	}
+	return p.apiKey(ctx, s)
+}
+
 func (p *Poller) apiKey(ctx context.Context, s platformSettings) (string, error) {
 	var sec corev1.Secret
 	if err := p.Secrets.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: s.SecretName}, &sec); err != nil {
@@ -327,6 +353,10 @@ func (p *Poller) apiKey(ctx context.Context, s platformSettings) (string, error)
 // notify enqueues each policy naming a project whose state changed. It never blocks the
 // poll loop: the channel is buffered, and the Reconciler also runs on every policy event.
 func (p *Poller) notify(policies []client.ObjectKey) {
+	if p.onChange != nil {
+		p.onChange()
+		return
+	}
 	for _, k := range policies {
 		pp := &v1alpha1.PaymentPolicy{}
 		pp.Namespace, pp.Name = k.Namespace, k.Name
